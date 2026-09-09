@@ -8,7 +8,7 @@ import random
 from .actions import Action, ActionType, IllegalActionError, LegalActions
 from .cards import Card
 from .deck import Deck
-from .evaluator import evaluate
+from .evaluator import best_five, evaluate
 from .state import GameState, PlayerState, Street
 
 
@@ -48,6 +48,9 @@ class PokerEngine:
         self.last_net: dict[int, int] = {}
         self.history: list[dict[str, object]] = []
         self._hand_start_stacks: list[int] = []
+        # 摊牌结算的展示明细：各玩家最佳 5 张牌、各边池归属（仅摊牌时填充）。
+        self.showdown_hands: dict[int, list[Card]] = {}
+        self.pot_results: list[dict[str, object]] = []
 
     # ------------------------------------------------------------------ 对外只读
 
@@ -111,6 +114,8 @@ class PokerEngine:
         self.last_net = {}
         self.history = []
         self._hand_start_stacks = [p.stack for p in self.players]
+        self.showdown_hands = {}
+        self.pot_results = []
 
         self.deck.shuffle()
         for _ in range(2):
@@ -395,18 +400,27 @@ class PokerEngine:
             for i in range(self.num_players)
             if not self.players[i].folded
         }
+        self.showdown_hands = {
+            i: best_five(self.players[i].hole_cards + self.board)
+            for i in range(self.num_players)
+            if not self.players[i].folded
+        }
         winners: set[int] = set()
+        self.pot_results = []
         for amount, eligible in pots:
             best = max(ranks[i] for i in eligible)
             pot_winners = [i for i in eligible if ranks[i] == best]
+            ordered = sorted(pot_winners)
             share = amount // len(pot_winners)
             remainder = amount % len(pot_winners)
+            shares = {w: share + (1 if idx < remainder else 0) for idx, w in enumerate(ordered)}
             for w in pot_winners:
                 self.players[w].stack += share
                 winners.add(w)
             # 余数筹码按座位号升序依次分配，保证确定性。
-            for w in sorted(pot_winners)[:remainder]:
+            for w in ordered[:remainder]:
                 self.players[w].stack += 1
+            self.pot_results.append({"amount": amount, "winners": ordered, "shares": shares})
         self.winners = sorted(winners)
 
     def _record_last_net(self) -> None:

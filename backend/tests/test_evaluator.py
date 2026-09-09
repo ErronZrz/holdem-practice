@@ -1,6 +1,6 @@
 """牌力评估测试。"""
 
-from app.poker.evaluator import evaluate
+from app.poker.evaluator import best_five, evaluate, sort_five
 from app.poker.hand import HandCategory
 
 from .helpers import cards
@@ -65,3 +65,25 @@ def test_ordering() -> None:
     assert evaluate(cards("As Ad Ah Ac Ks")) > evaluate(cards("Ks Kd Kh Kc As"))
     assert evaluate(cards("As Ad 7h 3c 2s")) > evaluate(cards("Kd Kh 7h 3c 2s"))
     assert evaluate(cards("As Kd Qh Jc 9s")) > evaluate(cards("As Kd Qh Jc 8s"))
+
+
+def test_best_five_selects_strongest() -> None:
+    # 从 7 张牌中选出的 5 张，牌力应等于全部 7 张的最强牌力。
+    for hand in ["As Ks Qs Js Ts 2c 2d", "Ah Ad Ac Kd Kc 2s 3s", "7h 8d 9s Tc Jd 2h 4c"]:
+        seven = cards(hand)
+        five = best_five(seven)
+        assert len(five) == 5
+        assert evaluate(five) == evaluate(seven)
+
+
+def test_sort_five_orders_by_hand_structure() -> None:
+    # 两对：大对、小对、踢脚。
+    assert [c.rank.value for c in sort_five(cards("3d Kc 3s Kh Qd"))] == [13, 13, 3, 3, 12]
+    # 三条：三条在前，踢脚从大到小。
+    assert [c.rank.value for c in sort_five(cards("Qd 8c 8s Kh 8d"))] == [8, 8, 8, 13, 12]
+    # 普通顺子：从小到大。
+    assert [c.rank.value for c in sort_five(cards("9d 6c 7s 8h 5d"))] == [5, 6, 7, 8, 9]
+    # 轮子顺子：A 记低，从小到大 A 2 3 4 5。
+    assert [c.rank.value for c in sort_five(cards("2d 3c 4s 5h Ad"))] == [14, 2, 3, 4, 5]
+    # 葫芦：三条在前，对子在后。
+    assert [c.rank.value for c in sort_five(cards("Kh Kc 8d 8h 8s"))] == [8, 8, 8, 13, 13]
