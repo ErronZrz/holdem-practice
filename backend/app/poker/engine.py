@@ -154,18 +154,23 @@ class PokerEngine:
         max_raise_to = 0
 
         if p.stack > 0:
-            if to_call == 0:
+            if to_call == 0 and self.street != Street.PREFLOP:
+                # 翻牌后无人下注时，第一个投入是下注。
                 can_bet = True
                 min_bet = min(self.big_blind, all_in_total)
                 max_bet = all_in_total
-            elif not p.has_acted_since_full_raise and all_in_total > self.current_bet:
+            elif all_in_total > self.current_bet and (
+                to_call == 0 or not p.has_acted_since_full_raise
+            ):
+                # 其余可继续投入的情况（翻牌前大盲加注、翻牌后面对下注再加注）都是加注。
                 can_raise = True
                 full_min = self.current_bet + self.min_raise
                 min_raise_to = full_min if all_in_total >= full_min else all_in_total
                 max_raise_to = all_in_total
 
         return LegalActions(
-            can_fold=True,
+            # 面对下注时才可弃牌；可免费过牌时不提供弃牌（过牌是严格更优的免费选项）。
+            can_fold=to_call > 0,
             can_check=can_check,
             can_call=can_call,
             call_amount=to_call,

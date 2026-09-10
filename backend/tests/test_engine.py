@@ -44,6 +44,51 @@ def test_blinds_heads_up() -> None:
     assert not legal.can_check
 
 
+def test_preflop_big_blind_option_is_raise() -> None:
+    engine = PokerEngine(2, small_blind=5, big_blind=10, starting_stack=1000, seed=0)
+    engine.start_hand()
+    engine.apply_action(_call())  # 小盲补足到大盲
+    # 大盲位已投入盲注，此时额外投入应为加注而非下注。
+    assert engine.current_seat == 1
+    legal = engine.legal_actions()
+    assert legal.can_check
+    assert legal.can_raise
+    assert not legal.can_bet
+    assert legal.min_raise_to == 20
+    engine.apply_action(_raise(20))
+    assert engine.current_bet == 20
+
+
+def test_legal_action_combinations() -> None:
+    # 普通玩家面对下注是「弃/跟/加」三选，无人下注时是「过牌/下注」二选；
+    # 翻牌前大盲在其余人全 limp 时是「过牌/加注」特殊组合。可免费过牌时不应有弃牌。
+    engine = PokerEngine(2, small_blind=5, big_blind=10, starting_stack=1000, seed=0)
+    engine.start_hand()
+
+    # 翻牌前小盲面对盲注：弃 / 跟 / 加。
+    la = engine.legal_actions()
+    assert la.can_fold and la.can_call and la.can_raise
+    assert not la.can_check and not la.can_bet
+
+    # 翻牌前大盲面对全 limp：过牌 / 加注（无弃牌、无下注）。
+    engine.apply_action(_call())
+    la = engine.legal_actions()
+    assert la.can_check and la.can_raise
+    assert not la.can_fold and not la.can_call and not la.can_bet
+
+    # 翻牌后无人下注：过牌 / 下注（无弃牌）。
+    engine.apply_action(_check())
+    la = engine.legal_actions()
+    assert la.can_check and la.can_bet
+    assert not la.can_fold and not la.can_call and not la.can_raise
+
+    # 翻牌后面对下注：弃 / 跟 / 加。
+    engine.apply_action(_bet(20))
+    la = engine.legal_actions()
+    assert la.can_fold and la.can_call and la.can_raise
+    assert not la.can_check and not la.can_bet
+
+
 def test_blinds_three_players_utg_first() -> None:
     engine = PokerEngine(3, small_blind=5, big_blind=10, starting_stack=1000, seed=0)
     engine.start_hand()
