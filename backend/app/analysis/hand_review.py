@@ -5,18 +5,23 @@
 - 用蒙特卡洛估算「自己底牌面对随机对手范围」的摊牌胜率——与打牌时的信息边界一致，
   不读取对手真实底牌来算胜率，避免上帝视角作弊；
 - 给出轻量 EV 参考量（胜率、底池赔率、跟注期望收益）与明显错误标记；
-- 附上「参考 Bot（heuristic）在同一局面会怎么做」作为对比。
+- 附上「保守参考策略在同一局面会怎么做」作为对比：翻牌后面对下注时，在启发式 Bot 的
+  跟注基础上额外要求赔率有余量与可继续的牌力（真实成手牌或强听牌），避免用高张盲目跟注。
 
 本模块只读引擎公开状态、不修改引擎，属于 analysis 层对 poker 层公开能力的消费。
 """
 
 import random
+from collections.abc import Sequence
 
-from app.poker.actions import Action, ActionType
+from app.poker.actions import Action, ActionType, LegalActions
 from app.poker.cards import Card, card_from_str
 from app.poker.engine import PokerEngine
 from app.poker.equity import equity
-from app.strategy.heuristic import HeuristicStrategy
+from app.poker.evaluator import evaluate
+from app.poker.hand import HandCategory
+from app.poker.state import GameState, PlayerState, Street
+from app.strategy.heuristic import HeuristicStrategy, draw_outs
 
 # 复盘胜率采样数：高于策略层的 500，复盘可接受更慢以求更稳。
 _EQUITY_SAMPLES = 1000
@@ -42,6 +47,11 @@ _SLOWPLAY_EQ = 0.90
 _AIR_EQ = 0.25
 # 低胜率加注视为过度激进的上限。
 _OVER_AGGRESSIVE_EQ = 0.50
+# 保守参考动作所需的强听牌补牌数下限（开放式顺子 / 同花听牌）。
+_STRONG_DRAW_OUTS = 8
+# 保守参考动作的小注例外：跟注额不超过底池的 1/3 时放宽牌力要求，高张也可便宜看牌。
+_SMALL_BET_NUM = 1
+_SMALL_BET_DEN = 3
 
 
 def _fold_margin(to_call: int, pot: int) -> float:
@@ -49,6 +59,60 @@ def _fold_margin(to_call: int, pot: int) -> float:
     if pot <= 0:
         return _FOLD_EV_MARGIN
     return _FOLD_EV_MARGIN + _FOLD_BET_SCALE * (to_call / pot)
+
+
+def _is_made_hand(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
+    """底牌是否参与成牌：口袋对、与公共牌配对，或公共牌本身构成三条及以上。
+
+    排除「仅靠公共牌成对」（底牌只当踢脚的一对/两对），这类牌面对下注难以兑现。
+    """
+    ranks = [c.rank.value for c in hole_cards]
+    if ranks[0] == ranks[1]:
+        return True
+    board_ranks = {c.rank.value for c in board}
+    if any(r in board_ranks for r in ranks):
+        return True
+    if len(board) < 3:
+        return False
+    return evaluate([*hole_cards, *board]).category >= HandCategory.THREE_OF_A_KIND
+
+
+def _has_playable_strength(
+    hole_cards: Sequence[Card],
+    board: Sequence[Card],
+    to_call: int,
+    pot: int,
+) -> bool:
+    """是否具备可继续的牌力：真实成手牌或强听牌；跟注额很小时放宽。"""
+    if to_call * _SMALL_BET_DEN <= pot * _SMALL_BET_NUM:
+        return True
+    if _is_made_hand(hole_cards, board):
+        return True
+    return len(board) < 5 and draw_outs(list(hole_cards), tuple(board)) >= _STRONG_DRAW_OUTS
+
+
+def _conservative_action(
+    snapshot: GameState,
+    legal: LegalActions,
+    me: PlayerState,
+    eq: float,
+    bot_action: Action,
+) -> Action:
+    """把 Bot 在「翻牌后面对下注」的宽松跟注收窄为保守参考动作。
+
+    仅在 Bot 建议跟注时介入：要求胜率对底池赔率有余量，且底牌有可继续的牌力
+    （真实成手牌或强听牌），跟注额很小时放宽。加注、翻牌前与无人下注的动作沿用 Bot。
+    """
+    if snapshot.street == Street.PREFLOP or legal.call_amount <= 0:
+        return bot_action
+    if bot_action.type != ActionType.CALL:
+        return bot_action
+    pot_odds = legal.call_amount / (snapshot.pot + legal.call_amount)
+    has_margin = eq > pot_odds + _fold_margin(legal.call_amount, snapshot.pot)
+    playable = _has_playable_strength(
+        me.hole_cards, snapshot.board, legal.call_amount, snapshot.pot
+    )
+    return bot_action if has_margin and playable else Action(ActionType.FOLD)
 
 
 def _history_action(record: dict) -> Action:
@@ -71,12 +135,13 @@ def _detect_mistakes(
     equity: float,
     pot_odds: float | None,
     to_call: int,
-    board_len: int,
     pot: int,
     can_raise: bool,
+    hole_cards: Sequence[Card],
+    board: Sequence[Card],
 ) -> list[dict]:
     """按既定规则对单个决策点做错误检测，返回命中的错误标记列表。"""
-    postflop = board_len > 0
+    postflop = len(board) > 0
     mistakes: list[dict] = []
 
     if to_call > 0:
@@ -94,9 +159,11 @@ def _detect_mistakes(
                 }
             )
         if action.type == ActionType.FOLD and pot_odds is not None:
-            # 翻牌前胜率不足时，弃牌不构成明显错误。
+            # 翻牌前胜率不足时，弃牌不构成明显错误；
+            # 翻牌后还要求底牌有可继续的牌力，与保守参考动作的跟注标准一致。
             strong_enough = postflop or equity >= _FOLD_MIN_EQ_PREFLOP
-            if strong_enough and equity > pot_odds + _fold_margin(to_call, pot):
+            playable = not postflop or _has_playable_strength(hole_cards, board, to_call, pot)
+            if strong_enough and playable and equity > pot_odds + _fold_margin(to_call, pot):
                 message = f"胜率 {equity:.0%} 明显高于赔率 {pot_odds:.0%}，弃牌可能放弃正 EV"
                 mistakes.append(
                     {"code": "bad_fold", "severity": "warning", "message": message}
@@ -166,6 +233,7 @@ def _analyze_decision(
     pot_odds = to_call / (snapshot.pot + to_call) if to_call > 0 else None
     call_ev = round(eq * (snapshot.pot + to_call) - to_call) if to_call > 0 else None
     bot_action = reference_bot.choose_action(snapshot, legal)
+    bot_action = _conservative_action(snapshot, legal, hero_state, eq, bot_action)
 
     return {
         "street": snapshot.street.name.lower(),
@@ -183,9 +251,10 @@ def _analyze_decision(
             equity=eq,
             pot_odds=pot_odds,
             to_call=to_call,
-            board_len=len(snapshot.board),
             pot=snapshot.pot,
             can_raise=legal.can_raise,
+            hole_cards=hero_state.hole_cards,
+            board=snapshot.board,
         ),
     }
 
@@ -238,7 +307,7 @@ def build_review(history: dict) -> dict:
     return {
         "hand_number": history["hand_number"],
         "human_seat": human_seat,
-        "reference_strategy": "heuristic",
+        "reference_strategy": "heuristic-conservative",
         "decisions": decisions,
         "mistake_count": sum(len(d["mistakes"]) for d in decisions),
     }

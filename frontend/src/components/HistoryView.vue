@@ -2,6 +2,7 @@
 import { onActivated, ref } from 'vue'
 import { api } from '../api.js'
 import { ACTION_CN, HAND_CATEGORY_CN, STREET_CN, actionText as actionLabel } from '../cards.js'
+import { copyText } from '../clipboard.js'
 import PlayingCard from './PlayingCard.vue'
 
 const sessions = ref([])
@@ -9,6 +10,7 @@ const selectedSession = ref(null)
 const hands = ref([])
 const selectedHand = ref(null)
 const review = ref(null)
+const copiedHandId = ref('')
 const error = ref('')
 
 function playerName(history, seat) {
@@ -74,6 +76,14 @@ async function selectHand(id) {
   } catch (e) {
     error.value = e.message
   }
+}
+
+async function copyHandId(id) {
+  if (!(await copyText(id))) return
+  copiedHandId.value = id
+  setTimeout(() => {
+    if (copiedHandId.value === id) copiedHandId.value = ''
+  }, 1500)
 }
 
 function netOf(history, seat) {
@@ -192,8 +202,46 @@ onActivated(() => {
         <div v-if="review" class="review">
           <h4>复盘</h4>
           <p class="muted">
-            参考策略：启发式（vs 随机胜率 + 底池赔率） ·
+            参考策略：启发式-保守（vs 随机胜率 + 底池赔率 + 牌力门槛） ·
             共 {{ review.decisions.length }} 个决策点 · 命中 {{ review.mistake_count }} 处问题
+          </p>
+          <p class="muted hand-id-line">
+            手牌 ID：<code class="hand-id">{{ review.hand_id }}</code>
+            <button
+              class="copy-id"
+              :class="{ copied: copiedHandId === review.hand_id }"
+              type="button"
+              :title="copiedHandId === review.hand_id ? '已复制' : '复制手牌 ID'"
+              aria-label="复制手牌 ID"
+              @click="copyHandId(review.hand_id)"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                width="17"
+                height="17"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.8"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                aria-hidden="true"
+              >
+                <path
+                  v-if="copiedHandId === review.hand_id"
+                  d="m5.5 12.5 4 4 9-9"
+                  stroke-width="2.2"
+                />
+                <g v-else>
+                  <!-- 后层：靠近前层的位置断开 -->
+                  <path d="M13 5H7a2 2 0 0 0-2 2v6" />
+                  <path d="M15 8V7a2 2 0 0 0-2-2" />
+                  <path d="M8 15H7a2 2 0 0 1-2-2" />
+
+                  <!-- 前层：接近正方形 -->
+                  <rect x="8.7" y="8.7" width="10.3" height="10.3" rx="2" />
+                </g>
+              </svg>
+            </button>
           </p>
           <div v-for="(d, i) in review.decisions" :key="i" class="review-decision">
             <div class="review-street">
@@ -357,6 +405,36 @@ select {
 
 .review h4 {
   margin: 0 0 6px;
+}
+
+.hand-id-line {
+  margin: 0 0 8px;
+  font-size: 12px;
+}
+
+.hand-id {
+  user-select: all;
+  cursor: text;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.copy-id {
+  margin-left: 6px;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  vertical-align: middle;
+  line-height: 0;
+}
+
+.copy-id:hover {
+  color: #334155;
+}
+
+.copy-id.copied {
+  color: #16a34a;
 }
 
 .review-decision {

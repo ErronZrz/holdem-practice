@@ -97,8 +97,11 @@ def _set_mine_within(call_amount: int, stack: int) -> bool:
     return call_amount * _SET_MINE_IMPLIED <= stack
 
 
-def _draw_outs(hole_cards: list[Card], board: tuple[Card, ...]) -> int:
-    """统计「再发一张牌即可形成顺子或更高级牌型」的补牌数，用于衡量听牌强度。"""
+def draw_outs(hole_cards: list[Card], board: tuple[Card, ...]) -> int:
+    """统计「再发一张牌即可形成顺子或更高级牌型」的补牌数，用于衡量听牌强度。
+
+    对复盘等只读消费方公开，避免在其内部重复实现补牌统计。
+    """
     known = set(hole_cards) | set(board)
     outs = 0
     for suit in Suit:
@@ -211,7 +214,7 @@ class HeuristicStrategy:
         if legal.can_bet:
             if eq >= _VALUE_BET_EQ:
                 return Action(ActionType.BET, self._bet_amount(state, legal))
-            outs = _draw_outs(me.hole_cards, state.board) if len(state.board) < 5 else 0
+            outs = draw_outs(me.hole_cards, state.board) if len(state.board) < 5 else 0
             if outs >= _DRAW_STRONG_OUTS:
                 return Action(ActionType.BET, self._bet_amount(state, legal))
             if eq < _AIR_EQ and self._rng.random() < self._bluff_freq:

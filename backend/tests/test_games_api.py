@@ -205,7 +205,7 @@ def test_hand_review_endpoint() -> None:
     body = review.json()
     assert body["hand_id"] == hands[0]["id"]
     assert body["human_seat"] == 0
-    assert body["reference_strategy"] == "heuristic"
+    assert body["reference_strategy"] == "heuristic-conservative"
     assert body["decisions"], "HU 对局中真人应至少有一个决策点"
     for d in body["decisions"]:
         assert d["action"]["action"] in ("fold", "check", "call", "bet", "raise")
