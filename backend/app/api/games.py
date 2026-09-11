@@ -49,6 +49,7 @@ class GameRuntime:
     bot_seats: list[int]
     hand_number: int
     last_bot_ts: float
+    last_hand_id: str | None = None
 
 
 def _make_bot(strategy_name: str, seed: int | None) -> Strategy:
@@ -91,13 +92,14 @@ def _finalize_hand(runtime: GameRuntime, db: Session) -> None:
     engine = runtime.engine
     history = build_hand_history(engine, runtime.hand_number, runtime.human_seat)
     human_net = engine.last_net.get(runtime.human_seat, 0)
-    repository.add_hand(
+    hand = repository.add_hand(
         db,
         session_id=runtime.session_id,
         hand_number=runtime.hand_number,
         history_json=json.dumps(history, ensure_ascii=False),
         net=human_net,
     )
+    runtime.last_hand_id = hand.id
     session = repository.get_session(db, runtime.session_id)
     session.hands_played += 1
     session.net_chips += human_net
@@ -205,6 +207,7 @@ def build_game_view(runtime: GameRuntime, db: Session) -> schemas.GameView:
         pot_results=pot_results,
         winners=list(engine.winners),
         last_net=dict(engine.last_net),
+        last_hand_id=runtime.last_hand_id,
     )
 
 

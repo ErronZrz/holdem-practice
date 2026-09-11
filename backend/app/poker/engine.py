@@ -51,6 +51,8 @@ class PokerEngine:
         # 摊牌结算的展示明细：各玩家最佳 5 张牌、各边池归属（仅摊牌时填充）。
         self.showdown_hands: dict[int, list[Card]] = {}
         self.pot_results: list[dict[str, object]] = []
+        # 回放模式下预置的公共牌序列（None 表示正常随机发牌）。
+        self._forced_board: list[Card] | None = None
 
     # ------------------------------------------------------------------ 对外只读
 
@@ -106,6 +108,33 @@ class PokerEngine:
     def start_hand(self) -> None:
         """开始一手新牌：轮转庄位、发底牌、下盲注并确定首个行动者。"""
         self.button = (self.button + 1) % self.num_players
+        self._begin_hand()
+        self.deck.shuffle()
+        for _ in range(2):
+            for p in self.players:
+                p.hole_cards.extend(self.deck.draw(1))
+        self._finish_hand_start()
+
+    def start_hand_with(
+        self,
+        button: int,
+        hole_cards: dict[int, list[Card]],
+        board: list[Card],
+    ) -> None:
+        """以已知底牌与公共牌开始一手牌（用于复盘重放与确定性测试）。
+
+        与 start_hand 的区别：庄位由调用方指定、底牌直接注入、公共牌按给定顺序发，
+        不随机洗牌。board 须按发牌顺序给出（翻牌 3 张 + 转牌 1 张 + 河牌 1 张）。
+        """
+        self.button = button
+        self._begin_hand()
+        for seat, cards in hole_cards.items():
+            self.players[seat].hole_cards = list(cards)
+        self._forced_board = list(board)
+        self._finish_hand_start()
+
+    def _begin_hand(self) -> None:
+        """重置一手牌所需的状态（不含庄位轮转与发牌）。"""
         self._reset_players()
         self.board = []
         self.street = Street.PREFLOP
@@ -116,12 +145,10 @@ class PokerEngine:
         self._hand_start_stacks = [p.stack for p in self.players]
         self.showdown_hands = {}
         self.pot_results = []
+        self._forced_board = None
 
-        self.deck.shuffle()
-        for _ in range(2):
-            for p in self.players:
-                p.hole_cards.extend(self.deck.draw(1))
-
+    def _finish_hand_start(self) -> None:
+        """下盲注并确定首个行动者（发牌之后的公共收尾）。"""
         self._post_blinds()
         self.current_bet = max(p.street_bet for p in self.players)
         self.min_raise = self.big_blind
@@ -344,10 +371,7 @@ class PokerEngine:
 
     def _advance_street(self) -> None:
         self.street = Street(self.street + 1)
-        if self.street == Street.FLOP:
-            self.board.extend(self.deck.draw(3))
-        else:
-            self.board.extend(self.deck.draw(1))
+        self.board.extend(self._draw_board(3 if self.street == Street.FLOP else 1))
         self.current_bet = 0
         self.min_raise = self.big_blind
         for p in self.players:
@@ -359,11 +383,16 @@ class PokerEngine:
         """无人可继续下注时，直接发完剩余公共牌进入摊牌。"""
         while self.street < Street.RIVER:
             self.street = Street(self.street + 1)
-            if self.street == Street.FLOP:
-                self.board.extend(self.deck.draw(3))
-            else:
-                self.board.extend(self.deck.draw(1))
+            self.board.extend(self._draw_board(3 if self.street == Street.FLOP else 1))
         self._end_hand(showdown=True)
+
+    def _draw_board(self, count: int) -> list[Card]:
+        """发 count 张公共牌；回放模式下从预置序列取，否则从牌堆取。"""
+        if self._forced_board is not None:
+            cards = self._forced_board[:count]
+            self._forced_board = self._forced_board[count:]
+            return cards
+        return self.deck.draw(count)
 
     def _end_hand(self, showdown: bool) -> None:
         if showdown:

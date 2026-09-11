@@ -54,6 +54,9 @@ _SUIT_TO_CHAR = {
     Suit.SPADES: "s",
 }
 
+_CHAR_TO_RANK = {ch: rank for rank, ch in _RANK_TO_CHAR.items()}
+_CHAR_TO_SUIT = {ch: suit for suit, ch in _SUIT_TO_CHAR.items()}
+
 
 @dataclass(frozen=True, slots=True)
 class Card:
@@ -64,3 +67,10 @@ class Card:
 
     def __str__(self) -> str:
         return f"{_RANK_TO_CHAR[self.rank]}{_SUIT_TO_CHAR[self.suit]}"
+
+
+def card_from_str(text: str) -> Card:
+    """把 "As"、"Th" 这类单张牌字符串解析为 Card，与 str(Card) 互逆。"""
+    if len(text) != 2:
+        raise ValueError(f"非法牌面表示：{text!r}")
+    return Card(_CHAR_TO_RANK[text[0]], _CHAR_TO_SUIT[text[1]])

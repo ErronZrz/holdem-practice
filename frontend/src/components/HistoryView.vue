@@ -1,13 +1,14 @@
 <script setup>
 import { onActivated, ref } from 'vue'
 import { api } from '../api.js'
-import { ACTION_CN, HAND_CATEGORY_CN, STREET_CN } from '../cards.js'
+import { ACTION_CN, HAND_CATEGORY_CN, STREET_CN, actionText as actionLabel } from '../cards.js'
 import PlayingCard from './PlayingCard.vue'
 
 const sessions = ref([])
 const selectedSession = ref(null)
 const hands = ref([])
 const selectedHand = ref(null)
+const review = ref(null)
 const error = ref('')
 
 function playerName(history, seat) {
@@ -60,13 +61,16 @@ async function loadHands(id) {
 async function selectSession(id) {
   selectedSession.value = id
   selectedHand.value = null
+  review.value = null
   await loadHands(id)
 }
 
 async function selectHand(id) {
   error.value = ''
+  review.value = null
   try {
     selectedHand.value = await api.getHand(id)
+    review.value = await api.getReview(id)
   } catch (e) {
     error.value = e.message
   }
@@ -78,6 +82,18 @@ function netOf(history, seat) {
 
 function showdownHandOf(history, seat) {
   return history.showdown_hands?.[String(seat)] || null
+}
+
+function pct(x) {
+  return x == null ? '—' : `${(x * 100).toFixed(0)}%`
+}
+
+function evText(x) {
+  return x == null ? '—' : (x > 0 ? '+' : '') + x
+}
+
+function mistakeClass(severity) {
+  return { error: 'mistake-error', warning: 'mistake-warning', info: 'mistake-info' }[severity] || ''
 }
 
 onActivated(() => {
@@ -171,6 +187,39 @@ onActivated(() => {
             <span v-if="pr.winners.length > 1" class="muted">
               （{{ pr.winners.map((w) => `${playerName(selectedHand.history, w)} +${pr.shares[w]}`).join('，') }}）
             </span>
+          </div>
+        </div>
+        <div v-if="review" class="review">
+          <h4>复盘</h4>
+          <p class="muted">
+            参考策略：启发式（vs 随机胜率 + 底池赔率） ·
+            共 {{ review.decisions.length }} 个决策点 · 命中 {{ review.mistake_count }} 处问题
+          </p>
+          <div v-for="(d, i) in review.decisions" :key="i" class="review-decision">
+            <div class="review-street">
+              <strong>{{ STREET_CN[d.street] || d.street }}</strong>
+              <span v-if="d.board.length" class="cards-mini">
+                <PlayingCard v-for="(c, j) in d.board" :key="j" :code="c" small />
+              </span>
+              <span class="muted">底池 {{ d.pot }} · 面对下注 {{ d.to_call }}</span>
+            </div>
+            <div class="review-row">
+              <span>你：{{ actionLabel(d.action) }}</span>
+              <span>参考：{{ actionLabel(d.bot_action) }}</span>
+            </div>
+            <div class="review-row muted">
+              <span>胜率 {{ pct(d.equity) }}</span>
+              <span v-if="d.pot_odds != null">赔率 {{ pct(d.pot_odds) }}</span>
+              <span v-if="d.call_ev != null">跟注 EV {{ evText(d.call_ev) }}</span>
+            </div>
+            <div
+              v-for="(m, k) in d.mistakes"
+              :key="k"
+              class="mistake"
+              :class="mistakeClass(m.severity)"
+            >
+              {{ m.message }}
+            </div>
           </div>
         </div>
       </div>
@@ -298,5 +347,58 @@ select {
 
 .pot-result {
   color: #334155;
+}
+
+.review {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.review h4 {
+  margin: 0 0 6px;
+}
+
+.review-decision {
+  padding: 10px 0;
+  border-bottom: 1px dashed #e2e8f0;
+}
+
+.review-street {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.review-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 14px;
+  color: #334155;
+}
+
+.mistake {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.mistake-error {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.mistake-warning {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.mistake-info {
+  background: #e0e7ff;
+  color: #3730a3;
 }
 </style>

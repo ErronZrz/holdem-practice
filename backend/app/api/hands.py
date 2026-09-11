@@ -6,6 +6,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from app.analysis.hand_review import build_review
 from app.storage import repository
 from app.storage.db import get_db
 from app.storage.models import HandModel
@@ -52,6 +53,25 @@ def get_hand(
         hand_number=hand.hand_number,
         created_at=hand.created_at.isoformat(),
         history=json.loads(hand.history_json),
+    )
+
+
+@router.get("/hands/{hand_id}/review", response_model=schemas.HandReview)
+def get_review(
+    hand_id: str,
+    db: Annotated[Session, Depends(get_db)],
+) -> schemas.HandReview:
+    hand = repository.get_hand(db, hand_id)
+    if hand is None:
+        raise HTTPException(status_code=404, detail="手牌记录不存在")
+    review = build_review(json.loads(hand.history_json))
+    return schemas.HandReview(
+        hand_id=hand.id,
+        hand_number=review["hand_number"],
+        human_seat=review["human_seat"],
+        reference_strategy=review["reference_strategy"],
+        decisions=review["decisions"],
+        mistake_count=review["mistake_count"],
     )
 
 

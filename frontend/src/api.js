@@ -45,6 +45,9 @@ export const api = {
   getHand(id) {
     return request(`/hands/${id}`)
   },
+  getReview(id) {
+    return request(`/hands/${id}/review`)
+  },
   getStats(id) {
     return request(`/games/${id}/stats`)
   },

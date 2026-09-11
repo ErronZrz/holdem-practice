@@ -100,6 +100,7 @@ class GameView(BaseModel):
     pot_results: list[PotResult] | None = None
     winners: list[int]
     last_net: dict[int, int]
+    last_hand_id: str | None = None
 
 
 class SessionSummary(BaseModel):
@@ -144,3 +145,45 @@ class HandDetail(BaseModel):
     hand_number: int
     created_at: str
     history: dict
+
+
+class Mistake(BaseModel):
+    """复盘中的单条错误标记。"""
+
+    code: str
+    severity: Literal["error", "warning", "info"]
+    message: str
+
+
+class ActionChoice(BaseModel):
+    """复盘中的一次动作选择（真人实际动作或参考 Bot 动作）。"""
+
+    action: Literal["fold", "check", "call", "bet", "raise"]
+    amount: int
+
+
+class DecisionReview(BaseModel):
+    """真人单个决策点的复盘结果。"""
+
+    street: str
+    board: list[str]
+    pot: int
+    to_call: int
+    opponents: int
+    equity: float
+    pot_odds: float | None
+    call_ev: int | None
+    action: ActionChoice
+    bot_action: ActionChoice
+    mistakes: list[Mistake]
+
+
+class HandReview(BaseModel):
+    """单手复盘总览。"""
+
+    hand_id: str
+    hand_number: int
+    human_seat: int
+    reference_strategy: str
+    decisions: list[DecisionReview]
+    mistake_count: int

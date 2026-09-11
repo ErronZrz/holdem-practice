@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onActivated, onDeactivated, onUnmounted, reactive, ref } from 'vue'
+import { computed, onActivated, onDeactivated, onUnmounted, reactive, ref, watch } from 'vue'
 import { api } from '../api.js'
 import { actionText, HAND_CATEGORY_CN, STREET_CN } from '../cards.js'
 import PlayingCard from './PlayingCard.vue'
@@ -12,6 +12,8 @@ const error = ref('')
 const busy = ref(false)
 const pendingAction = ref(null)
 const betAmount = ref(0)
+const showReview = ref(true)
+const review = ref(null)
 
 const form = reactive({
   num_players: 2,
@@ -53,6 +55,18 @@ function showdownHand(seat) {
 
 function netOf(seat) {
   return game.value?.last_net?.[seat] ?? 0
+}
+
+function pct(x) {
+  return x == null ? '—' : `${(x * 100).toFixed(0)}%`
+}
+
+function evText(x) {
+  return x == null ? '—' : (x > 0 ? '+' : '') + x
+}
+
+function mistakeClass(severity) {
+  return { error: 'mistake-error', warning: 'mistake-warning', info: 'mistake-info' }[severity] || ''
 }
 
 function resultText() {
@@ -224,6 +238,29 @@ function markerLabel(p) {
   return ''
 }
 
+async function loadReview() {
+  const handId = game.value?.last_hand_id
+  review.value = null
+  if (!handId) return
+  try {
+    const data = await api.getReview(handId)
+    // 仅在仍是同一手且手已结束时写入，避免「下一手」后旧请求回填脏数据。
+    if (game.value?.last_hand_id === handId && game.value?.hand_over) {
+      review.value = data
+    }
+  } catch {
+    review.value = null
+  }
+}
+
+watch(
+  () => [game.value?.hand_over, game.value?.last_hand_id, showReview.value],
+  ([over, handId, show]) => {
+    if (over && show && handId) loadReview()
+    else review.value = null
+  },
+)
+
 onActivated(maybePoll)
 onDeactivated(stopPolling)
 onUnmounted(stopPolling)
@@ -286,6 +323,10 @@ onUnmounted(stopPolling)
       <div class="table-meta">
         <span>第 {{ game.hand_number }} / {{ game.target_hands }} 手</span>
         <span>{{ game.players.length }} 人桌 · 盲注 {{ game.small_blind }} / {{ game.big_blind }} · {{ streetLabel }}</span>
+        <label class="review-toggle">
+          <input v-model="showReview" type="checkbox" />
+          每手复盘
+        </label>
         <button class="quit" @click="exitGame">退出对局</button>
       </div>
 
@@ -342,6 +383,35 @@ onUnmounted(stopPolling)
             {{ playerNameOf(a.seat) }} {{ actionText(a) }}
           </div>
         </div>
+      </div>
+
+      <div v-if="game.hand_over && showReview" class="panel review-panel">
+        <h3>本手复盘</h3>
+        <p v-if="!review" class="muted">复盘生成中…</p>
+        <template v-else>
+          <p class="muted">共 {{ review.decisions.length }} 个决策点 · 命中 {{ review.mistake_count }} 处问题</p>
+          <div v-for="(d, i) in review.decisions" :key="i" class="review-decision">
+            <div class="review-street">
+              <strong>{{ STREET_CN[d.street] || d.street }}</strong>
+              <span v-if="d.board.length" class="cards-mini">
+                <PlayingCard v-for="(c, j) in d.board" :key="j" :code="c" small />
+              </span>
+              <span class="muted">底池 {{ d.pot }} · 面对下注 {{ d.to_call }}</span>
+            </div>
+            <div class="review-row">
+              <span>你：{{ actionText(d.action) }}</span>
+              <span>参考：{{ actionText(d.bot_action) }}</span>
+            </div>
+            <div class="review-row muted">
+              <span>胜率 {{ pct(d.equity) }}</span>
+              <span v-if="d.pot_odds != null">赔率 {{ pct(d.pot_odds) }}</span>
+              <span v-if="d.call_ev != null">跟注 EV {{ evText(d.call_ev) }}</span>
+            </div>
+            <div v-for="(m, k) in d.mistakes" :key="k" class="mistake" :class="mistakeClass(m.severity)">
+              {{ m.message }}
+            </div>
+          </div>
+        </template>
       </div>
 
       <div class="controls panel">
@@ -659,5 +729,67 @@ onUnmounted(stopPolling)
 
 .thinking {
   color: var(--muted);
+}
+
+.review-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.review-panel h3 {
+  margin-top: 0;
+}
+
+.review-decision {
+  padding: 10px 0;
+  border-bottom: 1px dashed #e2e8f0;
+}
+
+.review-street {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.cards-mini {
+  display: flex;
+  gap: 3px;
+}
+
+.review-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-size: 14px;
+  color: #334155;
+}
+
+.mistake {
+  margin-top: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.mistake-error {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.mistake-warning {
+  background: #fef3c7;
+  color: #b45309;
+}
+
+.mistake-info {
+  background: #e0e7ff;
+  color: #3730a3;
 }
 </style>

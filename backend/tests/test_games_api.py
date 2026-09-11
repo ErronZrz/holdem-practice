@@ -107,6 +107,8 @@ def test_fold_ends_hand_immediately() -> None:
     assert data["hand_over"] is True
     assert data["hands_played"] == 1
     assert data["winners"] == [1]  # 真人弃牌，Bot 获胜
+    assert data["last_hand_id"]
+    assert client.get(f"/hands/{data['last_hand_id']}/review").status_code == 200
 
 
 def test_full_hu_session_and_persistence() -> None:
@@ -186,3 +188,26 @@ def test_showdown_reveals_hands_and_pots() -> None:
             data = client.get(f"/games/{game_id}").json()
         steps += 1
     assert found, "未出现摊牌"
+
+
+def test_hand_review_endpoint() -> None:
+    client = TestClient(app)
+    data = client.post(
+        "/games",
+        json={"num_players": 2, "target_hands": 3, "seed": 7, "bot_strategy": "heuristic"},
+    ).json()
+    _play_session(client, data["session_id"])
+
+    hands = client.get(f"/games/{data['session_id']}/hands").json()
+    assert hands
+    review = client.get(f"/hands/{hands[0]['id']}/review")
+    assert review.status_code == 200
+    body = review.json()
+    assert body["hand_id"] == hands[0]["id"]
+    assert body["human_seat"] == 0
+    assert body["reference_strategy"] == "heuristic"
+    assert body["decisions"], "HU 对局中真人应至少有一个决策点"
+    for d in body["decisions"]:
+        assert d["action"]["action"] in ("fold", "check", "call", "bet", "raise")
+        assert d["bot_action"]["action"] in ("fold", "check", "call", "bet", "raise")
+    assert client.get("/hands/unknown/review").status_code == 404
