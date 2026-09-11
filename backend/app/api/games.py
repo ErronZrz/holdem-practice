@@ -54,7 +54,7 @@ class GameRuntime:
 def _make_bot(strategy_name: str, seed: int | None) -> Strategy:
     if strategy_name == "random":
         return RandomStrategy(seed=seed)
-    return HeuristicStrategy()
+    return HeuristicStrategy(seed=seed)
 
 
 def _blind_seats(button: int, num_players: int) -> tuple[int, int]:

@@ -9,8 +9,11 @@ from app.strategy.random_strategy import RandomStrategy
 from .helpers import cards
 
 
-def _hero_state(hole, board=(), street=Street.PREFLOP, pot=100, stack=0) -> GameState:
+def _hero_state(hole, board=(), street=Street.PREFLOP, pot=100, stack=0, opponents=1) -> GameState:
     hero = PlayerState(seat=0, name="p0", hole_cards=list(hole), stack=stack)
+    players = [hero]
+    for i in range(opponents):
+        players.append(PlayerState(seat=i + 1, name=f"p{i + 1}"))
     return GameState(
         street=street,
         board=tuple(board),
@@ -18,7 +21,7 @@ def _hero_state(hole, board=(), street=Street.PREFLOP, pot=100, stack=0) -> Game
         current_seat=0,
         button=0,
         hand_over=False,
-        players=(hero,),
+        players=tuple(players),
     )
 
 
@@ -164,138 +167,168 @@ def test_heuristic_preflop_ace_high_folds_big() -> None:
 # ------------------------------------------------------------------ 启发式策略：翻牌后
 
 
-def test_heuristic_postflop_strong_bets() -> None:
+def _bot(seed: int = 0, samples: int = 2000, bluff_freq: float = 0.0) -> HeuristicStrategy:
+    # 翻牌后测试默认关闭诈唬并提高采样数，以隔离并稳定地验证胜率/赔率决策本身。
+    return HeuristicStrategy(seed=seed, samples=samples, bluff_freq=bluff_freq)
+
+
+def test_postflop_monster_bets() -> None:
+    # 三条等强成牌在无人下注时主动价值下注。
     state = _hero_state(cards("As Ah"), board=cards("Ad 7c 2s"), street=Street.FLOP)
     legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
-    action = HeuristicStrategy().choose_action(state, legal)
+    action = _bot().choose_action(state, legal)
     assert action.type == ActionType.BET
     assert 10 <= action.amount <= 1000
 
 
-def test_heuristic_postflop_medium_calls() -> None:
-    state = _hero_state(cards("As 7h"), board=cards("Ad Kc 2s"), street=Street.FLOP)
-    legal = _legal(can_call=True, call_amount=20)
-    assert HeuristicStrategy().choose_action(state, legal).type == ActionType.CALL
-
-
-def test_heuristic_postflop_weak_folds() -> None:
-    state = _hero_state(cards("2c 7d"), board=cards("As Kc 9s"), street=Street.FLOP)
-    legal = _legal(can_call=True, call_amount=20)
-    assert HeuristicStrategy().choose_action(state, legal).type == ActionType.FOLD
-
-
-def test_heuristic_weak_checks_when_free() -> None:
-    state = _hero_state(cards("2c 7d"), board=cards("As Kc 9s"), street=Street.FLOP)
-    legal = _legal(can_check=True)
-    assert HeuristicStrategy().choose_action(state, legal).type == ActionType.CHECK
-
-
-def test_heuristic_postflop_flush_draw_calls() -> None:
-    # 同花听牌不再被当作纯空气弃牌，面对合理下注可跟注。
-    state = _hero_state(cards("Ts 9s"), board=cards("As Ks 2d"), street=Street.FLOP)
-    legal = _legal(can_call=True, call_amount=20)
-    assert HeuristicStrategy().choose_action(state, legal).type == ActionType.CALL
-
-
-def test_heuristic_postflop_straight_draw_calls() -> None:
-    # 两头顺面对合理下注可跟注。
-    state = _hero_state(cards("7s 8d"), board=cards("9c Th 2s"), street=Street.FLOP)
-    legal = _legal(can_call=True, call_amount=20)
-    assert HeuristicStrategy().choose_action(state, legal).type == ActionType.CALL
-
-
-def test_heuristic_postflop_combo_draw_semibluffs() -> None:
-    # 组合听牌（同花 + 两头顺）主动半诈唬下注。
-    state = _hero_state(cards("Js Ts"), board=cards("Qs 9s 2d"), street=Street.FLOP)
-    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
-    action = HeuristicStrategy().choose_action(state, legal)
-    assert action.type == ActionType.BET
-    assert 10 <= action.amount <= 1000
-
-
-def test_heuristic_postflop_draw_folds_big() -> None:
-    # 听牌面对超过赔率上限的巨注仍应弃牌。
-    state = _hero_state(cards("Ts 9s"), board=cards("As Ks 2d"), street=Street.FLOP)
-    legal = _legal(can_call=True, call_amount=150)
-    assert HeuristicStrategy().choose_action(state, legal).type == ActionType.FOLD
-
-
-def test_heuristic_postflop_medium_folds_big() -> None:
-    # 一对面对超底池巨注不再无条件跟注。
-    state = _hero_state(cards("As 7h"), board=cards("Ad Kc 2s"), street=Street.FLOP)
-    legal = _legal(can_call=True, call_amount=200)
-    assert HeuristicStrategy().choose_action(state, legal).type == ActionType.FOLD
-
-
-def test_heuristic_postflop_top_pair_bets() -> None:
-    # 顶对在无人下注时主动价值下注，而非过牌。
+def test_postflop_top_pair_bets() -> None:
+    # 顶对在无人下注时主动价值下注。
     state = _hero_state(cards("Ah 7d"), board=cards("Ad 8c 2s"), street=Street.FLOP)
     legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
-    action = HeuristicStrategy().choose_action(state, legal)
-    assert action.type == ActionType.BET
-    assert 10 <= action.amount <= 1000
+    assert _bot().choose_action(state, legal).type == ActionType.BET
 
 
-def test_heuristic_postflop_two_pair_bets() -> None:
+def test_postflop_two_pair_bets() -> None:
     # 两对主动价值下注。
     state = _hero_state(cards("Ah 8d"), board=cards("Ad 8c 2s"), street=Street.FLOP)
     legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
-    action = HeuristicStrategy().choose_action(state, legal)
-    assert action.type == ActionType.BET
-    assert 10 <= action.amount <= 1000
+    assert _bot().choose_action(state, legal).type == ActionType.BET
 
 
-def test_heuristic_postflop_middle_pair_checks() -> None:
+def test_postflop_set_bets_when_unopened() -> None:
+    # 底牌击中的三条（set）无人下注时主动下注。
+    state = _hero_state(cards("3s 3c"), board=cards("3d Kc 2s"), street=Street.FLOP)
+    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
+    assert _bot().choose_action(state, legal).type == ActionType.BET
+
+
+def test_postflop_board_trips_checks_when_unopened() -> None:
+    # 公共牌三条（如 AAA）时底牌只是踢脚，胜率不高，应控池过牌而非盲目下注。
+    state = _hero_state(cards("Kh 8d"), board=cards("As Ah Ad"), street=Street.FLOP)
+    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
+    assert _bot().choose_action(state, legal).type == ActionType.CHECK
+
+
+def test_postflop_middle_pair_checks() -> None:
     # 中/底对控池过牌，不盲目下注。
     state = _hero_state(cards("8d 7h"), board=cards("Ad Kc 8s"), street=Street.FLOP)
     legal = _legal(can_check=True)
-    assert HeuristicStrategy().choose_action(state, legal).type == ActionType.CHECK
+    assert _bot().choose_action(state, legal).type == ActionType.CHECK
 
 
-def test_heuristic_postflop_board_trips_calls_not_raises() -> None:
-    # 公共牌三条（翻牌 AAA）时底牌只是踢脚，面对加注只跟注，不再无限加注。
-    state = _hero_state(cards("Kh 8d"), board=cards("As Ah Ad"), street=Street.FLOP)
+def test_postflop_combo_draw_semibluffs() -> None:
+    # 组合听牌（同花 + 两头顺）无人下注时半诈唬下注。
+    state = _hero_state(cards("Js Ts"), board=cards("Qs 9s 2d"), street=Street.FLOP)
+    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
+    assert _bot().choose_action(state, legal).type == ActionType.BET
+
+
+def test_postflop_weak_checks_when_free() -> None:
+    # 纯空气免费看牌时过牌（默认关闭诈唬）。
+    state = _hero_state(cards("2c 7d"), board=cards("As Kc 9s"), street=Street.FLOP)
+    legal = _legal(can_check=True)
+    assert _bot().choose_action(state, legal).type == ActionType.CHECK
+
+
+def test_postflop_multiway_decay_checks() -> None:
+    # 同样的顶对在多人底池下胜率衰减，不再盲目价值下注。
+    state = _hero_state(
+        cards("Ah Kd"), board=cards("Ad 8c 2s"), street=Street.FLOP, opponents=4
+    )
+    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
+    assert _bot().choose_action(state, legal).type == ActionType.CHECK
+
+
+def test_postflop_top_pair_calls() -> None:
+    # 顶对面对合理下注按赔率跟注。
+    state = _hero_state(cards("As 7h"), board=cards("Ad Kc 2s"), street=Street.FLOP, pot=100)
+    legal = _legal(can_call=True, call_amount=20)
+    assert _bot().choose_action(state, legal).type == ActionType.CALL
+
+
+def test_postflop_air_folds_to_bet() -> None:
+    # 纯空气面对下注弃牌。
+    state = _hero_state(cards("2c 7d"), board=cards("As Kc 9s"), street=Street.FLOP, pot=100)
+    legal = _legal(can_call=True, call_amount=20)
+    assert _bot().choose_action(state, legal).type == ActionType.FOLD
+
+
+def test_postflop_flush_draw_calls() -> None:
+    # 同花听牌面对合理下注按赔率跟注。
+    state = _hero_state(cards("Ts 9s"), board=cards("As Ks 2d"), street=Street.FLOP, pot=100)
+    legal = _legal(can_call=True, call_amount=20)
+    assert _bot().choose_action(state, legal).type == ActionType.CALL
+
+
+def test_postflop_straight_draw_calls() -> None:
+    # 两头顺面对合理下注按赔率跟注。
+    state = _hero_state(cards("7s 8d"), board=cards("9c Th 2s"), street=Street.FLOP, pot=100)
+    legal = _legal(can_call=True, call_amount=20)
+    assert _bot().choose_action(state, legal).type == ActionType.CALL
+
+
+def test_postflop_draw_folds_big() -> None:
+    # 听牌面对超过赔率的巨注弃牌。
+    state = _hero_state(cards("Ts 9s"), board=cards("As Ks 2d"), street=Street.FLOP, pot=100)
+    legal = _legal(can_call=True, call_amount=200)
+    assert _bot().choose_action(state, legal).type == ActionType.FOLD
+
+
+def test_postflop_middle_pair_folds_big() -> None:
+    # 中对面对超底池巨注胜率不足，弃牌。
+    state = _hero_state(cards("8d 7h"), board=cards("Ad Kc 8s"), street=Street.FLOP, pot=100)
+    legal = _legal(can_call=True, call_amount=300)
+    assert _bot().choose_action(state, legal).type == ActionType.FOLD
+
+
+def test_postflop_set_calls_big() -> None:
+    # 底牌击中的三条（set）面对巨注仍跟注。
+    state = _hero_state(cards("3s 3c"), board=cards("3d Kc 2s"), street=Street.FLOP, pot=100)
+    legal = _legal(can_call=True, call_amount=200)
+    assert _bot().choose_action(state, legal).type == ActionType.CALL
+
+
+def test_postflop_board_trips_calls_not_raises() -> None:
+    # 公共牌三条面对下注只跟注（胜率不足以再加注）。
+    state = _hero_state(cards("Kh 8d"), board=cards("As Ah Ad"), street=Street.FLOP, pot=100)
     legal = _legal(
         can_call=True, call_amount=20, can_raise=True, min_raise_to=40, max_raise_to=1000
     )
-    action = HeuristicStrategy().choose_action(state, legal)
-    assert action.type == ActionType.CALL
+    assert _bot().choose_action(state, legal).type == ActionType.CALL
 
 
-def test_heuristic_postflop_full_house_raises() -> None:
-    # 葫芦面对加注仍可激进加注。
-    state = _hero_state(cards("3s 3c"), board=cards("As Ah Ad"), street=Street.FLOP)
+def test_postflop_set_raises() -> None:
+    # 底牌击中的三条（set）面对下注可再加注。
+    state = _hero_state(cards("3s 3c"), board=cards("3d Kc 2s"), street=Street.FLOP, pot=100)
     legal = _legal(
         can_call=True, call_amount=20, can_raise=True, min_raise_to=40, max_raise_to=1000
     )
-    action = HeuristicStrategy().choose_action(state, legal)
+    action = _bot().choose_action(state, legal)
     assert action.type == ActionType.RAISE
     assert 40 <= action.amount <= 1000
 
 
-def test_heuristic_postflop_trips_bets_when_unopened() -> None:
-    # 三条在无人下注时仍主动价值下注。
-    state = _hero_state(cards("Kh 8d"), board=cards("As Ah Ad"), street=Street.FLOP)
+def test_postflop_weak_full_house_does_not_raise() -> None:
+    # 公共牌三条下的低对子葫芦胜率不高，面对下注只跟注不加注。
+    state = _hero_state(cards("3s 3c"), board=cards("As Ah Ad"), street=Street.FLOP, pot=100)
+    legal = _legal(
+        can_call=True, call_amount=20, can_raise=True, min_raise_to=40, max_raise_to=1000
+    )
+    assert _bot().choose_action(state, legal).type == ActionType.CALL
+
+
+def test_postflop_bluffs_air_when_enabled() -> None:
+    # 开启诈唬后，纯空气在无人下注时会下注诈唬。
+    state = _hero_state(cards("2c 7d"), board=cards("As Kc 9s"), street=Street.FLOP)
     legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
-    action = HeuristicStrategy().choose_action(state, legal)
-    assert action.type == ActionType.BET
-    assert 10 <= action.amount <= 1000
+    assert _bot(bluff_freq=1.0).choose_action(state, legal).type == ActionType.BET
 
 
-def test_heuristic_postflop_board_trips_folds_big() -> None:
-    # 公共牌三条（翻牌 AAA）：底牌只是踢脚，面对巨注弃牌（对手很可能成葫芦）。
-    state = _hero_state(cards("Kh 8d"), board=cards("As Ah Ad"), street=Street.FLOP, pot=100)
-    legal = _legal(can_call=True, call_amount=200)
-    action = HeuristicStrategy().choose_action(state, legal)
-    assert action.type == ActionType.FOLD
-
-
-def test_heuristic_postflop_set_calls_big() -> None:
-    # 底牌击中的三条（set）才是真强牌，面对巨注仍跟注。
-    state = _hero_state(cards("3s 3c"), board=cards("3d Kc 2s"), street=Street.FLOP, pot=100)
-    legal = _legal(can_call=True, call_amount=200)
-    action = HeuristicStrategy().choose_action(state, legal)
-    assert action.type == ActionType.CALL
+def test_postflop_no_bluff_when_disabled() -> None:
+    # 关闭诈唬后，纯空气只过牌。
+    state = _hero_state(cards("2c 7d"), board=cards("As Kc 9s"), street=Street.FLOP)
+    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
+    assert _bot(bluff_freq=0.0).choose_action(state, legal).type == ActionType.CHECK
 
 
 # ------------------------------------------------------------------ 引擎闭环
@@ -303,7 +336,8 @@ def test_heuristic_postflop_set_calls_big() -> None:
 
 def test_two_heuristic_bots_complete_hands() -> None:
     engine = PokerEngine(2, small_blind=5, big_blind=10, starting_stack=1000, seed=0)
-    bot = HeuristicStrategy()
+    # 降低采样数以控制闭环测试耗时，这里只校验无非法动作 / 筹码守恒 / 无死锁。
+    bot = HeuristicStrategy(seed=0, samples=200)
     for _ in range(200):
         engine.start_hand()
         total = sum(p.stack for p in engine.players) + engine.pot

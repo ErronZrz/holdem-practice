@@ -1,20 +1,21 @@
-"""基于牌力的启发式策略：强牌加注、中牌跟注、弱牌弃牌，并对边缘牌做赔率修正。
+"""基于胜率的启发式策略：翻牌前按 Chen 分档，翻牌后按蒙特卡洛胜率 + 底池赔率决策。
 
 牌力评估分两段：
 - 翻牌前：用 Chen 公式给两张底牌打分，按分数划分强/中/弱；小对子单独识别为博暗三条，
   同花/连张等投机边缘牌、A 配大踢脚的高牌在赔率合适时允许跟注，避免「见注就弃」。
-- 翻牌后：用 evaluate(底牌 + 公共牌) 得到 HandRank 分档，并区分底牌是否真正击中——公共牌三条时
-  底牌只是踢脚、胜率不高；顶对/两对/底牌三条/顺子/同花主动价值下注，非葫芦的强牌面对加注只跟注；
-  高牌时识别顺子/同花听牌，按补牌数决定半诈唬、赔率跟注或弃牌。
+- 翻牌后：用蒙特卡洛估计「赢过所有仍在场对手的随机底牌」的胜率（静态摊牌胜率），
+  以胜率阈值决定价值下注 / 跟注 / 弃牌，并以底池赔率作为跟注的量化判据；
+  强听牌半诈唬，纯空气按小概率诈唬以平衡下注范围。
 
-下注/加注额度约为一个底池大小，夹在合法区间内。本策略为确定性策略，暂不做位置感知。
+下注/加注额度约为一个底池大小，夹在合法区间内。随机源可注入 seed 以复现（AGENTS 原则 4）。
 """
 
 import math
-from collections import Counter
+import random
 
 from app.poker.actions import Action, ActionType, LegalActions
 from app.poker.cards import Card, Rank, Suit
+from app.poker.equity import equity
 from app.poker.evaluator import evaluate
 from app.poker.hand import HandCategory
 from app.poker.state import GameState, PlayerState, Street
@@ -38,15 +39,18 @@ _SET_MINE_IMPLIED = 15
 # A 配大踢脚（另一张不低于 T）视为中牌：Chen 公式对 ATo 打分偏低，避免其被过早弃掉。
 _ACE_HIGH_KICKER = 10
 
-# 翻牌后听牌补牌数阈值：强听牌可半诈唬 / 常规听牌可跟注 / 弱听牌仅极便宜跟注。
+# 翻牌后蒙特卡洛采样数：越大胜率越准、越慢。
+_SAMPLES = 500
+# 胜率阈值：无人下注时达到该值才主动价值下注。
+_VALUE_BET_EQ = 0.70
+# 胜率阈值：面对下注时达到该值才再加注。
+_RAISE_EQ = 0.90
+# 胜率阈值：低于该值视为纯空气，面对任何下注都弃牌，仅在小概率下诈唬。
+_AIR_EQ = 0.25
+# 纯空气诈唬频率（无人下注时）。
+_BLUFF_FREQ = 0.10
+# 半诈唬所需的补牌数（组合听牌）。
 _DRAW_STRONG_OUTS = 12
-_DRAW_OUTS = 8
-_DRAW_WEAK_OUTS = 4
-# 翻牌后听牌跟注上限（相对底池的倍数，用分子/分母表达避免浮点）。
-_DRAW_CALL_NUM = 3
-_DRAW_CALL_DEN = 4
-_WEAK_DRAW_CALL_NUM = 1
-_WEAK_DRAW_CALL_DEN = 4
 
 
 def _chen_score(hi: int, lo: int, suited: bool) -> int:
@@ -107,13 +111,27 @@ def _draw_outs(hole_cards: list[Card], board: tuple[Card, ...]) -> int:
     return outs
 
 
-def _board_has_trips(board: tuple[Card, ...]) -> bool:
-    """公共牌是否已有三张同点（此时所有玩家保底三条，底牌只是踢脚）。"""
-    return any(count >= 3 for count in Counter(c.rank.value for c in board).values())
+def _num_opponents(state: GameState) -> int:
+    """仍在场的对手数量（排除自己与已弃牌/全下的玩家）。"""
+    return sum(
+        1
+        for p in state.players
+        if p.seat != state.current_seat and not p.folded and not p.all_in
+    )
 
 
 class HeuristicStrategy:
-    """确定性启发式 Bot，依据牌力与赔率选择动作。"""
+    """基于胜率的启发式 Bot：翻牌前按 Chen 分档，翻牌后按胜率 + 赔率决策。"""
+
+    def __init__(
+        self,
+        seed: int | None = None,
+        samples: int = _SAMPLES,
+        bluff_freq: float = _BLUFF_FREQ,
+    ) -> None:
+        self._rng = random.Random(seed)
+        self._samples = samples
+        self._bluff_freq = bluff_freq
 
     def choose_action(self, state: GameState, legal: LegalActions) -> Action:
         me = hero(state)
@@ -177,97 +195,30 @@ class HeuristicStrategy:
         legal: LegalActions,
         me: PlayerState,
     ) -> Action:
-        rank = evaluate([*me.hole_cards, *state.board])
+        opps = _num_opponents(state)
+        eq = equity(me.hole_cards, state.board, opps, self._rng, self._samples)
 
-        if rank.category >= HandCategory.FULL_HOUSE:
-            # 葫芦及以上：最强价值牌，可激进下注/加注。
-            return self._aggressive(state, legal, me)
-
-        if rank.category == HandCategory.THREE_OF_A_KIND:
-            if _board_has_trips(state.board):
-                # 公共牌三条（如翻牌 AAA）：底牌只是踢脚，胜率不高，保守处理。
-                return self._value_action(state, legal)
-            # 底牌参与的三条（set / trip）：真正强牌，主动下注、面对下注跟注。
-            return self._strong_value_action(state, legal)
-
-        if rank.category >= HandCategory.STRAIGHT:
-            # 顺子/同花：主动下注，面对加注只跟注。
-            return self._strong_value_action(state, legal)
-
-        if rank.category == HandCategory.TWO_PAIR:
-            # 两对：强价值牌，无人下注时主动下注。
-            return self._value_action(state, legal)
-
-        if rank.category == HandCategory.ONE_PAIR:
-            pair_rank = rank.tiebreak[0]
-            board_high = max(c.rank.value for c in state.board)
-            if pair_rank >= board_high:
-                # 顶对或超对：主动价值下注。
-                return self._value_action(state, legal)
-            # 中/底对：控池，免费过牌，面对合理下注跟注。
-            if legal.can_check:
-                return Action(ActionType.CHECK)
-            if legal.can_call and _call_within(
-                legal.call_amount, state.pot, _MEDIUM_CALL_NUM, _MEDIUM_CALL_DEN
-            ):
+        if legal.call_amount > 0:
+            # 面对下注：按胜率与底池赔率决定跟注/加注/弃牌。
+            pot_odds = legal.call_amount / (state.pot + legal.call_amount)
+            if eq >= _RAISE_EQ and legal.can_raise:
+                return Action(ActionType.RAISE, self._raise_amount(state, legal, me))
+            if eq >= _AIR_EQ and eq >= pot_odds:
                 return Action(ActionType.CALL)
             return Action(ActionType.FOLD)
 
-        # 高牌：翻牌/转牌时识别听牌；河牌已无补牌可言。
-        if len(state.board) < 5:
-            outs = _draw_outs(me.hole_cards, state.board)
-            if outs >= _DRAW_STRONG_OUTS:
-                # 强听牌（组合听）：主动半诈唬，否则跟注/过牌。
-                if legal.can_bet:
-                    return Action(ActionType.BET, self._bet_amount(state, legal))
-                if legal.can_raise:
-                    return Action(ActionType.RAISE, self._raise_amount(state, legal, me))
-                if legal.can_call:
-                    return Action(ActionType.CALL)
-                return Action(ActionType.CHECK)
-            if outs >= _DRAW_OUTS:
-                # 同花/两头顺：赔率合适则跟注。
-                if legal.can_check:
-                    return Action(ActionType.CHECK)
-                if legal.can_call and _call_within(
-                    legal.call_amount, state.pot, _DRAW_CALL_NUM, _DRAW_CALL_DEN
-                ):
-                    return Action(ActionType.CALL)
-                return Action(ActionType.FOLD)
-            if outs >= _DRAW_WEAK_OUTS:
-                # 卡顺等弱听牌：仅在极便宜时跟注。
-                if legal.can_check:
-                    return Action(ActionType.CHECK)
-                if legal.can_call and _call_within(
-                    legal.call_amount, state.pot, _WEAK_DRAW_CALL_NUM, _WEAK_DRAW_CALL_DEN
-                ):
-                    return Action(ActionType.CALL)
-                return Action(ActionType.FOLD)
-
-        # 纯空气：免费则过牌，否则弃牌。
-        return Action(ActionType.CHECK) if legal.can_check else Action(ActionType.FOLD)
-
-    # ------------------------------------------------------------------ 动作构造
-
-    def _strong_value_action(self, state: GameState, legal: LegalActions) -> Action:
-        """顺子/同花/三条：无人下注时主动下注，面对下注跟注（不主动加注）。"""
+        # 无人下注：按胜率决定价值下注、半诈唬、诈唬或过牌。
         if legal.can_bet:
-            return Action(ActionType.BET, self._bet_amount(state, legal))
-        if legal.can_call:
-            return Action(ActionType.CALL)
+            if eq >= _VALUE_BET_EQ:
+                return Action(ActionType.BET, self._bet_amount(state, legal))
+            outs = _draw_outs(me.hole_cards, state.board) if len(state.board) < 5 else 0
+            if outs >= _DRAW_STRONG_OUTS:
+                return Action(ActionType.BET, self._bet_amount(state, legal))
+            if eq < _AIR_EQ and self._rng.random() < self._bluff_freq:
+                return Action(ActionType.BET, self._bet_amount(state, legal))
         return Action(ActionType.CHECK)
 
-    def _value_action(self, state: GameState, legal: LegalActions) -> Action:
-        """中等价值牌：无人下注时主动下注，面对下注按赔率跟注（不主动加注）。"""
-        if legal.can_bet:
-            return Action(ActionType.BET, self._bet_amount(state, legal))
-        if legal.can_check:
-            return Action(ActionType.CHECK)
-        if legal.can_call and _call_within(
-            legal.call_amount, state.pot, _MEDIUM_CALL_NUM, _MEDIUM_CALL_DEN
-        ):
-            return Action(ActionType.CALL)
-        return Action(ActionType.FOLD)
+    # ------------------------------------------------------------------ 动作构造
 
     def _aggressive(
         self,

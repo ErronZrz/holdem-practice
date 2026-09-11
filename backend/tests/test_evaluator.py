@@ -1,6 +1,9 @@
 """牌力评估测试。"""
 
-from app.poker.evaluator import best_five, evaluate, sort_five
+import random
+
+from app.poker.cards import Card, Rank, Suit
+from app.poker.evaluator import best_five, evaluate, evaluate_fast, sort_five
 from app.poker.hand import HandCategory
 
 from .helpers import cards
@@ -74,6 +77,16 @@ def test_best_five_selects_strongest() -> None:
         five = best_five(seven)
         assert len(five) == 5
         assert evaluate(five) == evaluate(seven)
+
+
+def test_evaluate_fast_matches_evaluate() -> None:
+    # 快速评估器与标准评估器在 5/6/7 张牌上结果一致（含多对、葫芦、同花顺等边界）。
+    deck = [Card(rank, suit) for suit in Suit for rank in Rank]
+    rng = random.Random(0)
+    for n in (5, 6, 7):
+        for _ in range(500):
+            hand = rng.sample(deck, n)
+            assert evaluate_fast(hand) == evaluate(hand)
 
 
 def test_sort_five_orders_by_hand_structure() -> None:
