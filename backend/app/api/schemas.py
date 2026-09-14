@@ -162,6 +162,14 @@ class ActionChoice(BaseModel):
     amount: int
 
 
+class ActionProbability(BaseModel):
+    """复盘参考动作分布中的一项：动作、额度与概率。"""
+
+    action: Literal["fold", "check", "call", "bet", "raise"]
+    amount: int
+    probability: float
+
+
 class DecisionReview(BaseModel):
     """真人单个决策点的复盘结果。"""
 
@@ -175,6 +183,7 @@ class DecisionReview(BaseModel):
     call_ev: int | None
     action: ActionChoice
     bot_action: ActionChoice
+    bot_distribution: list[ActionProbability] = Field(default_factory=list)
     mistakes: list[Mistake]
 
 

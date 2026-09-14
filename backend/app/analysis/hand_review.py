@@ -5,8 +5,9 @@
 - 用蒙特卡洛估算「自己底牌面对随机对手范围」的摊牌胜率——与打牌时的信息边界一致，
   不读取对手真实底牌来算胜率，避免上帝视角作弊；
 - 给出轻量 EV 参考量（胜率、底池赔率、跟注期望收益）与明显错误标记；
-- 附上「保守参考策略在同一局面会怎么做」作为对比：翻牌后面对下注时，在启发式 Bot 的
-  跟注基础上额外要求赔率有余量与可继续的牌力（真实成手牌或强听牌），避免用高张盲目跟注。
+- 附上「保守参考策略在同一局面会怎么做」作为对比：以启发式 Bot 的动作概率分布为基线，
+  翻牌后面对下注时额外要求赔率有余量与可继续的牌力（真实成手牌或强听牌），
+  无人下注时弱踢脚顶对不做价值下注；避免用高张盲目跟注、用弱踢脚顶对薄价值下注。
 
 本模块只读引擎公开状态、不修改引擎，属于 analysis 层对 poker 层公开能力的消费。
 """
@@ -91,28 +92,79 @@ def _has_playable_strength(
     return len(board) < 5 and draw_outs(list(hole_cards), tuple(board)) >= _STRONG_DRAW_OUTS
 
 
-def _conservative_action(
+def _weak_kicker_top_pair(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
+    """是否「顶对 + 弱踢脚」，作为价值下注的牌力质量门槛（与误弃的牌力要求对称）。
+
+    判定条件：最强牌力恰为一对、该对由底牌配中公共牌最高点数，且另一张底牌（踢脚）
+    低于公共牌去重后第二高的点数。超对、两对、三条等更强牌力不适用；仅靠公共牌
+    成对（底牌只是踢脚）也不算真实顶对。
+    """
+    if len(board) < 3:
+        return False
+    rank = evaluate([*hole_cards, *board])
+    if rank.category != HandCategory.ONE_PAIR:
+        return False
+    board_ranks = sorted({c.rank.value for c in board}, reverse=True)
+    if len(board_ranks) < 2 or rank.tiebreak[0] != board_ranks[0]:
+        return False
+    hole_ranks = sorted((c.rank.value for c in hole_cards), reverse=True)
+    if hole_ranks[0] != rank.tiebreak[0]:
+        return False
+    return hole_ranks[1] < board_ranks[1]
+
+
+def _shift_mass(
+    distribution: list[tuple[Action, float]],
+    from_type: ActionType,
+    to_action: Action,
+) -> list[tuple[Action, float]]:
+    """把某类动作的概率质量整体转移到目标动作，用于复盘的保守收窄。
+
+    目标动作已在分布中则叠加权重，否则新增一项；无该类动作时原样返回。
+    """
+    moved = sum(weight for action, weight in distribution if action.type == from_type)
+    if moved <= 0.0:
+        return distribution
+    kept = [(action, weight) for action, weight in distribution if action.type != from_type]
+    for i, (action, weight) in enumerate(kept):
+        if action.type == to_action.type:
+            kept[i] = (action, weight + moved)
+            return kept
+    return [*kept, (to_action, moved)]
+
+
+def _conservative_distribution(
     snapshot: GameState,
     legal: LegalActions,
     me: PlayerState,
     eq: float,
-    bot_action: Action,
-) -> Action:
-    """把 Bot 在「翻牌后面对下注」的宽松跟注收窄为保守参考动作。
+    baseline: list[tuple[Action, float]],
+) -> list[tuple[Action, float]]:
+    """在启发式基线分布上做保守收窄，返回复盘参考分布。
 
-    仅在 Bot 建议跟注时介入：要求胜率对底池赔率有余量，且底牌有可继续的牌力
-    （真实成手牌或强听牌），跟注额很小时放宽。加注、翻牌前与无人下注的动作沿用 Bot。
+    翻牌后面对下注：胜率对底池赔率无余量或底牌无可继续的牌力时，把跟注概率质量
+    转移到弃牌（跟注额很小时放宽）；翻牌后无人下注：弱踢脚顶对不做价值下注，
+    把下注质量转移到过牌。翻牌前与其它动作原样沿用基线。
     """
-    if snapshot.street == Street.PREFLOP or legal.call_amount <= 0:
-        return bot_action
-    if bot_action.type != ActionType.CALL:
-        return bot_action
-    pot_odds = legal.call_amount / (snapshot.pot + legal.call_amount)
-    has_margin = eq > pot_odds + _fold_margin(legal.call_amount, snapshot.pot)
-    playable = _has_playable_strength(
-        me.hole_cards, snapshot.board, legal.call_amount, snapshot.pot
-    )
-    return bot_action if has_margin and playable else Action(ActionType.FOLD)
+    if snapshot.street == Street.PREFLOP:
+        return baseline
+    if legal.call_amount > 0:
+        pot_odds = legal.call_amount / (snapshot.pot + legal.call_amount)
+        has_margin = eq > pot_odds + _fold_margin(legal.call_amount, snapshot.pot)
+        playable = _has_playable_strength(
+            me.hole_cards, snapshot.board, legal.call_amount, snapshot.pot
+        )
+        if has_margin and playable:
+            return baseline
+        return _shift_mass(baseline, ActionType.CALL, Action(ActionType.FOLD))
+    if _weak_kicker_top_pair(me.hole_cards, snapshot.board):
+        return _shift_mass(baseline, ActionType.BET, Action(ActionType.CHECK))
+    return baseline
+
+
+def _mode_action(distribution: list[tuple[Action, float]]) -> Action:
+    """取分布中概率最高的动作作为参考动作（并列时取列表靠前者）。"""
+    return max(distribution, key=lambda item: item[1])[0]
 
 
 def _history_action(record: dict) -> Action:
@@ -139,9 +191,12 @@ def _detect_mistakes(
     can_raise: bool,
     hole_cards: Sequence[Card],
     board: Sequence[Card],
+    big_blind: int,
 ) -> list[dict]:
     """按既定规则对单个决策点做错误检测，返回命中的错误标记列表。"""
     postflop = len(board) > 0
+    # 翻牌前跟注额不超过一个大盲（补齐盲注 / limp）属廉价看牌，不判赔率不足。
+    cheap_preflop = not postflop and to_call <= big_blind
     mistakes: list[dict] = []
 
     if to_call > 0:
@@ -149,6 +204,7 @@ def _detect_mistakes(
         if (
             action.type == ActionType.CALL
             and pot_odds is not None
+            and not cheap_preflop
             and equity < pot_odds - _BAD_CALL_EQ_MARGIN
         ):
             mistakes.append(
@@ -186,7 +242,12 @@ def _detect_mistakes(
             )
     elif postflop:
         # 无人下注：价值丢失 / 下注过小 / 空气诈唬。
-        if action.type == ActionType.CHECK and equity >= _VALUE_BET_EQ:
+        # 弱踢脚顶对属薄价值，过牌不算丢失价值，与参考动作共用同一门槛。
+        if (
+            action.type == ActionType.CHECK
+            and equity >= _VALUE_BET_EQ
+            and not _weak_kicker_top_pair(hole_cards, board)
+        ):
             mistakes.append(
                 {
                     "code": "value_missed",
@@ -232,8 +293,9 @@ def _analyze_decision(
     to_call = legal.call_amount
     pot_odds = to_call / (snapshot.pot + to_call) if to_call > 0 else None
     call_ev = round(eq * (snapshot.pot + to_call) - to_call) if to_call > 0 else None
-    bot_action = reference_bot.choose_action(snapshot, legal)
-    bot_action = _conservative_action(snapshot, legal, hero_state, eq, bot_action)
+    baseline = reference_bot.action_distribution(snapshot, legal)
+    distribution = _conservative_distribution(snapshot, legal, hero_state, eq, baseline)
+    bot_action = _mode_action(distribution)
 
     return {
         "street": snapshot.street.name.lower(),
@@ -246,6 +308,10 @@ def _analyze_decision(
         "call_ev": call_ev,
         "action": {"action": action.type.value, "amount": action.amount},
         "bot_action": {"action": bot_action.type.value, "amount": bot_action.amount},
+        "bot_distribution": [
+            {"action": act.type.value, "amount": act.amount, "probability": round(weight, 4)}
+            for act, weight in sorted(distribution, key=lambda item: item[1], reverse=True)
+        ],
         "mistakes": _detect_mistakes(
             action=action,
             equity=eq,
@@ -255,6 +321,7 @@ def _analyze_decision(
             can_raise=legal.can_raise,
             hole_cards=hero_state.hole_cards,
             board=snapshot.board,
+            big_blind=engine.big_blind,
         ),
     }
 

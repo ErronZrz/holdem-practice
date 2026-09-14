@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onActivated, onDeactivated, onUnmounted, reactive, ref, watch } from 'vue'
 import { api } from '../api.js'
-import { actionText, HAND_CATEGORY_CN, STREET_CN } from '../cards.js'
+import { actionText, distributionText, HAND_CATEGORY_CN, STREET_CN } from '../cards.js'
 import { copyText } from '../clipboard.js'
 import PlayingCard from './PlayingCard.vue'
 
@@ -449,6 +449,9 @@ onUnmounted(stopPolling)
             <div class="review-row">
               <span>你：{{ actionText(d.action) }}</span>
               <span>参考：{{ actionText(d.bot_action) }}</span>
+            </div>
+            <div v-if="distributionText(d)" class="review-row muted">
+              <span>参考分布：{{ distributionText(d) }}</span>
             </div>
             <div class="review-row muted">
               <span>胜率 {{ pct(d.equity) }}</span>

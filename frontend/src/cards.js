@@ -42,6 +42,15 @@ export function actionText(action) {
   return action.amount ? `${label} ${action.amount}` : label
 }
 
+// 把复盘的参考动作分布渲染成一行文本；确定性分支（只有一项）返回空串不展示。
+export function distributionText(decision) {
+  const dist = decision.bot_distribution || []
+  if (dist.length <= 1) return ''
+  return dist
+    .map((item) => `${actionText(item)} ${Math.round(item.probability * 100)}%`)
+    .join(' / ')
+}
+
 export const HAND_CATEGORY_CN = {
   HIGH_CARD: '高牌',
   ONE_PAIR: '一对',

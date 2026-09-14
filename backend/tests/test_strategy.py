@@ -1,5 +1,7 @@
 """策略层测试：随机策略合法/可复现，启发式策略强弱牌动作倾向，双 Bot 引擎闭环。"""
 
+import pytest
+
 from app.poker.actions import ActionType, LegalActions
 from app.poker.engine import PokerEngine
 from app.poker.state import GameState, PlayerState, Street
@@ -329,6 +331,29 @@ def test_postflop_no_bluff_when_disabled() -> None:
     state = _hero_state(cards("2c 7d"), board=cards("As Kc 9s"), street=Street.FLOP)
     legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
     assert _bot(bluff_freq=0.0).choose_action(state, legal).type == ActionType.CHECK
+
+
+def test_heuristic_distribution_air_bluff_mixed() -> None:
+    # 纯空气无人下注：分布按下注频率配比下注与过牌，是策略里唯一的混合分支。
+    state = _hero_state(cards("2c 7d"), board=cards("As Kc 9s"), street=Street.FLOP)
+    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=1000)
+    bot = HeuristicStrategy(seed=0, samples=500, bluff_freq=0.25)
+    dist = bot.action_distribution(state, legal)
+    weights = {action.type: weight for action, weight in dist}
+    assert sum(weights.values()) == pytest.approx(1.0)
+    assert weights[ActionType.BET] == pytest.approx(0.25)
+    assert weights[ActionType.CHECK] == pytest.approx(0.75)
+
+
+def test_heuristic_distribution_deterministic_branch_single() -> None:
+    # 面对下注的阈值分支是确定性的，分布只含一个动作（概率 1.0）。
+    state = _hero_state(cards("As 7h"), board=cards("Ad Kc 2s"), street=Street.FLOP, pot=100)
+    legal = _legal(can_call=True, call_amount=20)
+    bot = HeuristicStrategy(seed=0, samples=500, bluff_freq=0.25)
+    dist = bot.action_distribution(state, legal)
+    assert len(dist) == 1
+    assert dist[0][0].type == ActionType.CALL
+    assert dist[0][1] == 1.0
 
 
 # ------------------------------------------------------------------ 引擎闭环

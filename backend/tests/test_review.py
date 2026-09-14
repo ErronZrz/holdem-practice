@@ -1,6 +1,13 @@
 """复盘分析测试：确定性重放、错误检测与参考 Bot 对比。"""
 
-from app.analysis.hand_review import _conservative_action, _detect_mistakes, build_review
+import pytest
+
+from app.analysis.hand_review import (
+    _conservative_distribution,
+    _detect_mistakes,
+    _weak_kicker_top_pair,
+    build_review,
+)
 from app.poker.actions import Action, ActionType, LegalActions
 from app.poker.cards import card_from_str as card
 from app.poker.engine import PokerEngine
@@ -113,6 +120,11 @@ def test_review_reports_reference_bot_action() -> None:
     for d in review["decisions"]:
         assert 0.0 <= d["equity"] <= 1.0
         assert d["bot_action"]["action"] in ("fold", "check", "call", "bet", "raise")
+        distribution = d["bot_distribution"]
+        assert distribution, "每个决策点都应给出参考动作分布"
+        assert sum(item["probability"] for item in distribution) == pytest.approx(1.0)
+        top = max(distribution, key=lambda item: item["probability"])
+        assert d["bot_action"]["action"] == top["action"], "参考动作取分布中的众数"
 
 
 def test_review_replays_per_player_stacks() -> None:
@@ -184,6 +196,7 @@ def test_detect_mistakes_bad_fold_preflop_floor() -> None:
         "can_raise": False,
         "hole_cards": [card("As"), card("Kd")],
         "board": [],
+        "big_blind": 10,
     }
     weak = _detect_mistakes(action=Action(ActionType.FOLD), equity=0.53, **base)
     assert "bad_fold" not in {m["code"] for m in weak}
@@ -200,6 +213,7 @@ def test_detect_mistakes_bad_fold_scales_with_bet_size() -> None:
         "can_raise": False,
         "hole_cards": [card("Ah"), card("7h")],
         "board": [card("2c"), card("7d"), card("9h")],
+        "big_blind": 10,
     }
     edge = _detect_mistakes(action=Action(ActionType.FOLD), equity=0.50, **base)
     assert "bad_fold" not in {m["code"] for m in edge}
@@ -215,6 +229,7 @@ def test_detect_mistakes_bad_fold_requires_playable_strength() -> None:
         "pot": 200,
         "can_raise": False,
         "board": [card("5s"), card("5d"), card("7c")],
+        "big_blind": 10,
     }
     weak = _detect_mistakes(
         action=Action(ActionType.FOLD), equity=0.60, hole_cards=[card("Ah"), card("9h")], **base
@@ -235,6 +250,7 @@ def test_detect_mistakes_value_missed_threshold() -> None:
         "can_raise": True,
         "hole_cards": [card("As"), card("Ad")],
         "board": [card("2c"), card("7d"), card("9h")],
+        "big_blind": 10,
     }
     thin = _detect_mistakes(action=Action(ActionType.CHECK), equity=0.75, **base)
     assert "value_missed" not in {m["code"] for m in thin}
@@ -251,11 +267,89 @@ def test_detect_mistakes_bad_call_margin() -> None:
         "can_raise": True,
         "hole_cards": [card("8c"), card("3d")],
         "board": [card("2c"), card("7d"), card("9h")],
+        "big_blind": 10,
     }
     edge = _detect_mistakes(action=Action(ActionType.CALL), equity=0.38, **base)
     assert "bad_call" not in {m["code"] for m in edge}
     clear = _detect_mistakes(action=Action(ActionType.CALL), equity=0.30, **base)
     assert "bad_call" in {m["code"] for m in clear}
+
+
+def test_detect_mistakes_preflop_limp_exempt() -> None:
+    # 翻牌前跟注额不超过一个大盲（补齐盲注 / limp）属廉价看牌，不判赔率不足。
+    base = {
+        "pot_odds": 0.40,
+        "to_call": 20,
+        "pot": 30,
+        "can_raise": True,
+        "hole_cards": [card("6h"), card("As")],
+        "board": [],
+    }
+    limp = _detect_mistakes(
+        action=Action(ActionType.CALL), equity=0.275, big_blind=20, **base
+    )
+    assert "bad_call" not in {m["code"] for m in limp}
+    # 超过一个大盲的翻前跟注仍按赔率判定。
+    raised = _detect_mistakes(
+        action=Action(ActionType.CALL), equity=0.275, big_blind=10, **base
+    )
+    assert "bad_call" in {m["code"] for m in raised}
+
+
+def test_detect_mistakes_limp_exempt_is_preflop_only() -> None:
+    # 翻牌后即使跟注额不超过一个大盲，也不适用 limp 豁免。
+    base = {
+        "pot_odds": 0.40,
+        "to_call": 20,
+        "pot": 30,
+        "can_raise": True,
+        "hole_cards": [card("8c"), card("3d")],
+        "board": [card("2c"), card("7d"), card("9h")],
+    }
+    mistakes = _detect_mistakes(
+        action=Action(ActionType.CALL), equity=0.275, big_blind=20, **base
+    )
+    assert "bad_call" in {m["code"] for m in mistakes}
+
+
+def test_weak_kicker_top_pair_detection() -> None:
+    board = [card(s) for s in ("Qs", "Tc", "Ad", "2h", "8s")]
+    # 顶对但踢脚 6 低于公共牌第二高的 Q，判弱；踢脚 K 高于 Q 不判弱。
+    assert _weak_kicker_top_pair([card("6h"), card("As")], board) is True
+    assert _weak_kicker_top_pair([card("Kh"), card("As")], board) is False
+    # 两对、三条、超对与「仅靠公共牌成对」均不属弱踢脚顶对。
+    assert _weak_kicker_top_pair([card("Qh"), card("As")], board) is False
+    assert _weak_kicker_top_pair([card("Ah"), card("Ad")], board) is False
+    assert _weak_kicker_top_pair([card("Kh"), card("Kd")], board) is False
+    assert (
+        _weak_kicker_top_pair(
+            [card("Kh"), card("Jd")], [card("Qs"), card("Qd"), card("2c")]
+        )
+        is False
+    )
+    # 翻牌同样适用：A6 在 A 8 2 上踢脚 6 低于 8，判弱。
+    flop = [card("Ad"), card("8c"), card("2s")]
+    assert _weak_kicker_top_pair([card("6h"), card("As")], flop) is True
+
+
+def test_detect_mistakes_value_missed_skips_weak_kicker() -> None:
+    # 弱踢脚顶对属薄价值，过牌不判价值丢失；强踢脚顶对仍判。
+    base = {
+        "pot_odds": None,
+        "to_call": 0,
+        "pot": 630,
+        "can_raise": True,
+        "board": [card(s) for s in ("Qs", "Tc", "Ad", "2h", "8s")],
+        "big_blind": 10,
+    }
+    weak = _detect_mistakes(
+        action=Action(ActionType.CHECK), equity=0.85, hole_cards=[card("6h"), card("As")], **base
+    )
+    assert "value_missed" not in {m["code"] for m in weak}
+    strong = _detect_mistakes(
+        action=Action(ActionType.CHECK), equity=0.85, hole_cards=[card("Kh"), card("As")], **base
+    )
+    assert "value_missed" in {m["code"] for m in strong}
 
 
 # ------------------------------------------------------------------ 保守参考动作
@@ -292,16 +386,27 @@ def _facing_bet_state(hole, board, pot, street=Street.FLOP) -> GameState:
     )
 
 
+def _prob(distribution: list[tuple[Action, float]], action_type: ActionType) -> float:
+    """取分布中某类动作的总概率，便于断言。"""
+    return sum(weight for action, weight in distribution if action.type == action_type)
+
+
+def _single(action_type: ActionType, amount: int = 0) -> list[tuple[Action, float]]:
+    """构造只含一个动作（概率 1.0）的基线分布。"""
+    return [(Action(action_type, amount), 1.0)]
+
+
 def test_conservative_reference_folds_high_card_to_bet() -> None:
-    # 高张无听牌面对下注：胜率虽高于赔率，但无成手牌，参考动作应收紧为弃牌。
+    # 高张无听牌面对下注：胜率虽高于赔率，但无成手牌，跟注质量应转移到弃牌。
     state = _facing_bet_state(
         [card("Ah"), card("Qs")], [card("8h"), card("Th"), card("4d")], pot=30
     )
     legal = _legal(can_call=True, call_amount=15)
-    action = _conservative_action(
-        state, legal, state.players[0], eq=0.55, bot_action=Action(ActionType.CALL)
+    dist = _conservative_distribution(
+        state, legal, state.players[0], eq=0.55, baseline=_single(ActionType.CALL)
     )
-    assert action.type == ActionType.FOLD
+    assert _prob(dist, ActionType.FOLD) == 1.0
+    assert _prob(dist, ActionType.CALL) == 0.0
 
 
 def test_conservative_reference_calls_top_pair() -> None:
@@ -310,10 +415,10 @@ def test_conservative_reference_calls_top_pair() -> None:
         [card("Ah"), card("7d")], [card("Ad"), card("Kc"), card("2s")], pot=30
     )
     legal = _legal(can_call=True, call_amount=15)
-    action = _conservative_action(
-        state, legal, state.players[0], eq=0.55, bot_action=Action(ActionType.CALL)
+    dist = _conservative_distribution(
+        state, legal, state.players[0], eq=0.55, baseline=_single(ActionType.CALL)
     )
-    assert action.type == ActionType.CALL
+    assert _prob(dist, ActionType.CALL) == 1.0
 
 
 def test_conservative_reference_calls_strong_draw() -> None:
@@ -322,10 +427,10 @@ def test_conservative_reference_calls_strong_draw() -> None:
         [card("Ts"), card("9s")], [card("As"), card("Ks"), card("2d")], pot=30
     )
     legal = _legal(can_call=True, call_amount=15)
-    action = _conservative_action(
-        state, legal, state.players[0], eq=0.55, bot_action=Action(ActionType.CALL)
+    dist = _conservative_distribution(
+        state, legal, state.players[0], eq=0.55, baseline=_single(ActionType.CALL)
     )
-    assert action.type == ActionType.CALL
+    assert _prob(dist, ActionType.CALL) == 1.0
 
 
 def test_conservative_reference_allows_cheap_call_with_high_card() -> None:
@@ -334,27 +439,67 @@ def test_conservative_reference_allows_cheap_call_with_high_card() -> None:
         [card("Ah"), card("Qs")], [card("8h"), card("Th"), card("4d")], pot=60
     )
     legal = _legal(can_call=True, call_amount=20)
-    action = _conservative_action(
-        state, legal, state.players[0], eq=0.55, bot_action=Action(ActionType.CALL)
+    dist = _conservative_distribution(
+        state, legal, state.players[0], eq=0.55, baseline=_single(ActionType.CALL)
     )
-    assert action.type == ActionType.CALL
+    assert _prob(dist, ActionType.CALL) == 1.0
+
+
+def test_conservative_reference_shifts_only_call_mass() -> None:
+    # 收窄只转移跟注质量，不改变弃牌等其它动作的权重。
+    state = _facing_bet_state(
+        [card("Ah"), card("Qs")], [card("8h"), card("Th"), card("4d")], pot=30
+    )
+    legal = _legal(can_call=True, call_amount=15)
+    baseline = [(Action(ActionType.CALL), 0.6), (Action(ActionType.FOLD), 0.4)]
+    dist = _conservative_distribution(state, legal, state.players[0], eq=0.55, baseline=baseline)
+    assert _prob(dist, ActionType.FOLD) == pytest.approx(1.0)
+    assert _prob(dist, ActionType.CALL) == 0.0
+
+
+def test_conservative_reference_checks_weak_kicker_top_pair() -> None:
+    # 弱踢脚顶对无人下注：把价值下注质量转移到过牌。
+    state = _facing_bet_state(
+        [card("6h"), card("As")],
+        [card(s) for s in ("Qs", "Tc", "Ad", "2h", "8s")],
+        pot=630,
+        street=Street.RIVER,
+    )
+    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=630)
+    dist = _conservative_distribution(
+        state, legal, state.players[0], eq=0.85, baseline=_single(ActionType.BET, 630)
+    )
+    assert _prob(dist, ActionType.CHECK) == 1.0
+    assert _prob(dist, ActionType.BET) == 0.0
+
+
+def test_conservative_reference_keeps_strong_kicker_value_bet() -> None:
+    # 强踢脚顶对（K 高于公共牌第二高的 Q）不属弱踢脚，价值下注保留。
+    state = _facing_bet_state(
+        [card("Kh"), card("As")], [card("Qs"), card("Tc"), card("Ad")], pot=100
+    )
+    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=100)
+    dist = _conservative_distribution(
+        state, legal, state.players[0], eq=0.85, baseline=_single(ActionType.BET, 100)
+    )
+    assert _prob(dist, ActionType.BET) == 1.0
 
 
 def test_conservative_reference_keeps_raise_and_fold() -> None:
-    # 加注与弃牌不属于「宽松跟注」，参考动作原样沿用 Bot。
+    # 加注与弃牌不属于「宽松跟注」，参考分布原样沿用基线。
     state = _facing_bet_state(
         [card("3s"), card("3c")], [card("3d"), card("Kc"), card("2s")], pot=30
     )
     legal = _legal(
         can_call=True, call_amount=15, can_raise=True, min_raise_to=30, max_raise_to=1000
     )
-    raise_action = Action(ActionType.RAISE, 60)
+    raise_dist = _single(ActionType.RAISE, 60)
     assert (
-        _conservative_action(state, legal, state.players[0], eq=0.95, bot_action=raise_action)
-        == raise_action
+        _conservative_distribution(state, legal, state.players[0], eq=0.95, baseline=raise_dist)
+        == raise_dist
     )
-    fold_action = Action(ActionType.FOLD)
+    fold_dist = _single(ActionType.FOLD)
     assert (
-        _conservative_action(state, legal, state.players[0], eq=0.10, bot_action=fold_action)
-        == fold_action
+        _conservative_distribution(state, legal, state.players[0], eq=0.10, baseline=fold_dist)
+        == fold_dist
     )

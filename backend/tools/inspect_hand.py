@@ -71,15 +71,15 @@ def _list_recent(limit: int) -> None:
 
 
 def _install_probe() -> list[dict]:
-    """包裹复盘内部的保守参考动作函数，记录每个决策点的中间判据状态。
+    """包裹复盘内部的保守收窄函数，记录每个决策点的中间判据状态。
 
     复盘按决策点顺序调用该函数，因此记录顺序与 decisions 一一对应。
     """
     records: list[dict] = []
-    original = hand_review._conservative_action
+    original = hand_review._conservative_distribution
 
-    def probed(snapshot, legal, me, eq, bot_action):
-        result = original(snapshot, legal, me, eq, bot_action)
+    def probed(snapshot, legal, me, eq, baseline):
+        result = original(snapshot, legal, me, eq, baseline)
         postflop = snapshot.street != Street.PREFLOP
         to_call = legal.call_amount
         pot = snapshot.pot
@@ -96,11 +96,16 @@ def _install_probe() -> list[dict]:
                 "legal": legal,
                 "me": me,
                 "equity": eq,
-                "raw_bot": bot_action,
-                "reference": result,
+                "raw_dist": baseline,
+                "reference_dist": result,
                 "pot_odds": pot_odds,
                 "margin": margin,
                 "made_hand": hand_review._is_made_hand(me.hole_cards, snapshot.board)
+                if postflop
+                else None,
+                "weak_kicker": hand_review._weak_kicker_top_pair(
+                    me.hole_cards, snapshot.board
+                )
                 if postflop
                 else None,
                 "outs": outs,
@@ -117,7 +122,7 @@ def _install_probe() -> list[dict]:
         )
         return result
 
-    hand_review._conservative_action = probed
+    hand_review._conservative_distribution = probed
     return records
 
 
@@ -143,11 +148,20 @@ def _print_hand_header(
         print(f"  {street:>7}  seat={a['seat']}  {a['action']:>11}  amount={a['amount']}")
 
 
+def _format_dist(dist) -> str:
+    """把动作概率分布格式化为一行可读文本。"""
+    if not dist:
+        return "-"
+    items = [f"{action.type.value}({action.amount}) {weight:.0%}" for action, weight in dist]
+    return " / ".join(items)
+
+
 def _bot_rationale(rec: dict) -> str:
     """推断启发式基线给出该动作的依据，便于解释参考动作从何而来。"""
-    raw = rec.get("raw_bot")
-    if raw is None:
+    dist = rec.get("raw_dist") or []
+    if not dist:
         return "-"
+    raw = dist[0][0]
     if rec.get("pot_odds") is not None:
         if raw.type == ActionType.RAISE:
             return f"胜率≥{_RAISE_EQ:.2f}，加注"
@@ -159,7 +173,7 @@ def _bot_rationale(rec: dict) -> str:
             return f"价值下注（胜率≥{_VALUE_BET_EQ:.2f}）"
         if (rec.get("outs") or 0) >= _DRAW_STRONG_OUTS:
             return f"半诈唬（补牌≥{_DRAW_STRONG_OUTS}）"
-        return "纯空气诈唬（随机命中诈唬频率）"
+        return "纯空气诈唬（按诈唬频率配比）"
     return "过牌"
 
 
@@ -181,11 +195,13 @@ def _print_decisions(review: dict, records: list[dict]) -> None:
         )
         print(
             f"  真人动作={d['action']['action']}({d['action']['amount']})  "
-            f"heuristic原始={rec.get('raw_bot').type.value if rec.get('raw_bot') else '-'}"
-            f"({rec.get('raw_bot').amount if rec.get('raw_bot') else '-'})  "
-            f"参考动作={d['bot_action']['action']}({d['bot_action']['amount']})"
+            f"启发式基线={_format_dist(rec.get('raw_dist'))}"
         )
-        print(f"  参考依据：{_bot_rationale(rec)}")
+        print(
+            f"  参考分布={_format_dist(rec.get('reference_dist'))}  "
+            f"参考动作={d['bot_action']['action']}({d['bot_action']['amount']})  "
+            f"参考依据：{_bot_rationale(rec)}"
+        )
         if rec.get("pot_odds") is not None:
             margin = rec["margin"]
             threshold = rec["pot_odds"] + margin
@@ -197,7 +213,8 @@ def _print_decisions(review: dict, records: list[dict]) -> None:
             print("  判据·赔率余量：无人下注，不适用")
         print(
             f"  判据·牌力：_is_made_hand={rec.get('made_hand')}  draw_outs={rec.get('outs')}  "
-            f"_has_playable_strength={rec.get('playable')}  小注例外={rec.get('small_bet')}"
+            f"_has_playable_strength={rec.get('playable')}  小注例外={rec.get('small_bet')}  "
+            f"弱踢脚顶对={rec.get('weak_kicker')}"
         )
         codes = [m["code"] for m in d["mistakes"]]
         print(f"  命中 mistakes={codes or '无'}")

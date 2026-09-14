@@ -44,11 +44,13 @@
 | 前端 | 复盘区展示分布 |
 | 测试 | `tests/test_review.py`、`tests/test_games_api.py` 相关断言 |
 
-**状态**：待办，下一轮详细展开设计。
+**状态**：已由 `16-m5-reference-distribution-and-gates.md` §3 落地（分布唯一事实源、众数参考动作、概率质量再分配）。
 
 ---
 
 ## 3. 本轮核对暴露的疑点（现象 + 分析）
+
+> **后续**：本节三处疑点已由 `16-m5-reference-distribution-and-gates.md` 处理——§3.1 → 参考动作概率分布；§3.2 → 翻牌前 limp 豁免；§3.3 → 弱踢脚顶对门槛。
 
 ### 3.1 参考动作的随机诈唬
 

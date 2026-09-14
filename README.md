@@ -31,8 +31,11 @@ docs/       # 需求与规划文档
 ```bash
 cd backend
 uv sync
-uv run uvicorn app.main:app --reload
+uv run uvicorn app.main:app --reload --reload-dir app
 ```
+
+`--reload-dir app` 把热重载限定在 `app` 包：改动 `tools/`、`tests/` 不会重启进程。
+进行中的对局仅驻留内存，进程重启会丢失当前对局（见 `docs/14-in-memory-runtime-reload.md`）。
 
 ### 前端
 

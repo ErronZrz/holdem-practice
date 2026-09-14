@@ -210,4 +210,9 @@ def test_hand_review_endpoint() -> None:
     for d in body["decisions"]:
         assert d["action"]["action"] in ("fold", "check", "call", "bet", "raise")
         assert d["bot_action"]["action"] in ("fold", "check", "call", "bet", "raise")
+        distribution = d["bot_distribution"]
+        assert distribution, "复盘应给出参考动作分布"
+        assert sum(item["probability"] for item in distribution) == pytest.approx(1.0)
+        top = max(distribution, key=lambda item: item["probability"])
+        assert d["bot_action"]["action"] == top["action"], "参考动作取分布中的众数"
     assert client.get("/hands/unknown/review").status_code == 404

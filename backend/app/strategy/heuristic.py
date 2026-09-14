@@ -136,11 +136,32 @@ class HeuristicStrategy:
         self._samples = samples
         self._bluff_freq = bluff_freq
 
-    def choose_action(self, state: GameState, legal: LegalActions) -> Action:
+    def action_distribution(
+        self, state: GameState, legal: LegalActions
+    ) -> list[tuple[Action, float]]:
+        """返回当前局面的动作概率分布，权重之和约为 1。
+
+        确定性分支只含一个动作（权重 1.0）；仅「无人下注的纯空气诈唬」是混合分布，
+        由 ``bluff_freq`` 决定下注与过牌的配比。复盘据此展示策略分布而非单次采样结果，
+        无需在分析层重复实现分支判据。
+        """
         me = hero(state)
         if state.street == Street.PREFLOP:
-            return self._preflop_action(state, legal, me)
-        return self._postflop_action(state, legal, me)
+            return [(self._preflop_action(state, legal, me), 1.0)]
+        return self._postflop_distribution(state, legal, me)
+
+    def choose_action(self, state: GameState, legal: LegalActions) -> Action:
+        """按当前局面的动作分布采样一个动作；确定性分支直接取该动作，不消耗随机数。"""
+        distribution = self.action_distribution(state, legal)
+        if len(distribution) == 1:
+            return distribution[0][0]
+        roll = self._rng.random()
+        cumulative = 0.0
+        for action, weight in distribution:
+            cumulative += weight
+            if roll < cumulative:
+                return action
+        return distribution[-1][0]
 
     # ------------------------------------------------------------------ 翻牌前
 
@@ -192,12 +213,12 @@ class HeuristicStrategy:
 
     # ------------------------------------------------------------------ 翻牌后
 
-    def _postflop_action(
+    def _postflop_distribution(
         self,
         state: GameState,
         legal: LegalActions,
         me: PlayerState,
-    ) -> Action:
+    ) -> list[tuple[Action, float]]:
         opps = _num_opponents(state)
         eq = equity(me.hole_cards, state.board, opps, self._rng, self._samples)
 
@@ -205,21 +226,29 @@ class HeuristicStrategy:
             # 面对下注：按胜率与底池赔率决定跟注/加注/弃牌。
             pot_odds = legal.call_amount / (state.pot + legal.call_amount)
             if eq >= _RAISE_EQ and legal.can_raise:
-                return Action(ActionType.RAISE, self._raise_amount(state, legal, me))
+                raise_to = Action(ActionType.RAISE, self._raise_amount(state, legal, me))
+                return [(raise_to, 1.0)]
             if eq >= _AIR_EQ and eq >= pot_odds:
-                return Action(ActionType.CALL)
-            return Action(ActionType.FOLD)
+                return [(Action(ActionType.CALL), 1.0)]
+            return [(Action(ActionType.FOLD), 1.0)]
 
         # 无人下注：按胜率决定价值下注、半诈唬、诈唬或过牌。
         if legal.can_bet:
             if eq >= _VALUE_BET_EQ:
-                return Action(ActionType.BET, self._bet_amount(state, legal))
+                bet = Action(ActionType.BET, self._bet_amount(state, legal))
+                return [(bet, 1.0)]
             outs = draw_outs(me.hole_cards, state.board) if len(state.board) < 5 else 0
             if outs >= _DRAW_STRONG_OUTS:
-                return Action(ActionType.BET, self._bet_amount(state, legal))
-            if eq < _AIR_EQ and self._rng.random() < self._bluff_freq:
-                return Action(ActionType.BET, self._bet_amount(state, legal))
-        return Action(ActionType.CHECK)
+                bet = Action(ActionType.BET, self._bet_amount(state, legal))
+                return [(bet, 1.0)]
+            if eq < _AIR_EQ and 0.0 < self._bluff_freq < 1.0:
+                # 纯空气：以下注频率配比诈唬与过牌，是策略里唯一的混合分支。
+                bet = Action(ActionType.BET, self._bet_amount(state, legal))
+                return [(bet, self._bluff_freq), (Action(ActionType.CHECK), 1.0 - self._bluff_freq)]
+            if eq < _AIR_EQ and self._bluff_freq >= 1.0:
+                bet = Action(ActionType.BET, self._bet_amount(state, legal))
+                return [(bet, 1.0)]
+        return [(Action(ActionType.CHECK), 1.0)]
 
     # ------------------------------------------------------------------ 动作构造
 

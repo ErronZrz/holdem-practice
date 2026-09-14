@@ -1,7 +1,13 @@
 <script setup>
 import { onActivated, ref } from 'vue'
 import { api } from '../api.js'
-import { ACTION_CN, HAND_CATEGORY_CN, STREET_CN, actionText as actionLabel } from '../cards.js'
+import {
+  ACTION_CN,
+  HAND_CATEGORY_CN,
+  STREET_CN,
+  actionText as actionLabel,
+  distributionText,
+} from '../cards.js'
 import { copyText } from '../clipboard.js'
 import PlayingCard from './PlayingCard.vue'
 
@@ -254,6 +260,9 @@ onActivated(() => {
             <div class="review-row">
               <span>你：{{ actionLabel(d.action) }}</span>
               <span>参考：{{ actionLabel(d.bot_action) }}</span>
+            </div>
+            <div v-if="distributionText(d)" class="review-row muted">
+              <span>参考分布：{{ distributionText(d) }}</span>
             </div>
             <div class="review-row muted">
               <span>胜率 {{ pct(d.equity) }}</span>
