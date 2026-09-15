@@ -23,10 +23,10 @@ def create_session(
     small_blind: int,
     big_blind: int,
     starting_stack: int,
-    target_hands: int,
+    target_hands: int | None,
     bot_strategy: str,
 ) -> SessionModel:
-    """新建对局记录并落库（flush，不 commit）。"""
+    """新建对局记录并落库（flush，不 commit）。target_hands 为 None 时落库 0，表示不限手数。"""
     session = SessionModel(
         id=_new_id(),
         num_players=num_players,
@@ -34,7 +34,7 @@ def create_session(
         small_blind=small_blind,
         big_blind=big_blind,
         starting_stack=starting_stack,
-        target_hands=target_hands,
+        target_hands=target_hands or 0,
         bot_strategy=bot_strategy,
     )
     db.add(session)

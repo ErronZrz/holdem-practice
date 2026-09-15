@@ -31,6 +31,7 @@ class SessionModel(Base):
     small_blind: Mapped[int] = mapped_column(Integer, nullable=False)
     big_blind: Mapped[int] = mapped_column(Integer, nullable=False)
     starting_stack: Mapped[int] = mapped_column(Integer, nullable=False)
+    # 0 表示不限手数（对局不会自动结束）。
     target_hands: Mapped[int] = mapped_column(Integer, nullable=False)
     hands_played: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     net_chips: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

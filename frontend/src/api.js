@@ -15,7 +15,10 @@ async function request(path, options = {}) {
     } catch {
       // 忽略非 JSON 响应
     }
-    throw new Error(detail)
+    const err = new Error(detail)
+    // 带上状态码，便于调用方区分「对局不在内存中（404）」与其它失败。
+    err.status = res.status
+    throw err
   }
   return res.json()
 }

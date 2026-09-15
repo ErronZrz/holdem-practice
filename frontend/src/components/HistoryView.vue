@@ -96,6 +96,13 @@ function netOf(history, seat) {
   return history.net?.[String(seat)] ?? 0
 }
 
+// 不限手数的对局（target_hands 为 0）只显示已打手数。
+function handsText(session) {
+  return session.target_hands > 0
+    ? `${session.hands_played}/${session.target_hands} 手`
+    : `${session.hands_played} 手`
+}
+
 function showdownHandOf(history, seat) {
   return history.showdown_hands?.[String(seat)] || null
 }
@@ -127,7 +134,7 @@ onActivated(() => {
         <option disabled value="">选择对局…</option>
         <option v-for="s in sessions" :key="s.id" :value="s.id">
           {{ new Date(s.created_at).toLocaleString() }} · {{ s.num_players }} 人 ·
-          {{ s.hands_played }}/{{ s.target_hands }} 手 · 净 {{ s.net_chips }}
+          {{ handsText(s) }} · 净 {{ s.net_chips }}
         </option>
       </select>
     </div>

@@ -190,6 +190,57 @@ def test_showdown_reveals_hands_and_pots() -> None:
     assert found, "未出现摊牌"
 
 
+def _play_one_hand(
+    client: TestClient, game_id: str, data: dict, max_steps: int = 5000
+) -> dict:
+    """从当前状态打完整一手，返回本手结束时的 GameView。"""
+    steps = 0
+    while not data["hand_over"] and steps < max_steps:
+        if data["is_human_turn"]:
+            resp = client.post(
+                f"/games/{game_id}/actions", json=_pick_legal(data["legal_actions"])
+            )
+            assert resp.status_code == 200, resp.text
+            data = resp.json()
+        else:
+            data = client.get(f"/games/{game_id}").json()
+        steps += 1
+    assert data["hand_over"], "单手步数超限，疑似死锁"
+    return data
+
+
+def test_blind_derivation_and_even_validation() -> None:
+    client = TestClient(app)
+    # 奇数大盲 -> 400
+    assert client.post("/games", json={"num_players": 2, "big_blind": 15}).status_code == 400
+    # 显式传入的小盲与大盲一半不一致 -> 400
+    resp = client.post("/games", json={"num_players": 2, "big_blind": 20, "small_blind": 5})
+    assert resp.status_code == 400
+    # 偶数大盲 -> 小盲自动取其一半
+    data = client.post("/games", json={"num_players": 2, "big_blind": 20, "seed": 3}).json()
+    assert data["big_blind"] == 20
+    assert data["small_blind"] == 10
+
+
+def test_unlimited_session_never_finishes() -> None:
+    """不传 target_hands 表示不限手数：连打多手仍为进行中，且可无限进入下一手。"""
+    client = TestClient(app)
+    data = client.post("/games", json={"num_players": 2, "big_blind": 10, "seed": 5}).json()
+    game_id = data["session_id"]
+    assert data["target_hands"] == 0
+    assert data["session_finished"] is False
+
+    for _ in range(6):
+        data = _play_one_hand(client, game_id, data)
+        assert data["session_finished"] is False
+        data = client.post(f"/games/{game_id}/next-hand").json()
+
+    stats = client.get(f"/games/{game_id}/stats").json()
+    assert stats["hands_played"] == 6
+    assert stats["status"] == "active"
+    assert stats["target_hands"] == 0
+
+
 def test_hand_review_endpoint() -> None:
     client = TestClient(app)
     data = client.post(

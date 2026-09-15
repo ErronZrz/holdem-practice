@@ -6,15 +6,19 @@ from pydantic import BaseModel, Field
 
 
 class CreateGameRequest(BaseModel):
-    """创建对局的请求。num_players 可大于 2（引擎按 N 人设计，MVP 界面默认 2）。"""
+    """创建对局的请求。num_players 可大于 2（引擎按 N 人设计，界面默认 2）。
+
+    大盲必须是偶数，小盲由大盲推导（= 大盲 / 2）；``target_hands`` 省略表示不限手数。
+    ``small_blind`` / ``target_hands`` / ``bot_strategy`` 保留以兼容旧客户端，界面已不再提供这三项。
+    """
 
     num_players: int = Field(default=2, ge=2, le=10)
-    target_hands: int = Field(default=50, ge=1, le=10000)
-    small_blind: int = Field(default=5, ge=1)
-    big_blind: int = Field(default=10, ge=1)
+    big_blind: int = Field(default=10, ge=2)
     starting_stack: int = Field(default=1000, ge=1)
-    bot_strategy: Literal["heuristic", "random"] = "heuristic"
     seed: int | None = None
+    small_blind: int | None = Field(default=None, ge=1)
+    target_hands: int | None = Field(default=None, ge=1, le=10000)
+    bot_strategy: Literal["heuristic", "random"] = "heuristic"
 
 
 class SubmitActionRequest(BaseModel):
@@ -81,7 +85,7 @@ class GameView(BaseModel):
     session_id: str
     hand_number: int
     hands_played: int
-    target_hands: int
+    target_hands: int  # 0 表示不限手数
     small_blind: int
     big_blind: int
     session_finished: bool

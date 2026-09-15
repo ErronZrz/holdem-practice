@@ -103,7 +103,8 @@ def _finalize_hand(runtime: GameRuntime, db: Session) -> None:
     session = repository.get_session(db, runtime.session_id)
     session.hands_played += 1
     session.net_chips += human_net
-    if session.hands_played >= session.target_hands:
+    # target_hands 为 0 表示不限手数，对局不会自动结束。
+    if session.target_hands > 0 and session.hands_played >= session.target_hands:
         session.status = "finished"
         session.finished_at = utcnow()
     db.commit()
@@ -216,13 +217,17 @@ def create_game(
     req: schemas.CreateGameRequest,
     db: Annotated[Session, Depends(get_db)],
 ) -> schemas.GameView:
-    if req.small_blind > req.big_blind:
-        raise HTTPException(status_code=400, detail="小盲不能大于大盲")
+    if req.big_blind % 2 != 0:
+        raise HTTPException(status_code=400, detail="大盲必须是偶数")
+    # 小盲固定为大盲的一半；显式传入时校验一致，避免与旧客户端口径漂移。
+    small_blind = req.big_blind // 2
+    if req.small_blind is not None and req.small_blind != small_blind:
+        raise HTTPException(status_code=400, detail="小盲必须等于大盲的一半")
     session = repository.create_session(
         db,
         num_players=req.num_players,
         human_seat=0,
-        small_blind=req.small_blind,
+        small_blind=small_blind,
         big_blind=req.big_blind,
         starting_stack=req.starting_stack,
         target_hands=req.target_hands,
@@ -232,7 +237,7 @@ def create_game(
 
     engine = PokerEngine(
         req.num_players,
-        req.small_blind,
+        small_blind,
         req.big_blind,
         req.starting_stack,
         seed=req.seed,

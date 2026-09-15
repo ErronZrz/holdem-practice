@@ -31,6 +31,19 @@ function bb(value, bigBlind) {
   return Number.isInteger(n) ? n : n.toFixed(1)
 }
 
+// 不限手数的对局（target_hands 为 0）不展示目标手数。
+function handsText(session) {
+  return session.target_hands > 0
+    ? `${session.hands_played}/${session.target_hands} 手`
+    : `${session.hands_played} 手`
+}
+
+function handsValue(stats) {
+  return stats.target_hands > 0
+    ? `${stats.hands_played} / ${stats.target_hands}`
+    : `${stats.hands_played}`
+}
+
 onActivated(() => {
   loadSessions()
   if (selectedSession.value) selectSession(selectedSession.value)
@@ -46,7 +59,7 @@ onActivated(() => {
         <option disabled value="">选择对局…</option>
         <option v-for="s in sessions" :key="s.id" :value="s.id">
           {{ new Date(s.created_at).toLocaleString() }} · {{ s.num_players }} 人 ·
-          {{ s.hands_played }}/{{ s.target_hands }} 手
+          {{ handsText(s) }}
         </option>
       </select>
     </div>
@@ -55,7 +68,7 @@ onActivated(() => {
       <div class="cards">
         <div class="stat-card">
           <div class="stat-label">已打手数</div>
-          <div class="stat-value">{{ stats.hands_played }} / {{ stats.target_hands }}</div>
+          <div class="stat-value">{{ handsValue(stats) }}</div>
         </div>
         <div class="stat-card">
           <div class="stat-label">累计净盈亏</div>

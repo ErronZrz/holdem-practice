@@ -1,5 +1,15 @@
 <script setup>
-import { computed, onActivated, onDeactivated, onUnmounted, reactive, ref, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onActivated,
+  onDeactivated,
+  onMounted,
+  onUnmounted,
+  reactive,
+  ref,
+  watch,
+} from 'vue'
 import { api } from '../api.js'
 import { actionText, distributionText, HAND_CATEGORY_CN, STREET_CN } from '../cards.js'
 import { copyText } from '../clipboard.js'
@@ -7,25 +17,97 @@ import PlayingCard from './PlayingCard.vue'
 
 const emit = defineEmits(['navigate'])
 
+// ---------------------------------------------- 设置参数持久化（localStorage）
+
+const CONFIG_KEY = 'holdem.table.config'
+const SESSION_KEY = 'holdem.table.session'
+
+function readStorage(key) {
+  try {
+    return localStorage.getItem(key)
+  } catch {
+    return null
+  }
+}
+
+function writeStorage(key, value) {
+  try {
+    localStorage.setItem(key, value)
+  } catch {
+    // 隐私模式等场景下写入失败时静默降级，不影响牌局本身。
+  }
+}
+
+function removeStorage(key) {
+  try {
+    localStorage.removeItem(key)
+  } catch {
+    // 同上，忽略失败。
+  }
+}
+
+function isEvenPositiveInt(value) {
+  return Number.isInteger(value) && value >= 2 && value % 2 === 0
+}
+
+// 读取并校验保存的设置参数；缺失或非法时返回 null（走首次进入流程）。
+function loadSavedConfig() {
+  const raw = readStorage(CONFIG_KEY)
+  if (!raw) return null
+  try {
+    const cfg = JSON.parse(raw)
+    const numPlayers = Number(cfg?.num_players)
+    const bigBlind = Number(cfg?.big_blind)
+    const startingStack = Number(cfg?.starting_stack)
+    if (!Number.isInteger(numPlayers) || numPlayers < 2 || numPlayers > 10) return null
+    if (!isEvenPositiveInt(bigBlind)) return null
+    if (!Number.isInteger(startingStack) || startingStack < 1) return null
+    return { num_players: numPlayers, big_blind: bigBlind, starting_stack: startingStack }
+  } catch {
+    return null
+  }
+}
+
+// 设置表单校验：与大盲偶数、小盲推导的后端口径保持一致。
+function configErrorText(cfg) {
+  if (!Number.isInteger(cfg.num_players) || cfg.num_players < 2 || cfg.num_players > 10) {
+    return '玩家人数需为 2~10 的整数'
+  }
+  if (!Number.isInteger(cfg.big_blind) || cfg.big_blind < 2) {
+    return '大盲需为不小于 2 的整数'
+  }
+  if (cfg.big_blind % 2 !== 0) {
+    return '大盲必须是偶数（小盲为其一半）'
+  }
+  if (!Number.isInteger(cfg.starting_stack) || cfg.starting_stack < 1) {
+    return '初始筹码需为正整数'
+  }
+  return ''
+}
+
 const game = ref(null)
 const sessionId = ref(null)
 const error = ref('')
 const busy = ref(false)
+const restoring = ref(!!loadSavedConfig())
 const pendingAction = ref(null)
 const betAmount = ref(0)
 const showReview = ref(true)
 const review = ref(null)
 const copiedHandId = ref('')
+const amountInput = ref(null)
+const amountError = ref('')
 
 const form = reactive({
   num_players: 2,
-  target_hands: 50,
-  bot_strategy: 'heuristic',
-  small_blind: 5,
   big_blind: 10,
   starting_stack: 1000,
-  seed: null,
 })
+
+// 小盲由大盲推导，设置表单里只做只读预览。
+const smallBlindPreview = computed(() =>
+  isEvenPositiveInt(form.big_blind) ? form.big_blind / 2 : '—',
+)
 
 const players = computed(() => (game.value ? game.value.players : []))
 const legal = computed(() => game.value?.legal_actions)
@@ -133,18 +215,71 @@ async function pollOnce() {
 
 // ------------------------------------------------------------------ 动作与流程
 
+// 按给定参数创建新对局，并保存参数与对局标识，便于刷新后回到牌桌。
+async function startGameWith(config) {
+  const data = await api.createGame(config)
+  game.value = data
+  sessionId.value = data.session_id
+  writeStorage(CONFIG_KEY, JSON.stringify(config))
+  writeStorage(SESSION_KEY, data.session_id)
+  maybePoll()
+}
+
 async function createGame() {
   if (busy.value) return
+  const config = {
+    num_players: form.num_players,
+    big_blind: form.big_blind,
+    starting_stack: form.starting_stack,
+  }
+  const invalid = configErrorText(config)
+  if (invalid) {
+    error.value = invalid
+    return
+  }
   error.value = ''
   busy.value = true
   try {
-    game.value = await api.createGame({ ...form })
-    sessionId.value = game.value.session_id
-    maybePoll()
+    await startGameWith(config)
   } catch (e) {
     error.value = e.message
   } finally {
     busy.value = false
+  }
+}
+
+// 刷新后回到牌桌：优先恢复进行中的对局；后端内存已丢（404）时按保存的参数新建一局。
+async function restoreOrCreate() {
+  const config = loadSavedConfig()
+  if (!config) {
+    restoring.value = false
+    return
+  }
+  Object.assign(form, config)
+  const savedId = readStorage(SESSION_KEY)
+  if (savedId) {
+    try {
+      game.value = await api.getGame(savedId)
+      sessionId.value = savedId
+      restoring.value = false
+      maybePoll()
+      return
+    } catch (e) {
+      // 404 表示该局已不在内存中（如后端重启），按保存的参数开新的一局；
+      // 其它错误（如后端未启动）留在设置页并提示。
+      if (e.status !== 404) {
+        restoring.value = false
+        error.value = e.message
+        return
+      }
+    }
+  }
+  try {
+    await startGameWith(config)
+  } catch (e) {
+    error.value = e.message
+  } finally {
+    restoring.value = false
   }
 }
 
@@ -178,17 +313,27 @@ async function nextHand() {
   }
 }
 
-function startNewGame() {
+function resetToForm() {
   stopPolling()
   game.value = null
   sessionId.value = null
   pendingAction.value = null
+  amountError.value = ''
   error.value = ''
 }
 
+// 再开一局：保留设置参数，只丢弃当前对局标识。
+function startNewGame() {
+  removeStorage(SESSION_KEY)
+  resetToForm()
+}
+
+// 退出对局：清空保存的设置参数与对局标识，回到设置表单（表单保留上次参数便于直接重开）。
 function exitGame() {
   if (window.confirm('确定退出当前对局吗？已结束的手牌会保留在历史中，进行中的这一手将丢弃。')) {
-    startNewGame()
+    removeStorage(CONFIG_KEY)
+    removeStorage(SESSION_KEY)
+    resetToForm()
   }
 }
 
@@ -204,6 +349,7 @@ function openRaise() {
 
 function cancelAmount() {
   pendingAction.value = null
+  amountError.value = ''
 }
 
 function setMin() {
@@ -220,8 +366,34 @@ function setPot() {
   betAmount.value = Math.min(hi, Math.max(lo, game.value.pot))
 }
 
+// 金额校验：只接受合法区间内的整数，非法时给出中文原因并拒绝发送。
+function amountErrorText(value) {
+  const lo = amountMin.value
+  const hi = amountMax.value
+  const label = pendingAction.value === 'bet' ? '下注' : '加注'
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    return `请输入整数${label}额`
+  }
+  if (lo != null && value < lo) {
+    return `${label}额不能小于最小值 ${lo}`
+  }
+  if (hi != null && value > hi) {
+    return `${label}额不能大于最大值 ${hi}`
+  }
+  return ''
+}
+
 async function confirmAmount() {
   const action = pendingAction.value
+  if (!action) return
+  const invalid = amountErrorText(betAmount.value)
+  if (invalid) {
+    amountError.value = invalid
+    error.value = invalid
+    return
+  }
+  amountError.value = ''
+  error.value = ''
   pendingAction.value = null
   await act(action, betAmount.value)
 }
@@ -232,6 +404,87 @@ const amountMin = computed(() =>
 const amountMax = computed(() =>
   pendingAction.value === 'bet' ? legal.value?.max_bet : legal.value?.max_raise_to,
 )
+
+// ------------------------------------------------------------------ 键盘快捷键
+
+function isEditableTarget(el) {
+  if (!el || !el.tagName) return false
+  return (
+    el.tagName === 'INPUT' ||
+    el.tagName === 'TEXTAREA' ||
+    el.tagName === 'SELECT' ||
+    el.isContentEditable === true
+  )
+}
+
+// 轮到真人时支持键盘操作：C=过牌/跟注，B=下注/加注，F=弃牌；本手结束后空格=下一手。
+// 金额面板打开后只响应 B（填底池）/ M（最小值）/ A（全下）/ Enter（发送）/ Esc（取消）。
+function onKeydown(e) {
+  if (e.ctrlKey || e.metaKey || e.altKey) return
+  const g = game.value
+  if (!g || busy.value) return
+
+  const inAmountInput = e.target === amountInput.value
+  // 金额输入框内允许快捷键；创建表单等其它输入控件内不响应，避免与输入冲突。
+  if (!inAmountInput && isEditableTarget(e.target)) return
+
+  const key = e.key
+
+  // 本手已结束：空格开始下一手。焦点在按钮上时交给浏览器原生激活，避免重复触发。
+  if (g.hand_over) {
+    const onButton = e.target?.tagName === 'BUTTON'
+    if ((key === ' ' || key === 'Spacebar') && !g.session_finished && !onButton) {
+      e.preventDefault()
+      nextHand()
+    }
+    return
+  }
+
+  if (pendingAction.value) {
+    if (key === 'Enter') {
+      e.preventDefault()
+      confirmAmount()
+    } else if (key === 'Escape') {
+      e.preventDefault()
+      cancelAmount()
+    } else if (key === 'b' || key === 'B') {
+      e.preventDefault()
+      setPot()
+    } else if (key === 'm' || key === 'M') {
+      e.preventDefault()
+      setMin()
+    } else if (key === 'a' || key === 'A') {
+      e.preventDefault()
+      setMax()
+    }
+    return
+  }
+
+  if (!g.is_human_turn || !legal.value) return
+
+  if (key === 'f' || key === 'F') {
+    if (legal.value.can_fold) {
+      e.preventDefault()
+      act('fold')
+    }
+  } else if (key === 'c' || key === 'C') {
+    if (legal.value.can_check) {
+      e.preventDefault()
+      act('check')
+    } else if (legal.value.can_call) {
+      e.preventDefault()
+      act('call')
+    }
+  } else if (key === 'b' || key === 'B') {
+    if (legal.value.can_bet) {
+      e.preventDefault()
+      openBet()
+    } else if (legal.value.can_raise) {
+      e.preventDefault()
+      openRaise()
+    }
+  }
+}
 
 function markerLabel(p) {
   if (p.is_button) return '庄'
@@ -271,14 +524,49 @@ watch(
   },
 )
 
-onActivated(maybePoll)
-onDeactivated(stopPolling)
-onUnmounted(stopPolling)
+// 金额面板打开后自动聚焦输入框，便于直接键入金额。
+watch(pendingAction, async (action) => {
+  amountError.value = ''
+  if (!action) return
+  await nextTick()
+  amountInput.value?.focus()
+  amountInput.value?.select()
+})
+
+// 修改金额时清除上一次的校验提示。
+watch(betAmount, () => {
+  if (!amountError.value) return
+  if (error.value === amountError.value) error.value = ''
+  amountError.value = ''
+})
+
+// 组件被 KeepAlive 缓存，切到其它页时需摘掉键盘监听，避免误触发牌桌动作。
+onMounted(() => {
+  window.addEventListener('keydown', onKeydown)
+  // 首次进入：有保存的设置参数则直接回到牌桌，否则停留在设置表单。
+  restoreOrCreate()
+})
+onActivated(() => {
+  window.addEventListener('keydown', onKeydown)
+  maybePoll()
+})
+onDeactivated(() => {
+  window.removeEventListener('keydown', onKeydown)
+  stopPolling()
+})
+onUnmounted(() => {
+  window.removeEventListener('keydown', onKeydown)
+  stopPolling()
+})
 </script>
 
 <template>
   <div class="game-table">
-    <div v-if="!game" class="panel create-form">
+    <div v-if="restoring" class="panel">
+      <p class="muted">正在恢复对局…</p>
+    </div>
+
+    <div v-else-if="!game" class="panel create-form">
       <h2>开始新对局</h2>
       <div class="form-grid">
         <label>
@@ -302,36 +590,26 @@ onUnmounted(stopPolling)
           </div>
         </label>
         <label>
-          目标手数
-          <input v-model.number="form.target_hands" type="number" min="1" max="10000" />
-        </label>
-        <label>
-          Bot 策略
-          <select v-model="form.bot_strategy">
-            <option value="heuristic">启发式（推荐）</option>
-            <option value="random">随机</option>
-          </select>
-        </label>
-        <label>
-          小盲
-          <input v-model.number="form.small_blind" type="number" min="1" />
-        </label>
-        <label>
-          大盲
-          <input v-model.number="form.big_blind" type="number" min="1" />
+          大盲（偶数）
+          <input v-model.number="form.big_blind" type="number" min="2" step="2" />
         </label>
         <label>
           初始筹码
           <input v-model.number="form.starting_stack" type="number" min="1" />
         </label>
       </div>
-      <p class="hint">真人固定坐 0 号位，其余座位由 Bot 驱动；可选 2 人单挑或 5 人桌。</p>
+      <p class="hint">
+        小盲自动为大盲的一半（{{ smallBlindPreview }}）；真人固定坐 0 号位，其余座位由 Bot 驱动；不限手数，可一直练习。
+      </p>
       <button class="primary" :disabled="busy" @click="createGame">开始对局</button>
     </div>
 
     <template v-else>
       <div class="table-meta">
-        <span>第 {{ game.hand_number }} / {{ game.target_hands }} 手</span>
+        <span v-if="game.target_hands > 0">
+          第 {{ game.hand_number }} / {{ game.target_hands }} 手
+        </span>
+        <span v-else>第 {{ game.hand_number }} 手</span>
         <span>{{ game.players.length }} 人桌 · 盲注 {{ game.small_blind }} / {{ game.big_blind }} · {{ streetLabel }}</span>
         <label class="review-toggle">
           <input v-model="showReview" type="checkbox" />
@@ -382,6 +660,69 @@ onUnmounted(stopPolling)
             </div>
           </div>
         </div>
+      </div>
+
+      <div class="controls panel">
+        <div v-if="busy" class="thinking">处理中…</div>
+
+        <template v-else-if="game.is_human_turn && !game.hand_over">
+          <template v-if="!pendingAction">
+            <button v-if="legal.can_fold" class="danger" @click="act('fold')">
+              弃牌<kbd>F</kbd>
+            </button>
+            <button v-if="legal.can_check" @click="act('check')">过牌<kbd>C</kbd></button>
+            <button v-if="legal.can_call" @click="act('call')">
+              跟注 {{ legal.call_amount }}<kbd>C</kbd>
+            </button>
+            <button v-if="legal.can_bet" class="primary" @click="openBet">下注<kbd>B</kbd></button>
+            <button v-if="legal.can_raise" class="primary" @click="openRaise">
+              加注<kbd>B</kbd>
+            </button>
+          </template>
+          <template v-else>
+            <div class="amount-panel">
+              <span class="amount-label">{{ pendingAction === 'bet' ? '下注' : '加注' }}额</span>
+              <input
+                ref="amountInput"
+                v-model.number="betAmount"
+                type="number"
+                :min="amountMin"
+                :max="amountMax"
+              />
+              <span class="range">{{ amountMin }} ~ {{ amountMax }}</span>
+              <button @click="setMin">最小<kbd>M</kbd></button>
+              <button @click="setPot">底池<kbd>B</kbd></button>
+              <button @click="setMax">全下<kbd>A</kbd></button>
+              <button class="primary" @click="confirmAmount">确认<kbd>Enter</kbd></button>
+              <button @click="cancelAmount">取消<kbd>Esc</kbd></button>
+              <span v-if="amountError" class="amount-error">{{ amountError }}</span>
+            </div>
+          </template>
+        </template>
+
+        <template v-else-if="game.hand_over">
+          <div class="result">{{ resultText() }}</div>
+          <div v-if="game.pot_results && game.pot_results.length" class="pot-results">
+            <div v-for="(pr, i) in game.pot_results" :key="i" class="pot-result">
+              <template v-if="game.pot_results.length > 1">边池 {{ i + 1 }}：</template>
+              <template v-else>底池：</template>
+              {{ pr.amount }} 筹码 → {{ pr.winners.map((w) => playerNameOf(w)).join('、') }}
+              <span v-if="pr.winners.length > 1" class="muted">
+                （{{ pr.winners.map((w) => `${playerNameOf(w)} +${pr.shares[w]}`).join('，') }}）
+              </span>
+            </div>
+          </div>
+          <button v-if="!game.session_finished" class="primary" @click="nextHand">
+            下一手<kbd>空格</kbd>
+          </button>
+          <template v-else>
+            <button class="primary" @click="startNewGame">再开一局</button>
+            <button @click="emit('navigate', 'stats')">查看统计</button>
+            <button @click="emit('navigate', 'history')">查看历史</button>
+          </template>
+        </template>
+
+        <div v-else class="thinking">Bot 思考中…</div>
       </div>
 
       <div class="panel hand-actions">
@@ -465,60 +806,6 @@ onUnmounted(stopPolling)
         </template>
       </div>
 
-      <div class="controls panel">
-        <div v-if="busy" class="thinking">处理中…</div>
-
-        <template v-else-if="game.is_human_turn && !game.hand_over">
-          <template v-if="!pendingAction">
-            <button v-if="legal.can_fold" class="danger" @click="act('fold')">弃牌</button>
-            <button v-if="legal.can_check" @click="act('check')">过牌</button>
-            <button v-if="legal.can_call" @click="act('call')">
-              跟注 {{ legal.call_amount }}
-            </button>
-            <button v-if="legal.can_bet" class="primary" @click="openBet">下注</button>
-            <button v-if="legal.can_raise" class="primary" @click="openRaise">加注</button>
-          </template>
-          <template v-else>
-            <div class="amount-panel">
-              <span class="amount-label">{{ pendingAction === 'bet' ? '下注' : '加注' }}额</span>
-              <input
-                v-model.number="betAmount"
-                type="number"
-                :min="amountMin"
-                :max="amountMax"
-              />
-              <span class="range">{{ amountMin }} ~ {{ amountMax }}</span>
-              <button @click="setMin">最小</button>
-              <button @click="setPot">底池</button>
-              <button @click="setMax">全下</button>
-              <button class="primary" @click="confirmAmount">确认</button>
-              <button @click="cancelAmount">取消</button>
-            </div>
-          </template>
-        </template>
-
-        <template v-else-if="game.hand_over">
-          <div class="result">{{ resultText() }}</div>
-          <div v-if="game.pot_results && game.pot_results.length" class="pot-results">
-            <div v-for="(pr, i) in game.pot_results" :key="i" class="pot-result">
-              <template v-if="game.pot_results.length > 1">边池 {{ i + 1 }}：</template>
-              <template v-else>底池：</template>
-              {{ pr.amount }} 筹码 → {{ pr.winners.map((w) => playerNameOf(w)).join('、') }}
-              <span v-if="pr.winners.length > 1" class="muted">
-                （{{ pr.winners.map((w) => `${playerNameOf(w)} +${pr.shares[w]}`).join('，') }}）
-              </span>
-            </div>
-          </div>
-          <button v-if="!game.session_finished" class="primary" @click="nextHand">下一手</button>
-          <template v-else>
-            <button class="primary" @click="startNewGame">再开一局</button>
-            <button @click="emit('navigate', 'stats')">查看统计</button>
-            <button @click="emit('navigate', 'history')">查看历史</button>
-          </template>
-        </template>
-
-        <div v-else class="thinking">Bot 思考中…</div>
-      </div>
     </template>
 
     <div v-if="error" class="error-banner">{{ error }}</div>
@@ -740,6 +1027,22 @@ onUnmounted(stopPolling)
 
 .controls button {
   min-width: 72px;
+}
+
+.controls kbd {
+  margin-left: 6px;
+  padding: 0 4px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  font-family: inherit;
+  font-size: 11px;
+  opacity: 0.55;
+}
+
+.amount-error {
+  color: var(--danger);
+  font-size: 13px;
 }
 
 .amount-panel {
