@@ -84,7 +84,11 @@ def _install_probe() -> list[dict]:
         to_call = legal.call_amount
         pot = snapshot.pot
         pot_odds = to_call / (pot + to_call) if to_call > 0 else None
-        margin = hand_review._fold_margin(to_call, pot) if to_call > 0 else None
+        margin = (
+            hand_review._call_margin(me.hole_cards, snapshot.board, to_call, pot)
+            if to_call > 0
+            else None
+        )
         outs = (
             draw_outs(list(me.hole_cards), tuple(snapshot.board))
             if 3 <= len(snapshot.board) < 5
@@ -101,6 +105,11 @@ def _install_probe() -> list[dict]:
                 "pot_odds": pot_odds,
                 "margin": margin,
                 "made_hand": hand_review._is_made_hand(me.hole_cards, snapshot.board)
+                if postflop
+                else None,
+                "dominated_pair": hand_review._dominated_pair(
+                    me.hole_cards, snapshot.board
+                )
                 if postflop
                 else None,
                 "weak_kicker": hand_review._weak_kicker_top_pair(
@@ -156,11 +165,31 @@ def _format_dist(dist) -> str:
     return " / ".join(items)
 
 
+def _narrowing_note(rec: dict) -> str:
+    """说明保守收窄相对基线转移了哪类动作质量，未收窄时返回空串。"""
+    raw = rec.get("raw_dist") or []
+    ref = rec.get("reference_dist") or []
+    if not raw or not ref:
+        return ""
+    raw_types = {action.type for action, _ in raw}
+    ref_types = {action.type for action, _ in ref}
+    notes = []
+    if ActionType.CALL in raw_types and ActionType.CALL not in ref_types:
+        notes.append("跟注质量 → 弃牌（赔率无余量或无可继续牌力）")
+    if ActionType.BET in raw_types and ActionType.BET not in ref_types:
+        notes.append("下注质量 → 过牌（弱踢脚顶对）")
+    return "；".join(notes)
+
+
 def _bot_rationale(rec: dict) -> str:
     """推断启发式基线给出该动作的依据，便于解释参考动作从何而来。"""
     dist = rec.get("raw_dist") or []
     if not dist:
         return "-"
+    snapshot = rec.get("snapshot")
+    if snapshot is not None and snapshot.street == Street.PREFLOP:
+        # 翻牌前由 Chen 分档决定，与胜率阈值无关，不能套用翻牌后的胜率口径。
+        return "翻牌前按 Chen 分档（不适用胜率口径）"
     raw = dist[0][0]
     if rec.get("pot_odds") is not None:
         if raw.type == ActionType.RAISE:
@@ -184,6 +213,7 @@ def _print_decisions(review: dict, records: list[dict]) -> None:
     for i, d in enumerate(review["decisions"]):
         rec = records[i] if i < len(records) else {}
         snap = rec.get("snapshot")
+        preflop = snap is not None and snap.street == Street.PREFLOP
         hole = (
             [str(c) for c in snap.players[review["human_seat"]].hole_cards] if snap else "-"
         )
@@ -200,22 +230,33 @@ def _print_decisions(review: dict, records: list[dict]) -> None:
         print(
             f"  参考分布={_format_dist(rec.get('reference_dist'))}  "
             f"参考动作={d['bot_action']['action']}({d['bot_action']['amount']})  "
-            f"参考依据：{_bot_rationale(rec)}"
+            f"启发式依据：{_bot_rationale(rec)}"
         )
-        if rec.get("pot_odds") is not None:
-            margin = rec["margin"]
-            threshold = rec["pot_odds"] + margin
-            print(
-                f"  判据·赔率余量：equity({d['equity']:.4f}) > pot_odds({rec['pot_odds']:.4f})"
-                f" + margin({margin:.4f}) = {threshold:.4f}  ->  {rec['equity'] > threshold}"
-            )
+        note = _narrowing_note(rec)
+        if note:
+            print(f"  保守收窄：{note}")
+        if preflop:
+            # 翻牌前的保守收窄不介入，赔率余量与牌力判据均不参与参考分布。
+            print("  判据：翻牌前不适用（保守收窄不介入，沿用启发式基线）")
         else:
-            print("  判据·赔率余量：无人下注，不适用")
-        print(
-            f"  判据·牌力：_is_made_hand={rec.get('made_hand')}  draw_outs={rec.get('outs')}  "
-            f"_has_playable_strength={rec.get('playable')}  小注例外={rec.get('small_bet')}  "
-            f"弱踢脚顶对={rec.get('weak_kicker')}"
-        )
+            if rec.get("pot_odds") is not None:
+                margin = rec["margin"]
+                threshold = rec["pot_odds"] + margin
+                print(
+                    f"  判据·赔率余量：equity({d['equity']:.4f}) > "
+                    f"pot_odds({rec['pot_odds']:.4f})"
+                    f" + margin({margin:.4f}) = {threshold:.4f}  ->  {rec['equity'] > threshold}"
+                )
+            else:
+                print("  判据·赔率余量：无人下注，不适用")
+            print(
+                f"  判据·牌力：_is_made_hand={rec.get('made_hand')}  "
+                f"draw_outs={rec.get('outs')}  "
+                f"_has_playable_strength={rec.get('playable')}  "
+                f"小注例外={rec.get('small_bet')}  "
+                f"被压制对子={rec.get('dominated_pair')}  "
+                f"弱踢脚顶对={rec.get('weak_kicker')}"
+            )
         codes = [m["code"] for m in d["mistakes"]]
         print(f"  命中 mistakes={codes or '无'}")
         for m in d["mistakes"]:

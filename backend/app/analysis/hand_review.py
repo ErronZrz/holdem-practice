@@ -6,8 +6,9 @@
   不读取对手真实底牌来算胜率，避免上帝视角作弊；
 - 给出轻量 EV 参考量（胜率、底池赔率、跟注期望收益）与明显错误标记；
 - 附上「保守参考策略在同一局面会怎么做」作为对比：以启发式 Bot 的动作概率分布为基线，
-  翻牌后面对下注时额外要求赔率有余量与可继续的牌力（真实成手牌或强听牌），
-  无人下注时弱踢脚顶对不做价值下注；避免用高张盲目跟注、用弱踢脚顶对薄价值下注。
+  翻牌后面对下注时额外要求赔率有余量与可继续的牌力（真实成手牌或强听牌，且成手牌不被
+  公共牌高张压制），强听牌的余量要求放宽；无人下注时弱踢脚顶对不做价值下注；
+  避免用高张盲目跟注、用被压制的对子跟注、用弱踢脚顶对薄价值下注。
 
 本模块只读引擎公开状态、不修改引擎，属于 analysis 层对 poker 层公开能力的消费。
 """
@@ -53,6 +54,8 @@ _STRONG_DRAW_OUTS = 8
 # 保守参考动作的小注例外：跟注额不超过底池的 1/3 时放宽牌力要求，高张也可便宜看牌。
 _SMALL_BET_NUM = 1
 _SMALL_BET_DEN = 3
+# 强听牌的余量折扣：听牌的胜率主要来自补牌、隐含赔率更高，面对下注不必要求满额余量。
+_DRAW_MARGIN_SCALE = 0.5
 
 
 def _fold_margin(to_call: int, pot: int) -> float:
@@ -60,6 +63,26 @@ def _fold_margin(to_call: int, pot: int) -> float:
     if pot <= 0:
         return _FOLD_EV_MARGIN
     return _FOLD_EV_MARGIN + _FOLD_BET_SCALE * (to_call / pot)
+
+
+def _strong_draw(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
+    """是否强听牌：补牌数达标且公共牌尚未发完（翻牌前不适用）。"""
+    if not 3 <= len(board) < 5:
+        return False
+    return draw_outs(list(hole_cards), tuple(board)) >= _STRONG_DRAW_OUTS
+
+
+def _call_margin(
+    hole_cards: Sequence[Card],
+    board: Sequence[Card],
+    to_call: int,
+    pot: int,
+) -> float:
+    """跟注所需的胜率余量：强听牌折半，其余按跟注占底池比例放大。"""
+    margin = _fold_margin(to_call, pot)
+    if _strong_draw(hole_cards, board):
+        return margin * _DRAW_MARGIN_SCALE
+    return margin
 
 
 def _is_made_hand(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
@@ -78,18 +101,38 @@ def _is_made_hand(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
     return evaluate([*hole_cards, *board]).category >= HandCategory.THREE_OF_A_KIND
 
 
+def _dominated_pair(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
+    """是否「一对且该对低于公共牌最高点数」：被公共牌高张压制的成手牌。
+
+    作为跟注侧的牌力质量门槛，与价值下注侧的弱踢脚顶对门槛对称：这类牌面对下注时
+    只能赢对手诈唬，兑现能力差。顶对与超对不受影响；两对、三条等更强牌力不适用。
+    """
+    if len(board) < 3:
+        return False
+    rank = evaluate([*hole_cards, *board])
+    if rank.category != HandCategory.ONE_PAIR:
+        return False
+    pair_rank = rank.tiebreak[0]
+    if not any(c.rank.value == pair_rank for c in hole_cards):
+        return False
+    return pair_rank < max(c.rank.value for c in board)
+
+
 def _has_playable_strength(
     hole_cards: Sequence[Card],
     board: Sequence[Card],
     to_call: int,
     pot: int,
 ) -> bool:
-    """是否具备可继续的牌力：真实成手牌或强听牌；跟注额很小时放宽。"""
+    """是否具备可继续的牌力：真实成手牌或强听牌；跟注额很小时放宽。
+
+    被公共牌高张压制的对子不算可继续牌力，但若同时构成强听牌仍可继续。
+    """
     if to_call * _SMALL_BET_DEN <= pot * _SMALL_BET_NUM:
         return True
-    if _is_made_hand(hole_cards, board):
+    if _is_made_hand(hole_cards, board) and not _dominated_pair(hole_cards, board):
         return True
-    return len(board) < 5 and draw_outs(list(hole_cards), tuple(board)) >= _STRONG_DRAW_OUTS
+    return _strong_draw(hole_cards, board)
 
 
 def _weak_kicker_top_pair(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
@@ -143,14 +186,17 @@ def _conservative_distribution(
     """在启发式基线分布上做保守收窄，返回复盘参考分布。
 
     翻牌后面对下注：胜率对底池赔率无余量或底牌无可继续的牌力时，把跟注概率质量
-    转移到弃牌（跟注额很小时放宽）；翻牌后无人下注：弱踢脚顶对不做价值下注，
-    把下注质量转移到过牌。翻牌前与其它动作原样沿用基线。
+    转移到弃牌（跟注额很小时放宽，强听牌的余量要求放宽）；翻牌后无人下注：
+    弱踢脚顶对不做价值下注，把下注质量转移到过牌。翻牌前与其它动作原样沿用基线。
     """
     if snapshot.street == Street.PREFLOP:
         return baseline
     if legal.call_amount > 0:
         pot_odds = legal.call_amount / (snapshot.pot + legal.call_amount)
-        has_margin = eq > pot_odds + _fold_margin(legal.call_amount, snapshot.pot)
+        margin = _call_margin(
+            me.hole_cards, snapshot.board, legal.call_amount, snapshot.pot
+        )
+        has_margin = eq > pot_odds + margin
         playable = _has_playable_strength(
             me.hole_cards, snapshot.board, legal.call_amount, snapshot.pot
         )
@@ -219,7 +265,8 @@ def _detect_mistakes(
             # 翻牌后还要求底牌有可继续的牌力，与保守参考动作的跟注标准一致。
             strong_enough = postflop or equity >= _FOLD_MIN_EQ_PREFLOP
             playable = not postflop or _has_playable_strength(hole_cards, board, to_call, pot)
-            if strong_enough and playable and equity > pot_odds + _fold_margin(to_call, pot):
+            margin = _call_margin(hole_cards, board, to_call, pot)
+            if strong_enough and playable and equity > pot_odds + margin:
                 message = f"胜率 {equity:.0%} 明显高于赔率 {pot_odds:.0%}，弃牌可能放弃正 EV"
                 mistakes.append(
                     {"code": "bad_fold", "severity": "warning", "message": message}

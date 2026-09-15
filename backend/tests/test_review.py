@@ -5,6 +5,7 @@ import pytest
 from app.analysis.hand_review import (
     _conservative_distribution,
     _detect_mistakes,
+    _dominated_pair,
     _weak_kicker_top_pair,
     build_review,
 )
@@ -206,13 +207,14 @@ def test_detect_mistakes_bad_fold_preflop_floor() -> None:
 
 def test_detect_mistakes_bad_fold_scales_with_bet_size() -> None:
     # 翻牌后跟注占底池越大，容差越高：胜率 0.50 不命中，0.60 命中。
+    # 用顶对（对子等于公共牌最高点数）作样本，避免受「被压制对子」门槛干扰。
     base = {
         "pot_odds": 0.333,
         "to_call": 100,
         "pot": 200,
         "can_raise": False,
-        "hole_cards": [card("Ah"), card("7h")],
-        "board": [card("2c"), card("7d"), card("9h")],
+        "hole_cards": [card("Ah"), card("Kd")],
+        "board": [card("Kc"), card("7d"), card("2h")],
         "big_blind": 10,
     }
     edge = _detect_mistakes(action=Action(ActionType.FOLD), equity=0.50, **base)
@@ -239,6 +241,52 @@ def test_detect_mistakes_bad_fold_requires_playable_strength() -> None:
         action=Action(ActionType.FOLD), equity=0.60, hole_cards=[card("7h"), card("9h")], **base
     )
     assert "bad_fold" in {m["code"] for m in made}
+
+
+def test_dominated_pair_detection() -> None:
+    board = [card(s) for s in ("9d", "Kd", "2h")]
+    # 一对且该对低于公共牌最高点数：JJ 在 K 高面判压制。
+    assert _dominated_pair([card("Jc"), card("Js")], board) is True
+    # 顶对（对子等于公共牌最高点数）与超对不受影响。
+    assert _dominated_pair([card("Kc"), card("Jd")], board) is False
+    assert _dominated_pair([card("Ac"), card("Ad")], board) is False
+    # 三条、两对与翻牌前均不适用。
+    assert _dominated_pair([card("9c"), card("9h")], board) is False
+    assert _dominated_pair([card("9c"), card("2c")], board) is False
+    assert _dominated_pair([card("Jc"), card("Js")], []) is False
+    # 仅靠公共牌成对不算真实成手牌。
+    assert (
+        _dominated_pair(
+            [card("Ah"), card("5h")], [card("Jd"), card("Jc"), card("2s")]
+        )
+        is False
+    )
+
+
+def test_detect_mistakes_bad_fold_skips_dominated_pair() -> None:
+    # 被公共牌高张压制的对子不算可继续牌力：胜率高于赔率容差也不判误弃，超对仍判。
+    base = {
+        "pot_odds": 0.333,
+        "to_call": 120,
+        "pot": 240,
+        "can_raise": False,
+        "board": [card(s) for s in ("9d", "Kd", "2h")],
+        "big_blind": 10,
+    }
+    dominated = _detect_mistakes(
+        action=Action(ActionType.FOLD),
+        equity=0.60,
+        hole_cards=[card("Jc"), card("Js")],
+        **base,
+    )
+    assert "bad_fold" not in {m["code"] for m in dominated}
+    overpair = _detect_mistakes(
+        action=Action(ActionType.FOLD),
+        equity=0.60,
+        hole_cards=[card("Ac"), card("Ad")],
+        **base,
+    )
+    assert "bad_fold" in {m["code"] for m in overpair}
 
 
 def test_detect_mistakes_value_missed_threshold() -> None:
@@ -431,6 +479,48 @@ def test_conservative_reference_calls_strong_draw() -> None:
         state, legal, state.players[0], eq=0.55, baseline=_single(ActionType.CALL)
     )
     assert _prob(dist, ActionType.CALL) == 1.0
+
+
+def test_conservative_reference_folds_dominated_pair() -> None:
+    # 被公共牌高张压制的口袋对（JJ 在 K 高面）面对大注：跟注质量转移到弃牌。
+    state = _facing_bet_state(
+        [card("Jc"), card("Js")], [card(s) for s in ("9d", "Kd", "2h")], pot=240
+    )
+    legal = _legal(can_call=True, call_amount=120)
+    dist = _conservative_distribution(
+        state, legal, state.players[0], eq=0.60, baseline=_single(ActionType.CALL)
+    )
+    assert _prob(dist, ActionType.FOLD) == 1.0
+    assert _prob(dist, ActionType.CALL) == 0.0
+
+
+def test_conservative_reference_calls_overpair() -> None:
+    # 超对不被公共牌压制，赔率有余量时参考动作仍跟注。
+    state = _facing_bet_state(
+        [card("Ac"), card("Ad")], [card(s) for s in ("9d", "Kd", "2h")], pot=240
+    )
+    legal = _legal(can_call=True, call_amount=120)
+    dist = _conservative_distribution(
+        state, legal, state.players[0], eq=0.60, baseline=_single(ActionType.CALL)
+    )
+    assert _prob(dist, ActionType.CALL) == 1.0
+
+
+def test_conservative_reference_halves_margin_for_strong_draw() -> None:
+    # 强听牌（同花听牌 9 补牌）余量折半：胜率 0.4570 可跟半池，0.4200 仍弃牌。
+    board = [card(s) for s in ("Jh", "8h", "Kh", "7c")]
+    state = _facing_bet_state(
+        [card("2h"), card("2d")], board, pot=360, street=Street.TURN
+    )
+    legal = _legal(can_call=True, call_amount=180)
+    calls = _conservative_distribution(
+        state, legal, state.players[0], eq=0.4570, baseline=_single(ActionType.CALL)
+    )
+    assert _prob(calls, ActionType.CALL) == 1.0
+    folds = _conservative_distribution(
+        state, legal, state.players[0], eq=0.4200, baseline=_single(ActionType.CALL)
+    )
+    assert _prob(folds, ActionType.FOLD) == 1.0
 
 
 def test_conservative_reference_allows_cheap_call_with_high_card() -> None:
