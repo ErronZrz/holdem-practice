@@ -2,7 +2,8 @@
 
 import pytest
 
-from app.poker.actions import ActionType, LegalActions
+import app.strategy.heuristic as heuristic_module
+from app.poker.actions import Action, ActionType, LegalActions
 from app.poker.engine import PokerEngine
 from app.poker.state import GameState, PlayerState, Street
 from app.strategy.heuristic import HeuristicStrategy
@@ -354,6 +355,142 @@ def test_heuristic_distribution_deterministic_branch_single() -> None:
     assert len(dist) == 1
     assert dist[0][0].type == ActionType.CALL
     assert dist[0][1] == 1.0
+
+
+# ------------------------------------------------------------------ 全下与争池人数
+
+
+def _heads_up_all_in_engine() -> PokerEngine:
+    """构造唯一对手全下、当前玩家仍可弃牌或跟注的翻牌局面。"""
+    engine = PokerEngine(2, small_blind=5, big_blind=10, starting_stack=110, seed=0)
+    engine.players[1].stack = 100
+    engine.start_hand_with(
+        button=0,
+        hole_cards={0: cards("Qh Jc"), 1: cards("2c 7d")},
+        board=cards("As Kd 9s Th 3c"),
+    )
+    for action in (
+        Action(ActionType.CALL),
+        Action(ActionType.CHECK),
+        Action(ActionType.CHECK),
+        Action(ActionType.BET, 100),
+    ):
+        engine.apply_action(action)
+    assert engine.street == Street.FLOP
+    assert engine.current_seat == 1
+    return engine
+
+
+def _multiway_all_in_engine() -> PokerEngine:
+    """构造全下对手与可行动对手同时存在的翻牌局面。"""
+    engine = PokerEngine(3, small_blind=5, big_blind=10, starting_stack=110, seed=0)
+    engine.players[1].stack = 1000
+    engine.players[2].stack = 1000
+    engine.start_hand_with(
+        button=0,
+        hole_cards={0: cards("6h 5c"), 1: cards("Qh Jc"), 2: cards("4c 3d")},
+        board=cards("As Kd 9s Th 3c"),
+    )
+    for action in (
+        Action(ActionType.CALL),
+        Action(ActionType.CALL),
+        Action(ActionType.CHECK),
+        Action(ActionType.CHECK),
+        Action(ActionType.CHECK),
+        Action(ActionType.BET, 100),
+    ):
+        engine.apply_action(action)
+    assert engine.street == Street.FLOP
+    assert engine.current_seat == 1
+    return engine
+
+
+def _folded_opponent_flop_engine() -> PokerEngine:
+    """构造含弃牌座位但没有全下座位的翻牌局面。"""
+    engine = PokerEngine(4, small_blind=5, big_blind=10, starting_stack=1000, seed=0)
+    engine.start_hand_with(
+        button=0,
+        hole_cards={
+            0: cards("As Ac"),
+            1: cards("Kh Kd"),
+            2: cards("Qh Qd"),
+            3: cards("Jh Jd"),
+        },
+        board=cards("2c 7d 9h Ts 3c"),
+    )
+    for action in (
+        Action(ActionType.FOLD),
+        Action(ActionType.CALL),
+        Action(ActionType.CALL),
+        Action(ActionType.CHECK),
+    ):
+        engine.apply_action(action)
+    assert engine.street == Street.FLOP
+    assert engine.current_seat == 1
+    return engine
+
+
+def test_postflop_all_in_opponent_counts_as_contender(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 对手全下但未弃牌时，仍须作为随机范围竞争者参与胜率估值。
+    engine = _heads_up_all_in_engine()
+    seen: list[int] = []
+
+    def fake_equity(_hole, _board, contenders, _rng, _samples) -> float:
+        seen.append(contenders)
+        return 0.0
+
+    monkeypatch.setattr(heuristic_module, "equity", fake_equity)
+    action = HeuristicStrategy(seed=0).choose_action(engine.snapshot(), engine.legal_actions())
+
+    assert seen == [1]
+    assert action.type == ActionType.FOLD
+
+
+def test_postflop_all_in_opponent_folds_with_fixed_seed() -> None:
+    # 固定种子下，低胜率底牌面对唯一全下对手不再被当作确定胜率而跟注。
+    engine = _heads_up_all_in_engine()
+    action = HeuristicStrategy(seed=17).choose_action(engine.snapshot(), engine.legal_actions())
+
+    assert action.type == ActionType.FOLD
+
+
+def test_postflop_counts_all_in_and_active_contenders(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 主池同时有全下和可行动对手时，两者都计入竞争人数；动作仍由引擎合法执行。
+    engine = _multiway_all_in_engine()
+    total = sum(player.stack for player in engine.players) + engine.pot
+    seen: list[int] = []
+
+    def fake_equity(_hole, _board, contenders, _rng, _samples) -> float:
+        seen.append(contenders)
+        return 0.0
+
+    monkeypatch.setattr(heuristic_module, "equity", fake_equity)
+    action = HeuristicStrategy(seed=0).choose_action(engine.snapshot(), engine.legal_actions())
+
+    assert seen == [2]
+    assert action.type == ActionType.FOLD
+    engine.apply_action(action)
+    engine.apply_action(Action(ActionType.CALL))
+    assert engine.hand_over
+    assert sum(player.stack for player in engine.players) == total
+    assert sum(engine.last_net.values()) == 0
+
+
+def test_postflop_contender_count_excludes_folded_seat(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 弃牌座位只留下死钱，不应作为翻后随机范围对手计数。
+    engine = _folded_opponent_flop_engine()
+    seen: list[int] = []
+
+    def fake_equity(_hole, _board, contenders, _rng, _samples) -> float:
+        seen.append(contenders)
+        return 0.0
+
+    monkeypatch.setattr(heuristic_module, "equity", fake_equity)
+    HeuristicStrategy(seed=0, bluff_freq=0.0).action_distribution(
+        engine.snapshot(), engine.legal_actions()
+    )
+
+    assert seen == [2]
 
 
 # ------------------------------------------------------------------ 引擎闭环

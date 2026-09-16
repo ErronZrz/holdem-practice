@@ -114,12 +114,10 @@ def draw_outs(hole_cards: list[Card], board: tuple[Card, ...]) -> int:
     return outs
 
 
-def _num_opponents(state: GameState) -> int:
-    """仍在场的对手数量（排除自己与已弃牌/全下的玩家）。"""
+def _num_pot_contenders(state: GameState) -> int:
+    """统计仍会争夺至少一个底池的对手，纳入未弃牌的全下玩家。"""
     return sum(
-        1
-        for p in state.players
-        if p.seat != state.current_seat and not p.folded and not p.all_in
+        1 for p in state.players if p.seat != state.current_seat and not p.folded
     )
 
 
@@ -219,8 +217,8 @@ class HeuristicStrategy:
         legal: LegalActions,
         me: PlayerState,
     ) -> list[tuple[Action, float]]:
-        opps = _num_opponents(state)
-        eq = equity(me.hole_cards, state.board, opps, self._rng, self._samples)
+        contenders = _num_pot_contenders(state)
+        eq = equity(me.hole_cards, state.board, contenders, self._rng, self._samples)
 
         if legal.call_amount > 0:
             # 面对下注：按胜率与底池赔率决定跟注/加注/弃牌。

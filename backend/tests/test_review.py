@@ -156,6 +156,40 @@ def test_review_replays_per_player_stacks() -> None:
     assert captured[1] == (500, 0)
 
 
+def test_review_reference_counts_all_in_opponent() -> None:
+    # 复盘参考分布复用策略口径，唯一全下对手仍应参与翻后估值。
+    engine = PokerEngine(2, 5, 10, 110)
+    engine.players[1].stack = 100
+    engine.start_hand_with(
+        button=0,
+        hole_cards={
+            0: [card("Qh"), card("Jc")],
+            1: [card("2c"), card("7d")],
+        },
+        board=[card(s) for s in ("As", "Kd", "9s", "Th", "3c")],
+    )
+    for action_type, amount in (
+        (ActionType.CALL, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.BET, 100),
+        (ActionType.FOLD, 0),
+    ):
+        _apply(engine, action_type, amount)
+    assert engine.hand_over
+
+    review = build_review(build_hand_history(engine, hand_number=1, human_seat=1))
+    flop = next(
+        decision
+        for decision in review["decisions"]
+        if decision["street"] == "flop" and decision["to_call"] == 100
+    )
+
+    assert flop["opponents"] == 1
+    assert flop["to_call"] == 100
+    assert flop["bot_action"]["action"] == ActionType.FOLD.value
+
+
 def test_review_replays_raise_increment() -> None:
     # 历史记录的是加注增量，重放需换算为加注后总额，否则底池与跟注额会漂移。
     stacks = {0: 1000, 1: 1000, 2: 1000}
