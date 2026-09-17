@@ -10,7 +10,12 @@ from multiplayer_cfr.mccfr import MCCFRConfig, SynchronousExternalSamplingMCCFR
 
 def _nonuniform_trainer(master_seed: int) -> SynchronousExternalSamplingMCCFR:
     trainer = SynchronousExternalSamplingMCCFR(
-        MCCFRConfig(player_count=6, iterations=1, master_seed=master_seed)
+        MCCFRConfig(
+            player_count=6,
+            iterations=1,
+            master_seed=master_seed,
+            average_strategy_start_iteration=1,
+        )
     )
     for node in trainer._nodes.values():
         first, second = node.actions
@@ -56,12 +61,26 @@ def test_n6_oracle_matches_fixed_seed_sample_means_for_regret_and_average_update
             assert sampled_sums[key][action] / sample_count == pytest.approx(float(value), abs=0.12)
 
 
-def test_n6_oracle_disables_average_targets_when_accumulation_is_not_requested() -> None:
+def test_n6_oracle_and_production_pass_disable_average_updates_before_start_iteration() -> None:
     root_key = information_set_key(6, actor=0, own_rank=3, history="-")
     oracle = exact_external_sampling_targets(
         _nonuniform_trainer(0)._freeze_policy(),
         (root_key,),
         accumulate_average=False,
     )
+    trainer = SynchronousExternalSamplingMCCFR(
+        MCCFRConfig(
+            player_count=6,
+            iterations=2,
+            master_seed=101,
+            average_strategy_start_iteration=2,
+        )
+    )
+    for node in trainer._nodes.values():
+        first, second = node.actions
+        node.regret_sum = {first: 1.0, second: 0.0}
+
+    trace = trainer.run_iteration(1)
 
     assert fsum(float(value) for value in oracle.targets[0].strategy_sum_deltas.values()) == 0.0
+    assert trace.update.strategy_sum_deltas == ()

@@ -40,7 +40,7 @@ class MCCFRConfig:
     player_count: int
     iterations: int
     master_seed: int
-    average_strategy_start_iteration: int = 1
+    average_strategy_start_iteration: int
 
     def __post_init__(self) -> None:
         validate_player_count(self.player_count)
@@ -196,6 +196,15 @@ class _PassTraceBuilder:
         )
 
 
+@dataclass(frozen=True)
+class N9BoundarySample:
+    """N9 单次采样边界结果，不包含更新、平均策略或可导出训练状态。"""
+
+    traverser: int
+    infoset_count: int
+    trace: TraverserPassTrace
+
+
 class SynchronousExternalSamplingMCCFR:
     """每轮冻结策略后按相对座位顺序完成全部 external-sampling pass。"""
 
@@ -220,6 +229,8 @@ class SynchronousExternalSamplingMCCFR:
     def run_iteration(self, iteration: int) -> IterationTrace:
         """执行一个同步批次，所有 pass 结束后才写入 regret 和平均策略累计量。"""
 
+        if self.config.player_count == 9:
+            raise MCCFRError("N9 仅允许专用单次边界采样，不能执行训练 iteration")
         iteration = _require_positive_int(iteration, "iteration")
         if iteration != self._completed_iterations + 1:
             raise MCCFRError("iteration 必须按顺序从一开始执行")
@@ -253,6 +264,8 @@ class SynchronousExternalSamplingMCCFR:
     def completed_result(self) -> MCCFRResult:
         """仅在全部显式 iteration 完成后返回可导出的内存结果。"""
 
+        if self.config.player_count == 9:
+            raise MCCFRError("N9 边界采样不产生可导出的训练结果")
         if self._completed_iterations != self.config.iterations:
             raise MCCFRError("尚未完成全部 iteration，不能生成训练结果")
         return MCCFRResult(
@@ -407,9 +420,40 @@ class SynchronousExternalSamplingMCCFR:
                     node.strategy_sum[action] = fsum((node.strategy_sum[action], strategy_sum))
 
 
+def sample_n9_boundary(*, master_seed: int, traverser: int) -> N9BoundarySample:
+    """执行 N9 的一条不提交更新的 sampled pass，仅供边界测量。"""
+
+    traverser = _require_int(traverser, "traverser")
+    if not 0 <= traverser < 9:
+        raise MCCFRError("N9 traverser 必须位于相对座位范围内")
+    trainer = SynchronousExternalSamplingMCCFR(
+        MCCFRConfig(
+            player_count=9,
+            iterations=1,
+            master_seed=master_seed,
+            average_strategy_start_iteration=1,
+        )
+    )
+    frozen_policy = trainer._freeze_policy()
+    trace = trainer._collect_pass(
+        iteration=1,
+        traverser=traverser,
+        frozen_policy=frozen_policy,
+        deltas=_IterationDeltas(),
+        accumulate_average=False,
+    )
+    return N9BoundarySample(
+        traverser=traverser,
+        infoset_count=trainer.infoset_count,
+        trace=trace,
+    )
+
+
 def train(config: MCCFRConfig) -> MCCFRResult:
     """从零开始执行显式配置的同步 MCCFR，避免复用跨调用状态。"""
 
+    if config.player_count == 9:
+        raise MCCFRError("N9 仅允许 sample_n9_boundary，不能执行长期训练")
     return SynchronousExternalSamplingMCCFR(config).train()
 
 

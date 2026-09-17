@@ -12,7 +12,9 @@ from .mccfr import (
     IterationTrace,
     MCCFRConfig,
     MCCFRResult,
+    N9BoundarySample,
     SynchronousExternalSamplingMCCFR,
+    sample_n9_boundary,
 )
 
 
@@ -121,6 +123,16 @@ class ControlledTrainingResult:
     result: MCCFRResult | None
 
 
+@dataclass(frozen=True)
+class N9BoundaryResult:
+    """N9 单次边界采样的受控回执，绝不包含长期策略结果。"""
+
+    status: RunStatus
+    stop_reason: StopReason
+    sample: N9BoundarySample | None
+    resources: RunResources
+
+
 @dataclass
 class _DiagnosticsCollector:
     player_count: int
@@ -182,6 +194,8 @@ def run_controlled_training(
 ) -> ControlledTrainingResult:
     """在 iteration 边界采样外部资源并合作式停止，不启动子进程。"""
 
+    if config.player_count == 9:
+        raise ControlError("N9 只能使用 run_n9_boundary_sample，不能走长期训练入口")
     if not callable(monotonic_clock) or not callable(rss_reader):
         raise ControlError("时钟和 RSS 读取器必须可调用")
     if not isinstance(rss_sampler_id, str) or not rss_sampler_id:
@@ -220,8 +234,6 @@ def run_controlled_training(
         elapsed_seconds = _read_elapsed(monotonic_clock, started_at)
         if limits.retained_artifact_bytes >= limits.retained_artifact_limit_bytes:
             return StopReason.ARTIFACT_QUOTA, elapsed_seconds
-        if config.player_count == 9:
-            return StopReason.NINE_PLAYER_BOUNDARY, elapsed_seconds
         if cancellation_requested is not None and cancellation_requested():
             return StopReason.EXTERNAL_CANCELLATION, elapsed_seconds
         rss_bytes = _read_rss(rss_reader)
@@ -265,6 +277,72 @@ def run_controlled_training(
         ),
         result=trainer.completed_result(),
     )
+
+
+def run_n9_boundary_sample(
+    *,
+    master_seed: int,
+    traverser: int,
+    limits: RunLimits,
+    monotonic_clock: Callable[[], float],
+    rss_reader: Callable[[], int],
+    rss_sampler_id: str,
+    cancellation_requested: Callable[[], bool] | None = None,
+) -> N9BoundaryResult:
+    """在显式资源检查下执行 N9 的一条 sampled pass，不创建训练结果。"""
+
+    if not callable(monotonic_clock) or not callable(rss_reader):
+        raise ControlError("时钟和 RSS 读取器必须可调用")
+    if not isinstance(rss_sampler_id, str) or not rss_sampler_id:
+        raise ControlError("RSS 采样器标识必须是非空字符串")
+    if cancellation_requested is not None and not callable(cancellation_requested):
+        raise ControlError("取消检查器必须可调用")
+    started_at = _read_clock(monotonic_clock, "起始时间")
+    peak_rss = 0
+    warning_triggered = False
+
+    def receipt(reason: StopReason, sample: N9BoundarySample | None) -> N9BoundaryResult:
+        elapsed_seconds = _read_elapsed(monotonic_clock, started_at)
+        return N9BoundaryResult(
+            status=RunStatus.COMPLETED if reason is StopReason.COMPLETED else RunStatus.STOPPED,
+            stop_reason=reason,
+            sample=sample,
+            resources=RunResources(
+                elapsed_seconds=elapsed_seconds,
+                wall_time_limit_seconds=limits.wall_time_seconds,
+                peak_rss_bytes=peak_rss,
+                rss_warning_bytes=limits.rss_warning_bytes,
+                rss_hard_limit_bytes=limits.rss_hard_limit_bytes,
+                rss_sampler_id=rss_sampler_id,
+                warning_triggered=warning_triggered,
+                retained_artifact_bytes=limits.retained_artifact_bytes,
+                retained_artifact_limit_bytes=limits.retained_artifact_limit_bytes,
+            ),
+        )
+
+    if limits.retained_artifact_bytes >= limits.retained_artifact_limit_bytes:
+        return receipt(StopReason.ARTIFACT_QUOTA, None)
+    if cancellation_requested is not None and cancellation_requested():
+        return receipt(StopReason.EXTERNAL_CANCELLATION, None)
+    peak_rss = _read_rss(rss_reader)
+    if peak_rss >= limits.rss_hard_limit_bytes:
+        return receipt(StopReason.RSS_HARD_LIMIT, None)
+    if peak_rss >= limits.rss_warning_bytes:
+        warning_triggered = True
+        return receipt(StopReason.RSS_WARNING_LIMIT, None)
+    if _read_elapsed(monotonic_clock, started_at) >= limits.wall_time_seconds:
+        return receipt(StopReason.WALL_TIME_LIMIT, None)
+
+    sample = sample_n9_boundary(master_seed=master_seed, traverser=traverser)
+    peak_rss = max(peak_rss, _read_rss(rss_reader))
+    if peak_rss >= limits.rss_hard_limit_bytes:
+        return receipt(StopReason.RSS_HARD_LIMIT, None)
+    if peak_rss >= limits.rss_warning_bytes:
+        warning_triggered = True
+        return receipt(StopReason.RSS_WARNING_LIMIT, None)
+    if _read_elapsed(monotonic_clock, started_at) >= limits.wall_time_seconds:
+        return receipt(StopReason.WALL_TIME_LIMIT, None)
+    return receipt(StopReason.COMPLETED, sample)
 
 
 def _quantile(values: list[float], quantile: float) -> float:

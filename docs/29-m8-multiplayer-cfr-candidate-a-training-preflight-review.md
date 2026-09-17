@@ -190,3 +190,54 @@ uv run pytest -q
 没有执行 A6/A7 的有预算训练、实际 profile/probe 实验、跨 seed 稳定性实验、RSS 基准、长期策略导出、检查点或真实实验 manifest；没有在工作区保留策略 JSON、profile、probe、日志或测量文件。因此，除短路径测试外没有新的 A6/A7 CPU、RSS、耗时、coverage、稳定性、profile、probe 或策略质量数字。
 
 本轮结论更新为：候选 A 现在具备训练前 estimator 对照、受控停止回执、量化后 A6/A7 profile/probe evaluator 及独立测量记录的离线实现和测试覆盖；实际训练前仍需要用户冻结具体实验 manifest，并由外层进程监督执行资源限制。该实现与测试不构成多人 Hold'em、均衡、NashConv、exploitability、GTO、真实 EV 或生产可用性结论。
+
+## 9. 提交后实际实验就绪复核
+
+在提交 `19b7426209331e764467d1303edd5320c38ae993` 后，进行了只读实验就绪复核；未运行训练、profile/probe、资源基准或长期工件导出。结论是：**当前不可直接进入实际 A6/A7 受预算实验。** 新增训练前能力已通过测试，但还缺少将冻结 manifest、外部硬监督、训练/评估/导出和测量记录机械绑定为不可绕过链路的实现。
+
+### 已满足
+
+1. 合作式运行器要求显式阶段、墙钟、RSS 和产物限制，在 iteration 边界记录 coverage、权重、停止原因和资源阈值；它明确不启动或管理外部进程。
+2. 策略读取在一次安全读取中保留量化单位及实际文件 SHA-256/字节数；A6/A7 evaluator 从这些单位而非内存浮点概率计算。
+3. N6 estimator oracle 独立于 MCCFR 私有遍历，采用 full chance 与对手分布枚举；短路径测试覆盖根和回应信息集的 regret/average-strategy 样本均值对照。
+4. 受控训练入口对 N9 在采样前停止，完整 chance evaluator 只接受 N6/N7，measurement schema 不能把 N9 写成完成的 full-chance profile。
+5. 策略 artifact v1 保持确定性纯策略文件；独立测量记录可承载精确有理效用、资源、诊断与身份引用。
+
+### 进入实际实验前的代码级阻塞项
+
+1. **N9 仍可绕过受控入口。** `MCCFRConfig`、核心 `train()` 和 `export_strategy()` 仍直接接受 N9；因此调用公开基础 API 可进行长期 N9 训练或导出，与只允许 N9 边界路径的约束不一致。实际实验入口必须限制或隔离这些直接路径。
+2. **当前资源控制不是端到端硬限制。** 合作式检查在训练器构造后、iteration 边界发生，不能中断单次 iteration；最终结果复制、策略导出、profile/probe、测量写入和总保留产物账本都不在同一个受控阶段链内。实际执行需要从进程启动前计时、采集目标进程树 RSS、覆盖全部阶段并能实施硬杀的外层监督器。
+3. **measurement 关联仍由调用方自述。** profile/probe 结果不自带策略 SHA-256、评估器版本或 probe manifest identity；measurement record 也未机械校验其与真实 artifact/evaluator 输出匹配。需要受控 record builder 从已验证 artifact、冻结 manifest、实际评估结果和受控运行回执自动生成引用。
+4. **尚无严格实验 manifest。** 当前只有文档约定和 manifest hash 引用；没有 schema、安全读取、规范 hash 或从 manifest 唯一派生 `MCCFRConfig`、`RunLimits`、probe、路径和阶段控制的入口。`average_strategy_start_iteration` 仍存在代码默认值，不能作为实际实验中的隐式补齐。
+5. **estimator gate 覆盖不足。** 当前核验只覆盖两个 N6 信息集、固定 128 个连续 seed 和 average 累计开启路径；还应覆盖不同 actor/公开历史、零概率动作、average 累计关闭路径，并将固定 seed、误差口径和比较结果写入 preflight 记录。
+
+因此，下一项建议工作是：在不启动实际训练的前提下，实现严格 experiment/probe manifest、受控实验编排与 record builder，并在边界层禁止直接 N9 长训/导出。完成并复核后，才由用户冻结 A6/A7 实验参数、实际外层进程监督方式及产物保留方案。
+
+## 10. Manifest 强约束链路实现（未运行实际实验）
+
+在上述就绪复核后，本轮实现了训练前的强约束链路，仍未启动有预算 A6/A7/A9 训练、实际 profile/probe、资源基准或长期工件导出：
+
+| 能力 | 实现约束 |
+|---|---|
+| 冻结 manifest | `manifest.py` 新增严格 experiment/probe manifest schema。读取只接受规范 JSON；manifest 身份由安全读取的原始规范字节计算 SHA-256 与字节数。A6/A7 必须显式提供 `iterations`、`average_strategy_start_iteration` 和 `master_seed`；不再由训练配置默认补值。 |
+| 唯一计划派生 | `derive_experiment_plan()` 只从已验证 manifest 生成训练配置、阶段预算、质量计划、probe 引用和工件槽位。训练、RSS、CPU、并发、保留额度、策略与 measurement 槽位均不得在运行调用中自由传入。 |
+| 运行时代码身份 | 受控编排会话必须携带完整 Git commit、干净工作区和训练器版本，并在预留工件或构造训练器前与 manifest `code_identity` 比对。身份不一致时直接失败。 |
+| 工件账本与编排 | `orchestration.py` 只允许 manifest 预声明的策略/measurement 相对文件名和槽位；阶段顺序固定为训练→导出→量化回读→可选 profile/probe→measurement。已有目标、超槽位或未声明工件均失败。 |
+| 机械测量绑定 | `experiment_record.py` 的 builder 只接收已验证计划、训练/N9 回执、量化策略和评估结果。profile/probe 结果携带策略 SHA-256、字节数、固定 evaluator 身份和 probe manifest 身份；记录不接收调用方手填的这些关联。 |
+| N9 边界 | `MCCFRConfig`、`run_iteration()`、`train()`、`completed_result()` 和 `export_strategy()` 都拒绝 N9 长期训练或策略导出。唯一允许路径是 `sample_n9_boundary()` / `run_n9_boundary_sample()` 的单 traverser sampled pass：不提交 delta、不累计平均策略、不返回 `MCCFRResult`、不产生策略/profile/probe。 |
+| estimator gate 补充 | 除既有根/回应信息集对照外，测试覆盖了 `average_strategy_start_iteration` 尚未到达时，production pass 与 oracle 均不产生 average-strategy delta，且冻结策略可有零概率动作。 |
+
+受控编排仅使用外部 supervisor 会话提供的时钟、RSS 读取和取消信号，并要求其声明 `process-tree` 与 `external-hard-limit` 监督语义；Python 包本身不创建进程、不能实施 OS 级硬杀，也不能证明该外部监督器实际执行了 CPU、进程树 RSS、并发或墙钟限制。因此，实际实验前仍须由用户指定并运行可验证的外部 supervisor，而不能将会话身份字段误读为已完成系统级资源执法。
+
+本轮新增的 manifest、编排、N9 防绕过、受控记录和估计器回归均只走单元测试路径。它们没有生成或保留任何策略、profile、probe、日志、检查点或测量工件；也不构成多人 Hold'em、均衡、NashConv、exploitability、GTO、真实 EV 或生产可用性结论。实际验证结果为：
+
+```text
+cd /Users/bryanylliu/my4/holdem-practice/tools/trainer
+uv run ruff check .
+All checks passed!
+
+uv run pytest -q
+141 passed in 54.10s
+```
+
+在实际 A6/A7 实验前仍需用户冻结：具体训练 iteration、seed/seed 集、各阶段与总 CPU/RSS/墙钟/产物上限、外部 supervisor 的实际实现与回执口径、profile/probe/stability 阈值及失败处理、预声明工件路径与保留数量。只有该 manifest 被写入规范文件、运行时代码身份与其一致且外部 supervisor 已就绪后，才可获得另一次明确授权进入受预算实验。

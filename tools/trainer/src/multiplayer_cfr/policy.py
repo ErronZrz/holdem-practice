@@ -653,6 +653,8 @@ def export_strategy(
 
     if not isinstance(result, MCCFRResult):
         raise StrategyArtifactError("导出器只接受候选 A 的 MCCFR 结果")
+    if result.config.player_count == 9:
+        raise StrategyArtifactError("N9 边界采样不能导出长期策略")
     if result.completed_iterations != result.config.iterations:
         raise StrategyArtifactError("未完成的 MCCFR 结果不能导出")
     expected_infosets = len(infoset_by_key(result.config.player_count))

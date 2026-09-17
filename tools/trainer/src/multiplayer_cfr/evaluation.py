@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from fractions import Fraction
 from math import factorial
+from typing import TYPE_CHECKING
 
 from .chance import iter_ordered_deals
 from .game import (
@@ -19,7 +20,11 @@ from .game import (
     legal_actions,
     terminal_outcome,
 )
-from .policy import PROBABILITY_UNITS, QuantizedStrategyArtifact
+from .manifest import EVALUATOR_ID, EVALUATOR_VERSION, ManifestIdentity
+from .policy import PROBABILITY_UNITS, QuantizedStrategyArtifact, StrategyArtifactIdentity
+
+if TYPE_CHECKING:
+    from .manifest import ExperimentPlan
 
 
 class EvaluationError(ValueError):
@@ -31,6 +36,22 @@ class EvaluationStopped(EvaluationError):
 
 
 @dataclass(frozen=True)
+class EvaluatorIdentity:
+    """固定全 chance evaluator 的版本与量化概率语义。"""
+
+    evaluator_id: str
+    evaluator_version: str
+    probability_units: int
+
+
+EVALUATOR_IDENTITY = EvaluatorIdentity(
+    evaluator_id=EVALUATOR_ID,
+    evaluator_version=EVALUATOR_VERSION,
+    probability_units=PROBABILITY_UNITS,
+)
+
+
+@dataclass(frozen=True)
 class ProfileEvaluation:
     """对量化策略计算的精确 profile 净收益，不包含均衡解释。"""
 
@@ -38,6 +59,8 @@ class ProfileEvaluation:
     ordered_deal_count: int
     terminal_leaf_count: int
     utilities: tuple[Fraction, ...]
+    strategy_identity: StrategyArtifactIdentity
+    evaluator_identity: EvaluatorIdentity
 
 
 @dataclass(frozen=True)
@@ -76,6 +99,17 @@ class ProbeEvaluation:
     baseline: ProfileEvaluation
     results: tuple[ProbeResult, ...]
     gains: tuple[Fraction, ...]
+    strategy_identity: StrategyArtifactIdentity
+    evaluator_identity: EvaluatorIdentity
+    probe_manifest_identity: ManifestIdentity | None
+
+
+@dataclass(frozen=True)
+class ManifestedEvaluation:
+    """由冻结实验计划驱动的 profile 与可选 probe 结果。"""
+
+    profile: ProfileEvaluation | None
+    probes: ProbeEvaluation | None
 
 
 @dataclass(frozen=True)
@@ -100,6 +134,7 @@ def evaluate_threshold_probes(
     *,
     baseline: ProfileEvaluation | None = None,
     checkpoint: Callable[[int], bool] | None = None,
+    probe_manifest_identity: ManifestIdentity | None = None,
 ) -> ProbeEvaluation:
     """逐座位评估预注册阈值偏离，不搜索 best response。"""
 
@@ -118,6 +153,11 @@ def evaluate_threshold_probes(
         baseline = evaluate_profile(artifact, checkpoint=checkpoint)
     if baseline.player_count != player_count:
         raise EvaluationError("baseline 人数与量化策略不一致")
+    if (
+        baseline.strategy_identity != artifact.identity
+        or baseline.evaluator_identity != EVALUATOR_IDENTITY
+    ):
+        raise EvaluationError("baseline 未绑定当前量化策略或固定评估器")
 
     results: list[ProbeResult] = []
     gains = [Fraction(0) for _ in range(player_count)]
@@ -134,7 +174,52 @@ def evaluate_threshold_probes(
                 ProbeResult(player=player, probe_id=probe.probe_id, utility=utility, delta=delta)
             )
             gains[player] = max(gains[player], delta, Fraction(0))
-    return ProbeEvaluation(baseline=baseline, results=tuple(results), gains=tuple(gains))
+    return ProbeEvaluation(
+        baseline=baseline,
+        results=tuple(results),
+        gains=tuple(gains),
+        strategy_identity=artifact.identity,
+        evaluator_identity=EVALUATOR_IDENTITY,
+        probe_manifest_identity=probe_manifest_identity,
+    )
+
+
+def evaluate_manifested_plan(
+    artifact: QuantizedStrategyArtifact,
+    plan: ExperimentPlan,
+    *,
+    profile_checkpoint: Callable[[int], bool] | None = None,
+    probe_checkpoint: Callable[[int], bool] | None = None,
+) -> ManifestedEvaluation:
+    """仅按已验证实验计划执行 A6/A7 的完整 profile 与预注册 probe。"""
+
+    if plan.manifest.execution_kind != "a6-a7-training":
+        raise EvaluationError("N9 boundary 不允许 profile 或 probe 评估")
+    if artifact.artifact.game.player_count != plan.manifest.player_count:
+        raise EvaluationError("量化策略人数与 experiment manifest 不一致")
+    if plan.manifest.profile_mode == "not-requested":
+        return ManifestedEvaluation(profile=None, probes=None)
+    profile = evaluate_profile(artifact, checkpoint=profile_checkpoint)
+    if plan.probe_manifest is None:
+        return ManifestedEvaluation(profile=profile, probes=None)
+    probes = tuple(
+        ThresholdProbe(
+            probe_id=spec.probe_id,
+            open_threshold=spec.open_threshold,
+            call_threshold=spec.call_threshold,
+        )
+        for spec in plan.probe_manifest.probes
+    )
+    return ManifestedEvaluation(
+        profile=profile,
+        probes=evaluate_threshold_probes(
+            artifact,
+            probes,
+            baseline=profile,
+            checkpoint=probe_checkpoint,
+            probe_manifest_identity=plan.probe_manifest.identity,
+        ),
+    )
 
 
 def _evaluate_profile(
@@ -173,6 +258,8 @@ def _evaluate_profile(
         ordered_deal_count=ordered_deal_count,
         terminal_leaf_count=terminal_leaf_count,
         utilities=utilities,
+        strategy_identity=artifact.identity,
+        evaluator_identity=EVALUATOR_IDENTITY,
     )
 
 

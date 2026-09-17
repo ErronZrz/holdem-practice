@@ -42,7 +42,12 @@ def test_regret_matching_and_average_strategy_are_non_negative_and_normalized() 
 @pytest.mark.parametrize("player_count", [6, 7, 9])
 def test_trainer_preallocates_exact_rule_infosets(player_count: int) -> None:
     trainer = SynchronousExternalSamplingMCCFR(
-        MCCFRConfig(player_count=player_count, iterations=1, master_seed=7)
+        MCCFRConfig(
+            player_count=player_count,
+            iterations=1,
+            master_seed=7,
+            average_strategy_start_iteration=1,
+        )
     )
 
     assert trainer.infoset_count == structure_counts(player_count).infosets
@@ -55,7 +60,12 @@ def test_trainer_preallocates_exact_rule_infosets(player_count: int) -> None:
 
 def test_one_iteration_uses_all_traversers_and_commits_only_after_all_passes(monkeypatch) -> None:
     trainer = SynchronousExternalSamplingMCCFR(
-        MCCFRConfig(player_count=6, iterations=1, master_seed=19)
+        MCCFRConfig(
+            player_count=6,
+            iterations=1,
+            master_seed=19,
+            average_strategy_start_iteration=1,
+        )
     )
     seen_policy_ids: list[int] = []
     state_was_pristine: list[bool] = []
@@ -86,7 +96,12 @@ def test_one_iteration_uses_all_traversers_and_commits_only_after_all_passes(mon
 
 def test_each_traverser_pass_samples_exactly_one_chance_deal(monkeypatch) -> None:
     trainer = SynchronousExternalSamplingMCCFR(
-        MCCFRConfig(player_count=6, iterations=1, master_seed=21)
+        MCCFRConfig(
+            player_count=6,
+            iterations=1,
+            master_seed=21,
+            average_strategy_start_iteration=1,
+        )
     )
     sampled_seeds: list[int] = []
     original_sample = mccfr.CandidateAChance.sample_ordered_deal
@@ -105,7 +120,12 @@ def test_each_traverser_pass_samples_exactly_one_chance_deal(monkeypatch) -> Non
 
 def test_external_sampling_enumerates_traverser_actions_and_samples_opponents() -> None:
     trainer = SynchronousExternalSamplingMCCFR(
-        MCCFRConfig(player_count=6, iterations=1, master_seed=23)
+        MCCFRConfig(
+            player_count=6,
+            iterations=1,
+            master_seed=23,
+            average_strategy_start_iteration=1,
+        )
     )
 
     trace = trainer.run_iteration(1)
@@ -117,14 +137,18 @@ def test_external_sampling_enumerates_traverser_actions_and_samples_opponents() 
     assert {history for history, _ in first_pass.sampled_opponent_actions} >= {"x@0", "b@0"}
     assert all(visit.opponent_sampling_probability > 0.0 for visit in first_pass.traverser_visits)
     assert all(
-        visit.average_importance_weight
-        == pytest.approx(1.0 / visit.opponent_sampling_probability)
+        visit.average_importance_weight == pytest.approx(1.0 / visit.opponent_sampling_probability)
         for visit in first_pass.traverser_visits
     )
 
 
 def test_average_strategy_is_complete_normalized_and_seed_repeatable() -> None:
-    config = MCCFRConfig(player_count=6, iterations=2, master_seed=31)
+    config = MCCFRConfig(
+        player_count=6,
+        iterations=2,
+        master_seed=31,
+        average_strategy_start_iteration=1,
+    )
 
     first = train(config)
     second = train(config)
@@ -184,19 +208,35 @@ def test_iteration_order_and_configuration_validation() -> None:
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"player_count": 5, "iterations": 1, "master_seed": 0},
-        {"player_count": 6, "iterations": 0, "master_seed": 0},
-        {"player_count": 6, "iterations": 1, "master_seed": True},
+        {
+            "player_count": 5,
+            "iterations": 1,
+            "master_seed": 0,
+            "average_strategy_start_iteration": 1,
+        },
+        {
+            "player_count": 6,
+            "iterations": 0,
+            "master_seed": 0,
+            "average_strategy_start_iteration": 1,
+        },
+        {
+            "player_count": 6,
+            "iterations": 1,
+            "master_seed": True,
+            "average_strategy_start_iteration": 1,
+        },
         {
             "player_count": 6,
             "iterations": 1,
             "master_seed": 0,
             "average_strategy_start_iteration": 2,
         },
+        {"player_count": 6, "iterations": 1, "master_seed": 0},
     ],
 )
 def test_invalid_configuration_is_rejected(kwargs: dict[str, int]) -> None:
-    with pytest.raises((MCCFRError, ValueError)):
+    with pytest.raises((MCCFRError, TypeError, ValueError)):
         MCCFRConfig(**kwargs)
 
 

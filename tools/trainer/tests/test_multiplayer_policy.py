@@ -104,12 +104,15 @@ def _serialized_payload(payload: dict[str, Any]) -> str:
     artifact_bytes = 0
     for _ in range(16):
         payload["resources"]["artifact_bytes"] = artifact_bytes
-        serialized = json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        ) + "\n"
+        serialized = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
         actual_bytes = len(serialized.encode("utf-8"))
         if actual_bytes == artifact_bytes:
             return serialized
@@ -122,7 +125,12 @@ def _write_payload(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _completed_result(*, reverse_insertion_order: bool = False) -> MCCFRResult:
-    config = MCCFRConfig(player_count=6, iterations=1, master_seed=20260917)
+    config = MCCFRConfig(
+        player_count=6,
+        iterations=1,
+        master_seed=20260917,
+        average_strategy_start_iteration=1,
+    )
     specs = tuple(reversed(infosets(6))) if reverse_insertion_order else infosets(6)
     strategy = {
         spec.key: {

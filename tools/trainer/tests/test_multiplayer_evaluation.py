@@ -22,7 +22,12 @@ from multiplayer_cfr.policy import (
 
 
 def _deterministic_result(player_count: int) -> MCCFRResult:
-    config = MCCFRConfig(player_count=player_count, iterations=1, master_seed=211)
+    config = MCCFRConfig(
+        player_count=player_count,
+        iterations=1,
+        master_seed=211,
+        average_strategy_start_iteration=1,
+    )
     strategy = {
         spec.key: {action: 1.0 if action is spec.actions[0] else 0.0 for action in spec.actions}
         for spec in infosets(player_count)
