@@ -265,3 +265,69 @@ def test_snapshot_is_read_only_copy() -> None:
     assert snap.pot == 15
     assert snap.street == Street.PREFLOP
     assert len(snap.players) == 2
+
+
+_ROYAL_BOARD = "As Ks Qs Js Ts"
+_TIE_HOLES = (
+    "2c 3d",
+    "4c 5d",
+    "6c 7d",
+    "8c 9d",
+    "Tc Jd",
+    "Qc Kd",
+    "Ac 2d",
+    "3c 4d",
+    "5c 6d",
+)
+
+
+def _royal_tie_engine(
+    commitments: list[int], folded_seats: tuple[int, ...] = ()
+) -> PokerEngine:
+    engine = PokerEngine(
+        len(commitments), small_blind=1, big_blind=2, starting_stack=max(commitments), seed=0
+    )
+    engine.board = cards(_ROYAL_BOARD)
+    for seat, player in enumerate(engine.players):
+        player.hole_cards = cards(_TIE_HOLES[seat])
+        player.total_committed = commitments[seat]
+        player.folded = seat in folded_seats
+        player.stack = 0
+    engine._settle_showdown()
+    return engine
+
+
+def test_showdown_keeps_distinct_main_and_side_pot_tie_eligibility() -> None:
+    engine = _royal_tie_engine([4, 4, 2])
+
+    assert engine.pot_results == [
+        {"amount": 6, "winners": [0, 1, 2], "shares": {0: 2, 1: 2, 2: 2}},
+        {"amount": 4, "winners": [0, 1], "shares": {0: 2, 1: 2}},
+    ]
+    assert [player.stack for player in engine.players] == [4, 4, 2]
+
+
+def test_showdown_assigns_three_way_odd_chips_only_in_pot_results() -> None:
+    engine = _royal_tie_engine([2, 2, 2, 2], folded_seats=(3,))
+
+    assert engine.pot_results == [
+        {"amount": 8, "winners": [0, 1, 2], "shares": {0: 3, 1: 3, 2: 2}}
+    ]
+    assert [player.stack for player in engine.players] == [3, 3, 2, 0]
+
+
+@pytest.mark.parametrize("num_players", [2, 3, 4, 9])
+def test_showdown_forced_ties_conserve_chips_for_supported_table_sizes(
+    num_players: int,
+) -> None:
+    engine = _royal_tie_engine([2] * num_players)
+
+    assert engine.pot_results == [
+        {
+            "amount": 2 * num_players,
+            "winners": list(range(num_players)),
+            "shares": {seat: 2 for seat in range(num_players)},
+        }
+    ]
+    assert sum(player.stack for player in engine.players) == 2 * num_players
+    assert engine.winners == list(range(num_players))
