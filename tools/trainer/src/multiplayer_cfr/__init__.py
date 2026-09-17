@@ -27,7 +27,24 @@ from .game import (
     structure_counts,
     terminal_outcome,
 )
-from .policy import StrategyArtifact, StrategyArtifactError, load_strategy, lookup
+from .mccfr import (
+    IterationTrace,
+    MCCFRConfig,
+    MCCFRError,
+    MCCFRResult,
+    SynchronousExternalSamplingMCCFR,
+    TraverserPassTrace,
+    TraverserVisit,
+    train,
+)
+from .policy import (
+    StrategyArtifact,
+    StrategyArtifactError,
+    export_strategy,
+    load_strategy,
+    lookup,
+    validate_strategy,
+)
 from .resources import ResourceEstimate, estimate_resources
 
 __all__ = [
@@ -43,18 +60,26 @@ __all__ = [
     "Deal",
     "GameConfig",
     "InfoSetSpec",
+    "IterationTrace",
+    "MCCFRConfig",
+    "MCCFRError",
+    "MCCFRResult",
     "PublicState",
     "ResourceEstimate",
     "StrategyArtifact",
     "StrategyArtifactError",
     "StructureCounts",
+    "SynchronousExternalSamplingMCCFR",
     "TerminalOutcome",
+    "TraverserPassTrace",
+    "TraverserVisit",
     "acting_player",
     "apply_action",
     "canonical_history",
     "decision_histories",
     "derive_public_state",
     "estimate_resources",
+    "export_strategy",
     "information_set_key",
     "infosets",
     "iter_ordered_deals",
@@ -64,4 +89,6 @@ __all__ = [
     "ordered_deal_count",
     "structure_counts",
     "terminal_outcome",
+    "train",
+    "validate_strategy",
 ]
