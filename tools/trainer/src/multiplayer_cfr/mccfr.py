@@ -85,11 +85,20 @@ class TraverserPassTrace:
 
 
 @dataclass(frozen=True)
+class IterationUpdate:
+    """本轮批量提交前收集的稀疏更新快照，仅用于离线核验。"""
+
+    regret_deltas: tuple[tuple[str, tuple[tuple[Action, float], ...]], ...]
+    strategy_sum_deltas: tuple[tuple[str, tuple[tuple[Action, float], ...]], ...]
+
+
+@dataclass(frozen=True)
 class IterationTrace:
-    """同步 iteration 的固定 traverser 顺序与访问摘要。"""
+    """同步 iteration 的固定 traverser 顺序、访问和更新摘要。"""
 
     iteration: int
     passes: tuple[TraverserPassTrace, ...]
+    update: IterationUpdate
 
 
 @dataclass
@@ -139,6 +148,26 @@ class _IterationDeltas:
 
     def add_strategy_sum(self, key: str, action: Action, value: float) -> None:
         self._add(self.strategy_sums, key, action, value)
+
+    def snapshot(self) -> IterationUpdate:
+        """返回按信息集键和动作顺序固定的更新副本。"""
+
+        return IterationUpdate(
+            regret_deltas=self._snapshot(self.regrets),
+            strategy_sum_deltas=self._snapshot(self.strategy_sums),
+        )
+
+    @staticmethod
+    def _snapshot(
+        values: Mapping[str, Mapping[Action, float]],
+    ) -> tuple[tuple[str, tuple[tuple[Action, float], ...]], ...]:
+        return tuple(
+            (
+                key,
+                tuple(sorted(action_values.items(), key=lambda item: item[0].value)),
+            )
+            for key, action_values in sorted(values.items())
+        )
 
     @staticmethod
     def _add(
@@ -210,21 +239,35 @@ class SynchronousExternalSamplingMCCFR:
             )
             for traverser in range(self.config.player_count)
         )
+        update = deltas.snapshot()
         self._apply_deltas(deltas)
         self._completed_iterations = iteration
-        return IterationTrace(iteration=iteration, passes=traces)
+        return IterationTrace(iteration=iteration, passes=traces, update=update)
 
-    def train(self) -> MCCFRResult:
-        """按配置完成有限 iteration；调用方必须显式提供次数和 master seed。"""
+    @property
+    def completed_iterations(self) -> int:
+        """返回已完成的同步 iteration 数，供外层受控运行器审计。"""
 
-        while self._completed_iterations < self.config.iterations:
-            self.run_iteration(self._completed_iterations + 1)
+        return self._completed_iterations
+
+    def completed_result(self) -> MCCFRResult:
+        """仅在全部显式 iteration 完成后返回可导出的内存结果。"""
+
+        if self._completed_iterations != self.config.iterations:
+            raise MCCFRError("尚未完成全部 iteration，不能生成训练结果")
         return MCCFRResult(
             config=self.config,
             average_strategy=self.average_strategy(),
             infoset_count=self.infoset_count,
             completed_iterations=self._completed_iterations,
         )
+
+    def train(self) -> MCCFRResult:
+        """按配置完成有限 iteration；调用方必须显式提供次数和 master seed。"""
+
+        while self._completed_iterations < self.config.iterations:
+            self.run_iteration(self._completed_iterations + 1)
+        return self.completed_result()
 
     def _freeze_policy(self) -> dict[str, dict[Action, float]]:
         return {key: node.current_strategy() for key, node in self._nodes.items()}

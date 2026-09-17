@@ -1,6 +1,32 @@
 """M8 候选 A 的离线规则与策略产物契约。"""
 
 from .chance import CandidateAChance, iter_ordered_deals, ordered_deal_count
+from .control import (
+    ControlledTrainingResult,
+    CoverageSummary,
+    ImportanceWeightSummary,
+    RunLimits,
+    RunResources,
+    RunStatus,
+    StopReason,
+    TrainingDiagnostics,
+    run_controlled_training,
+)
+from .estimator_oracle import (
+    EstimatorOracleResult,
+    InfoSetEstimatorTarget,
+    exact_external_sampling_targets,
+)
+from .evaluation import (
+    EvaluationError,
+    EvaluationStopped,
+    ProbeEvaluation,
+    ProbeResult,
+    ProfileEvaluation,
+    ThresholdProbe,
+    evaluate_profile,
+    evaluate_threshold_probes,
+)
 from .game import (
     ALLOWED_PLAYER_COUNTS,
     ANTE,
@@ -29,6 +55,7 @@ from .game import (
 )
 from .mccfr import (
     IterationTrace,
+    IterationUpdate,
     MCCFRConfig,
     MCCFRError,
     MCCFRResult,
@@ -37,10 +64,23 @@ from .mccfr import (
     TraverserVisit,
     train,
 )
+from .measurement import (
+    MEASUREMENT_RECORD_TYPE,
+    MEASUREMENT_SCHEMA_VERSION,
+    MeasurementRecord,
+    MeasurementRecordError,
+    RationalValue,
+    create_measurement_record,
+    load_measurement,
+    write_measurement,
+)
 from .policy import (
+    QuantizedStrategyArtifact,
     StrategyArtifact,
     StrategyArtifactError,
+    StrategyArtifactIdentity,
     export_strategy,
+    load_quantized_strategy,
     load_strategy,
     lookup,
     validate_strategy,
@@ -49,6 +89,30 @@ from .resources import ResourceEstimate, estimate_resources
 
 __all__ = [
     "ALLOWED_PLAYER_COUNTS",
+    "ControlledTrainingResult",
+    "CoverageSummary",
+    "EstimatorOracleResult",
+    "EvaluationError",
+    "EvaluationStopped",
+    "ImportanceWeightSummary",
+    "InfoSetEstimatorTarget",
+    "IterationUpdate",
+    "MEASUREMENT_RECORD_TYPE",
+    "MEASUREMENT_SCHEMA_VERSION",
+    "MeasurementRecord",
+    "MeasurementRecordError",
+    "ProbeEvaluation",
+    "ProbeResult",
+    "ProfileEvaluation",
+    "QuantizedStrategyArtifact",
+    "RationalValue",
+    "RunLimits",
+    "RunResources",
+    "RunStatus",
+    "StopReason",
+    "StrategyArtifactIdentity",
+    "ThresholdProbe",
+    "TrainingDiagnostics",
     "ANTE",
     "BET",
     "GAME_ID",
@@ -91,4 +155,12 @@ __all__ = [
     "terminal_outcome",
     "train",
     "validate_strategy",
+    "create_measurement_record",
+    "evaluate_profile",
+    "evaluate_threshold_probes",
+    "exact_external_sampling_targets",
+    "load_measurement",
+    "load_quantized_strategy",
+    "run_controlled_training",
+    "write_measurement",
 ]

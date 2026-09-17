@@ -12,6 +12,7 @@ import tempfile
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -122,6 +123,23 @@ class StrategyArtifact:
     resources: dict[str, object]
 
 
+@dataclass(frozen=True)
+class StrategyArtifactIdentity:
+    """与一次安全读取绑定的策略字节身份。"""
+
+    sha256: str
+    artifact_bytes: int
+
+
+@dataclass(frozen=True)
+class QuantizedStrategyArtifact:
+    """保留导出概率单位的已验证策略，供精确离线评估使用。"""
+
+    artifact: StrategyArtifact
+    action_units: dict[str, dict[Action, int]]
+    identity: StrategyArtifactIdentity
+
+
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -135,7 +153,7 @@ def _reject_non_finite_constant(value: str) -> None:
     raise StrategyArtifactError(f"JSON 不允许非有限数值：{value}")
 
 
-def _read_json(path: Path) -> tuple[dict[str, Any], int]:
+def _read_json(path: Path) -> tuple[dict[str, Any], bytes]:
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         descriptor = os.open(path, flags)
@@ -165,7 +183,7 @@ def _read_json(path: Path) -> tuple[dict[str, Any], int]:
         raise StrategyArtifactError("策略产物不是有效 JSON") from error
     if not isinstance(payload, dict):
         raise StrategyArtifactError("策略产物顶层必须是对象")
-    return payload, len(raw_bytes)
+    return payload, raw_bytes
 
 
 def _expect_exact_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:
@@ -335,12 +353,15 @@ def validate_strategy(
     return validated
 
 
-def _parse_strategy(entries: Any, game: GameConfig) -> Strategy:
+def _parse_strategy(
+    entries: Any, game: GameConfig
+) -> tuple[Strategy, dict[str, dict[Action, int]]]:
     expected_specs = infoset_by_key(game.player_count)
     if not isinstance(entries, list) or len(entries) != len(expected_specs):
         raise StrategyArtifactError("infosets 未完整覆盖候选 A 的可达信息集")
 
     strategy: Strategy = {}
+    strategy_units: dict[str, dict[Action, int]] = {}
     for entry in entries:
         parsed = _expect_exact_keys(entry, _INFOSET_FIELDS, "信息集")
         key = parsed["key"]
@@ -359,10 +380,11 @@ def _parse_strategy(entries: Any, game: GameConfig) -> Strategy:
         }
         if sum(parsed_units.values()) != PROBABILITY_UNITS:
             raise StrategyArtifactError("动作概率单位和不正确")
+        strategy_units[key] = parsed_units
         strategy[key] = {
             action: parsed_units[action] / PROBABILITY_UNITS for action in spec.actions
         }
-    return validate_strategy(strategy, game.player_count)
+    return validate_strategy(strategy, game.player_count), strategy_units
 
 
 def _validate_infoset_entry(entry: dict[str, Any], spec: InfoSetSpec) -> None:
@@ -578,9 +600,7 @@ def _canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
     return (serialized + "\n").encode("utf-8")
 
 
-def _serialized_export(
-    strategy: Strategy, result: MCCFRResult, trainer_version: str
-) -> bytes:
+def _serialized_export(strategy: Strategy, result: MCCFRResult, trainer_version: str) -> bytes:
     artifact_bytes = 0
     for _ in range(_ARTIFACT_SIZE_FIXPOINT_LIMIT):
         serialized = _canonical_json_bytes(
@@ -652,19 +672,18 @@ def export_strategy(
 
     destination = Path(path)
     _write_atomically(destination, serialized)
-    _, actual_bytes = _read_json(destination)
-    if actual_bytes != len(serialized):
+    _, actual_raw_bytes = _read_json(destination)
+    if len(actual_raw_bytes) != len(serialized):
         raise StrategyArtifactError("策略产物回读字节数不一致")
     artifact = load_strategy(destination)
-    if artifact.resources["artifact_bytes"] != actual_bytes:
+    if artifact.resources["artifact_bytes"] != len(actual_raw_bytes):
         raise StrategyArtifactError("策略产物回读资源字段不一致")
     return artifact
 
 
-def load_strategy(path: str | Path) -> StrategyArtifact:
-    """读取并严格验证一个版本化的候选 A 策略产物。"""
-
-    payload, artifact_bytes = _read_json(Path(path))
+def _load_strategy_payload(
+    payload: dict[str, Any], raw_bytes: bytes
+) -> tuple[StrategyArtifact, dict[str, dict[Action, int]]]:
     if set(payload) != {
         "schema_version",
         "artifact_type",
@@ -683,14 +702,38 @@ def load_strategy(path: str | Path) -> StrategyArtifact:
     if _require_int(payload["probability_units"], "probability_units") != PROBABILITY_UNITS:
         raise StrategyArtifactError("策略产物概率精度不兼容")
     game = _parse_game(payload["game"])
-    strategy = _parse_strategy(payload["infosets"], game)
-    return StrategyArtifact(
+    strategy, action_units = _parse_strategy(payload["infosets"], game)
+    artifact = StrategyArtifact(
         game=game,
         strategy=strategy,
         training=_parse_training(payload["training"]),
         quality=_parse_quality(payload["quality"], game.player_count, len(strategy)),
         resources=_parse_resources(
-            payload["resources"], len(strategy), artifact_bytes, game.player_count
+            payload["resources"], len(strategy), len(raw_bytes), game.player_count
+        ),
+    )
+    return artifact, action_units
+
+
+def load_strategy(path: str | Path) -> StrategyArtifact:
+    """读取并严格验证一个版本化的候选 A 策略产物。"""
+
+    payload, raw_bytes = _read_json(Path(path))
+    artifact, _ = _load_strategy_payload(payload, raw_bytes)
+    return artifact
+
+
+def load_quantized_strategy(path: str | Path) -> QuantizedStrategyArtifact:
+    """在一次安全读取中验证策略、保留量化概率单位并计算内容摘要。"""
+
+    payload, raw_bytes = _read_json(Path(path))
+    artifact, action_units = _load_strategy_payload(payload, raw_bytes)
+    return QuantizedStrategyArtifact(
+        artifact=artifact,
+        action_units=action_units,
+        identity=StrategyArtifactIdentity(
+            sha256=sha256(raw_bytes).hexdigest(),
+            artifact_bytes=len(raw_bytes),
         ),
     )
 
