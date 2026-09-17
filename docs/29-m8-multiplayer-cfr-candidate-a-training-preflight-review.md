@@ -276,3 +276,20 @@ All checks passed!
 uv run pytest -q
 148 passed in 54.18s
 ```
+
+## 13. 提交后实际实验就绪复核（阻止实际执行）
+
+在 `5f6194379c49d5ecdb2521998cc7b98a7b4365a5`（`feat: finalize supervised experiment measurements`）提交后，已对 manifest、父 supervisor、子 executor 和最终 measurement 做只读复核。复核时工作区干净；未启动 A6/A7 训练、profile/probe、N9 boundary、supervisor 子进程或任何实验工件写入。
+
+**结论：当前仍不得启动实际 A6/A7 受预算实验。** 已具备 manifest→父 supervisor→子 executor→最终 measurement 的协议骨架与 N9 长训/导出拦截，但下列代码级问题必须先解决：
+
+1. 父进程把可变 manifest/probe 路径交给子进程重读，缺少执行快照或父端 hash/字节身份的启动前强制比对；manifest 替换窗口可能导致实际消耗资源的参数与父端计划不同。
+2. Git 提交、工作区状态、解释器和训练器版本仍主要是调用方/argv 自述，尚未证明子进程实际加载了冻结代码和受控环境。
+3. 没有跨 A6、A7、seed 或重试共享的 campaign 预算 ledger、互斥锁和不可追加预算；单次运行可重新获得完整额度。
+4. macOS supervisor 是周期性 `ps` 采样和进程组终止原语，尚未处理所有外部取消/父进程异常路径，也不是不可逃逸的内核级 containment；不得称为已证明的不可绕过进程树硬限制。
+5. export、measurement 和最终父端替换没有完整的逐阶段父端硬截止；profile/probe 计时、工件最终字节和原子替换峰值占用也尚未纳入可审计阶段账本。
+6. 工件根目录没有独占 inventory/封存账本；停止或异常时残留策略和临时文件未被统一列举、清理或隔离。最终 measurement 替换后，父 receipt 的工件字节也未重新结算。
+7. 最终 measurement 回读未重算嵌入 child execution 的 canonical hash/字节数，也未完整复核 child experiment-record schema、训练配置和状态一致性。
+8. N6 estimator oracle 仍只作为测试能力，未形成 manifest 必引的、冻结 seed/误差口径/实际结果的 preflight attestation。
+
+因此，下一步不是选择 A6/A7 的训练次数，而是先实现上述执行完整性、campaign 账本、工件封存和 estimator preflight 证据链。完成新的只读就绪复核后，才由用户冻结真实实验参数、外部 containment 口径和一次性执行授权。
