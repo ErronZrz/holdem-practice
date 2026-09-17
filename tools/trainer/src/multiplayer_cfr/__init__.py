@@ -132,6 +132,16 @@ from .policy import (
     validate_strategy,
 )
 from .resources import ResourceEstimate, estimate_resources
+from .supervisor import (
+    SUPERVISOR_ID,
+    SUPERVISOR_VERSION,
+    SupervisorError,
+    SupervisorLimits,
+    SupervisorReceipt,
+    SupervisorStatus,
+    SupervisorStopReason,
+    supervise_command,
+)
 
 __all__ = [
     "ALLOWED_PLAYER_COUNTS",
@@ -175,8 +185,15 @@ __all__ = [
     "RunStatus",
     "StopReason",
     "StrategyArtifactIdentity",
+    "SUPERVISOR_ID",
+    "SUPERVISOR_VERSION",
+    "SupervisorError",
     "SupervisorIdentity",
+    "SupervisorLimits",
+    "SupervisorReceipt",
     "SupervisorSession",
+    "SupervisorStatus",
+    "SupervisorStopReason",
     "ThresholdProbe",
     "TrainingDiagnostics",
     "ANTE",
@@ -224,6 +241,7 @@ __all__ = [
     "lookup",
     "ordered_deal_count",
     "structure_counts",
+    "supervise_command",
     "terminal_outcome",
     "train",
     "validate_strategy",
