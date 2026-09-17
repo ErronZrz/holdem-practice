@@ -252,4 +252,27 @@ uv run pytest -q
 4. 达到任一停止条件时，先向受控进程组发送 `SIGTERM`，超出宽限期后发送 `SIGKILL`，并对已观察的后代做补充终止；回执由父监督器生成，包含停止原因、退出码、资源观测、工件字节、警告和终止信号。
 5. 测试只监督安全的 Python 子进程：正常退出、CPU 忙循环、墙钟超限、工件配额超限和非法并发/命令输入；没有执行任何训练、质量评估或生产命令。
 
-该原语是实际实验所需的外层资源执法基础，但尚未把 `run_manifested_experiment()` 作为一个受控子进程启动：当前编排器仍是库内流程，只验证 supervisor 会话身份。因此不能将本轮实现表述为已经对 A6/A7 实验实施系统级硬限制。实际执行前仍需将冻结 manifest 派生的受限命令绑定到 supervisor，并让监督器启动子进程、保存其父进程回执，再由子进程的受控编排写入 measurement。
+该原语是实际实验所需的外层资源执法基础；第 12 节补充了它与冻结 manifest 子进程的绑定协议。即使协议实现完成，本轮仍没有启动实际 A6/A7 训练或完整质量实验，不能将测试路径表述为已对真实实验实施系统级资源限制。
+
+## 12. 父 supervisor 最终 measurement 协议（仅执行 N9 测试路径）
+
+本轮按“父 supervisor 负责写最终 measurement”的确认实现了受控父子协议：
+
+1. `supervised_executor.py` 在父进程安全读取 experiment/probe manifest、派生计划并比对运行时代码身份后，使用固定 `python -m multiplayer_cfr.manifest_executor` 命令交给 macOS supervisor。命令不经 shell，子进程参数只包含冻结 manifest 路径、受限工件根、提交、版本和 `clean` 工作区标识。
+2. 子进程执行现有 manifest 编排，只能写入计划中的策略和**临时** measurement。它声明 parent supervisor 身份，但不持有父进程的实际资源回执。
+3. 父进程只有在真实 supervisor receipt 为 `completed` 时才回读子进程临时 measurement 和量化策略，验证 manifest 身份、策略 SHA-256/字节数和子记录一致性。父进程再把临时 measurement 原子替换为 `supervised-measurement`：其中包含父 supervisor 真实 CPU/RSS/墙钟/工件/PID/停止回执及验证后的子执行内容。
+4. 若父 supervisor 因资源限制、子进程异常或监测失败停止，则最终 measurement 不接受策略或子执行质量结果；它只记录父回执。运行时代码身份不匹配时，父进程在启动子进程和创建工件前失败。
+5. 父子协议测试仅使用 N9 单 traverser boundary sample：验证父进程最终替换 measurement、最终文件仅保留一个 measurement、策略为空，以及运行时代码身份错误不会启动子进程。没有执行 A6/A7 训练、profile/probe 或保留策略。
+
+该协议为实际实验提供了“冻结 manifest → 父监督子进程 → 子进程临时结果 → 父回执终结 final measurement”的路径。实际 A6/A7 前仍必须冻结真实预算和质量参数，并单独授权实际执行；父 supervisor 的 `ps` 采样和进程组终止是 macOS 本机实现，不等同于云端或生产运行时保障。
+
+本轮协议验证结果：
+
+```text
+cd /Users/bryanylliu/my4/holdem-practice/tools/trainer
+uv run ruff check .
+All checks passed!
+
+uv run pytest -q
+148 passed in 54.18s
+```

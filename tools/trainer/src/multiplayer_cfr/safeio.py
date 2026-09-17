@@ -84,16 +84,53 @@ def write_canonical_json(
     *,
     maximum_bytes: int,
 ) -> tuple[Path, bytes]:
-    """在受信任根目录内原子写入一个预声明的相对文件名。"""
+    """在受信任根目录内原子创建一个预声明的相对文件名。"""
 
+    return _write_canonical_json(
+        root,
+        relative_name,
+        payload,
+        maximum_bytes=maximum_bytes,
+        allow_replace=False,
+    )
+
+
+def replace_canonical_json(
+    root: str | Path,
+    relative_name: str,
+    payload: dict[str, object],
+    *,
+    maximum_bytes: int,
+) -> tuple[Path, bytes]:
+    """原子替换受限普通文件，供父监督器将临时记录终结为最终 measurement。"""
+
+    return _write_canonical_json(
+        root,
+        relative_name,
+        payload,
+        maximum_bytes=maximum_bytes,
+        allow_replace=True,
+    )
+
+
+def _write_canonical_json(
+    root: str | Path,
+    relative_name: str,
+    payload: dict[str, object],
+    *,
+    maximum_bytes: int,
+    allow_replace: bool,
+) -> tuple[Path, bytes]:
     serialized = canonical_json_bytes(payload)
     if len(serialized) > maximum_bytes:
         raise SafeJsonError("JSON 工件超过声明大小上限")
     root_path = _validate_root(root)
     name = _validate_relative_name(relative_name)
     destination = root_path / name
-    if destination.exists() or destination.is_symlink():
-        raise SafeJsonError("实验工件目标已存在或不是受限普通路径")
+    if destination.is_symlink() or destination.is_dir():
+        raise SafeJsonError("实验工件目标不能是链接或目录")
+    if destination.exists() and not allow_replace:
+        raise SafeJsonError("实验工件目标已存在")
     _write_atomically(destination, serialized)
     _, read_back = load_canonical_json(destination, maximum_bytes=maximum_bytes)
     if read_back != serialized:
