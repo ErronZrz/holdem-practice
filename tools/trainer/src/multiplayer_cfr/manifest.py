@@ -127,9 +127,10 @@ class ExperimentPlan:
 
 @dataclass(frozen=True)
 class LoadedManifest:
-    """保留验证后的 manifest payload 及其强类型定义。"""
+    """保留验证后的 manifest payload、规范原始字节及强类型定义。"""
 
     payload: dict[str, object]
+    raw_bytes: bytes
     value: ExperimentManifest | ProbeManifest
 
 
@@ -142,6 +143,7 @@ def create_probe_manifest(payload: dict[str, object]) -> LoadedManifest:
     game = cast(dict[str, object], parsed["game"])
     return LoadedManifest(
         payload=parsed,
+        raw_bytes=canonical,
         value=ProbeManifest(
             identity,
             _require_int(game["player_count"], "probe manifest game.player_count", minimum=0),
@@ -156,7 +158,11 @@ def create_experiment_manifest(payload: dict[str, object]) -> LoadedManifest:
     parsed = _parse_experiment_payload(payload)
     canonical = canonical_json_bytes(parsed)
     identity = _identity_from_payload(parsed, canonical)
-    return LoadedManifest(payload=parsed, value=_experiment_from_payload(parsed, identity))
+    return LoadedManifest(
+        payload=parsed,
+        raw_bytes=canonical,
+        value=_experiment_from_payload(parsed, identity),
+    )
 
 
 def write_probe_manifest(
@@ -181,27 +187,51 @@ def write_experiment_manifest(
     return load_experiment_manifest(Path(root) / relative_name)
 
 
-def load_probe_manifest(path: str | Path) -> ProbeManifest:
-    """安全读取并严格验证一个预注册阈值 probe manifest。"""
+def load_probe_manifest_document(path: str | Path) -> LoadedManifest:
+    """安全读取 probe manifest，并保留用于执行快照的同一份规范字节。"""
 
     payload, raw_bytes = _load_json(path)
     parsed = _parse_probe_payload(payload)
     identity = _identity_from_payload(parsed, raw_bytes)
     game = cast(dict[str, object], parsed["game"])
-    return ProbeManifest(
-        identity,
-        _require_int(game["player_count"], "probe manifest game.player_count", minimum=0),
-        _probe_specs_from_payload(parsed["probes"]),
+    return LoadedManifest(
+        payload=parsed,
+        raw_bytes=raw_bytes,
+        value=ProbeManifest(
+            identity,
+            _require_int(game["player_count"], "probe manifest game.player_count", minimum=0),
+            _probe_specs_from_payload(parsed["probes"]),
+        ),
+    )
+
+
+def load_probe_manifest(path: str | Path) -> ProbeManifest:
+    """安全读取并严格验证一个预注册阈值 probe manifest。"""
+
+    document = load_probe_manifest_document(path)
+    assert isinstance(document.value, ProbeManifest)
+    return document.value
+
+
+def load_experiment_manifest_document(path: str | Path) -> LoadedManifest:
+    """安全读取 experiment manifest，并保留用于执行快照的同一份规范字节。"""
+
+    payload, raw_bytes = _load_json(path)
+    parsed = _parse_experiment_payload(payload)
+    identity = _identity_from_payload(parsed, raw_bytes)
+    return LoadedManifest(
+        payload=parsed,
+        raw_bytes=raw_bytes,
+        value=_experiment_from_payload(parsed, identity),
     )
 
 
 def load_experiment_manifest(path: str | Path) -> ExperimentManifest:
     """安全读取并严格验证一个实验 manifest。"""
 
-    payload, raw_bytes = _load_json(path)
-    parsed = _parse_experiment_payload(payload)
-    identity = _identity_from_payload(parsed, raw_bytes)
-    return _experiment_from_payload(parsed, identity)
+    document = load_experiment_manifest_document(path)
+    assert isinstance(document.value, ExperimentManifest)
+    return document.value
 
 
 def derive_experiment_plan(
@@ -593,7 +623,7 @@ def _parse_artifacts(
             parsed_strategy["maximum_bytes"], "artifacts.strategy.maximum_bytes", minimum=1
         )
     )
-    total_reserved = measurement_bytes + strategy_bytes
+    total_reserved = 2 * measurement_bytes + strategy_bytes
     retained_limit = _require_int(
         budget["retained_artifact_limit_bytes"],
         "budget.retained_artifact_limit_bytes",

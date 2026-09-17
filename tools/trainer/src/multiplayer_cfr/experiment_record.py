@@ -84,7 +84,7 @@ def build_manifested_measurement_record(
     if manifest.execution_kind == "a6-a7-training":
         if training is None or boundary is not None:
             raise ExperimentRecordError("A6/A7 记录必须关联唯一训练回执")
-        execution, diagnostics, resources = _training_sections(training, supervisor)
+        execution, diagnostics, resources = _training_sections(training, supervisor, plan)
         if training.result is None:
             if artifact is not None or evaluation is not None:
                 raise ExperimentRecordError("停止的训练不能关联策略或质量评估")
@@ -99,7 +99,7 @@ def build_manifested_measurement_record(
             or evaluation is not None
         ):
             raise ExperimentRecordError("N9 boundary 记录不能关联训练结果、策略或质量评估")
-        execution, diagnostics, resources = _boundary_sections(boundary, supervisor)
+        execution, diagnostics, resources = _boundary_sections(boundary, supervisor, plan)
 
     payload = {
         "schema_version": EXPERIMENT_RECORD_SCHEMA_VERSION,
@@ -145,6 +145,15 @@ def write_manifested_measurement_record(
     return loaded
 
 
+def parse_manifested_measurement_payload(payload: dict[str, object]) -> ExperimentRecord:
+    """严格验证内嵌的规范 child payload，并重算其唯一字节身份。"""
+
+    _validate_payload(payload)
+    raw_bytes = canonical_json_bytes(payload)
+    digest, byte_length = sha256_identity(raw_bytes)
+    return ExperimentRecord(payload=payload, sha256=digest, record_bytes=byte_length)
+
+
 def load_manifested_measurement_record(path: str | Path) -> ExperimentRecord:
     """安全读取并严格验证 manifest 驱动测量记录。"""
 
@@ -152,9 +161,50 @@ def load_manifested_measurement_record(path: str | Path) -> ExperimentRecord:
         payload, raw_bytes = load_canonical_json(path, maximum_bytes=MAX_TEXT_BYTES)
     except SafeJsonError as error:
         raise ExperimentRecordError("无法安全读取 manifest 驱动测量记录") from error
-    _validate_payload(payload)
-    digest, byte_length = sha256_identity(raw_bytes)
-    return ExperimentRecord(payload=payload, sha256=digest, record_bytes=byte_length)
+    record = parse_manifested_measurement_payload(payload)
+    if record.record_bytes != len(raw_bytes):
+        raise ExperimentRecordError("manifest 驱动测量记录字节身份不一致")
+    return record
+
+
+def verify_child_record_against_plan(record: ExperimentRecord, plan: ExperimentPlan) -> None:
+    """父端重验子进程记录的完整 schema、冻结参数和执行状态。"""
+
+    if not isinstance(record, ExperimentRecord) or not isinstance(plan, ExperimentPlan):
+        raise ExperimentRecordError("子记录复验必须关联已验证记录和实验计划")
+    _validate_payload(record.payload)
+    if record.payload["experiment_manifest"] != plan.manifest.identity.as_payload():
+        raise ExperimentRecordError("子记录 manifest 身份与父端计划不一致")
+    execution = record.payload["execution"]
+    if not isinstance(execution, dict):
+        raise ExperimentRecordError("子记录 execution 不兼容")
+    if execution["plan_kind"] != plan.manifest.execution_kind:
+        raise ExperimentRecordError("子记录执行类型与父端计划不一致")
+    if (
+        execution["player_count"] != plan.manifest.player_count
+        or execution["master_seed"] != plan.manifest.master_seed
+    ):
+        raise ExperimentRecordError("子记录人数或 seed 与父端计划不一致")
+    if plan.manifest.execution_kind == "a6-a7-training":
+        if (
+            execution["iterations"] != plan.manifest.iterations
+            or execution["average_strategy_start_iteration"]
+            != plan.manifest.average_strategy_start_iteration
+            or execution["traverser"] is not None
+        ):
+            raise ExperimentRecordError("子记录训练配置与父端计划不一致")
+        if (
+            execution["status"] == "completed"
+            and execution["completed_iterations"] != plan.manifest.iterations
+        ):
+            raise ExperimentRecordError("完成训练的 iteration 数与父端计划不一致")
+    elif (
+        execution["iterations"] != 1
+        or execution["average_strategy_start_iteration"] is not None
+        or execution["traverser"] != plan.manifest.n9_traverser
+        or execution["completed_iterations"] != 0
+    ):
+        raise ExperimentRecordError("子记录 N9 boundary 参数与父端计划不一致")
 
 
 def _validate_artifact(plan: ExperimentPlan, artifact: QuantizedStrategyArtifact | None) -> None:
@@ -199,7 +249,9 @@ def _validate_evaluation(
 
 
 def _training_sections(
-    result: ControlledTrainingResult, supervisor: SupervisorIdentity
+    result: ControlledTrainingResult,
+    supervisor: SupervisorIdentity,
+    plan: ExperimentPlan,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     execution = {
         "plan_kind": "a6-a7-training",
@@ -207,13 +259,14 @@ def _training_sections(
         "stage": "training",
         "stop_reason": result.stop_reason.value,
         "completed_iterations": result.completed_iterations,
+        "player_count": plan.manifest.player_count,
+        "iterations": plan.manifest.iterations,
+        "average_strategy_start_iteration": plan.manifest.average_strategy_start_iteration,
+        "master_seed": plan.manifest.master_seed,
+        "traverser": None,
     }
     diagnostics = {
-        "average_strategy_start_iteration": (
-            result.result.config.average_strategy_start_iteration
-            if result.result is not None
-            else None
-        ),
+        "average_strategy_start_iteration": plan.manifest.average_strategy_start_iteration,
         "coverage": [
             {
                 "traverser": item.traverser,
@@ -239,7 +292,9 @@ def _training_sections(
 
 
 def _boundary_sections(
-    result: N9BoundaryResult, supervisor: SupervisorIdentity
+    result: N9BoundaryResult,
+    supervisor: SupervisorIdentity,
+    plan: ExperimentPlan,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     sample = result.sample
     execution = {
@@ -248,6 +303,11 @@ def _boundary_sections(
         "stage": "boundary",
         "stop_reason": result.stop_reason.value,
         "completed_iterations": 0,
+        "player_count": plan.manifest.player_count,
+        "iterations": 1,
+        "average_strategy_start_iteration": None,
+        "master_seed": plan.manifest.master_seed,
+        "traverser": plan.manifest.n9_traverser,
     }
     diagnostics = {
         "average_strategy_start_iteration": None,
@@ -533,6 +593,11 @@ def _validate_execution_payload(
         "stage",
         "stop_reason",
         "completed_iterations",
+        "player_count",
+        "iterations",
+        "average_strategy_start_iteration",
+        "master_seed",
+        "traverser",
     }:
         raise ExperimentRecordError("执行回执字段不匹配")
     plan_kind = execution["plan_kind"]

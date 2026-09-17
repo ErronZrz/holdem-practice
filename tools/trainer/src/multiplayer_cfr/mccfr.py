@@ -420,6 +420,28 @@ class SynchronousExternalSamplingMCCFR:
                     node.strategy_sum[action] = fsum((node.strategy_sum[action], strategy_sum))
 
 
+def run_audit_iteration(
+    config: MCCFRConfig,
+    initial_regrets: Mapping[str, Mapping[Action, float]],
+) -> IterationTrace:
+    """以完整显式 regret fixture 执行一次审计采样，不生成训练结果或工件。"""
+
+    if config.player_count == 9:
+        raise MCCFRError("N9 不允许 audit iteration")
+    trainer = SynchronousExternalSamplingMCCFR(config)
+    if set(initial_regrets) != set(trainer._nodes):
+        raise MCCFRError("审计 regret fixture 必须完整覆盖候选 A 信息集")
+    for key, node in trainer._nodes.items():
+        values = initial_regrets[key]
+        if set(values) != set(node.actions):
+            raise MCCFRError("审计 regret fixture 的动作集合不合法")
+        node.regret_sum = {
+            action: _require_finite(float(values[action]), "审计 regret fixture")
+            for action in node.actions
+        }
+    return trainer.run_iteration(1)
+
+
 def sample_n9_boundary(*, master_seed: int, traverser: int) -> N9BoundarySample:
     """执行 N9 的一条不提交更新的 sampled pass，仅供边界测量。"""
 

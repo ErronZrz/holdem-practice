@@ -64,7 +64,7 @@ def _plan(*, player_count: int) -> object:
                 "max_concurrency": 1,
                 "rss_warning_bytes": 100,
                 "rss_hard_limit_bytes": 200,
-                "retained_artifact_limit_bytes": 4_000_000,
+                "retained_artifact_limit_bytes": 5_000_000,
                 "stages": (
                     [
                         {"name": "boundary", "wall_time_milliseconds": 100},

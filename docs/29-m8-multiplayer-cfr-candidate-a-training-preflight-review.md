@@ -293,3 +293,35 @@ uv run pytest -q
 8. N6 estimator oracle 仍只作为测试能力，未形成 manifest 必引的、冻结 seed/误差口径/实际结果的 preflight attestation。
 
 因此，下一步不是选择 A6/A7 的训练次数，而是先实现上述执行完整性、campaign 账本、工件封存和 estimator preflight 证据链。完成新的只读就绪复核后，才由用户冻结真实实验参数、外部 containment 口径和一次性执行授权。
+
+## 14. 执行完整性与 campaign 证据链修复（未执行实际训练）
+
+用户确认的默认执行边界已固化为：采用 macOS 本机的采样式进程组 supervisor，不称为不可逃逸 containment；一个 campaign 覆盖 A6、A7、全部 seed、导出、评估和 measurement；每次 authorization 使用新建独占 artifact root；N6 estimator preflight 是实际 A6/A7 的强制前置 evidence。基于该边界，本轮新增以下训练前能力：
+
+1. **执行快照。** 父端在启动子进程前从同一次安全读取的规范 experiment/probe manifest 字节创建新建、空、独占的 `inputs` snapshot。子 executor 只读取该 snapshot，并在任何计划派生/工件写入前重验父端传入的 manifest ID、SHA-256 和字节数。源 manifest 后续替换不会改变执行输入。
+2. **实际运行时身份。** 父端以固定 `/usr/bin/git` argv 读取实际 `HEAD` 和 clean 状态，固定解释器绝对路径；子端再次重验同一工作树和解释器。受控子进程使用最小化环境，禁止继承任意 `PYTHONPATH` 或用户 site 注入。调用方自述、父端实际观察和冻结 manifest commit 必须一致。
+3. **独占工件封存。** artifact root 必须新建且为空；父端只接受 manifest 声明的策略/measurement 普通单链接文件。子进程退出后及 final measurement 原子替换后均生成排序的 SHA-256/字节 inventory。为安全替换临时 measurement，artifact 预算按 `strategy + 2 × measurement` 峰值预留；停止/失败时只清理已声明普通文件，未知文件、链接或目录一律 fail-closed。
+4. **最终 measurement 深度验证。** final schema 升级为 v2，保存 experiment/probe snapshot identity 和 pre-final inventory。回读时重新 canonicalize 并严格验证嵌入 child record 的 schema、hash、字节、计划参数、策略身份、profile/probe 关联及 supervisor status/exit/signal 一致性。停止/失败 receipt 不能附带子策略或质量结果。
+5. **冻结 estimator preflight。** `estimator_preflight.py` 引入版本化 spec 和 attestation：固定 N6 非均匀 regret fixture、显式排序 seed 集、审计信息集、两种 average 累计模式、容差和实际 oracle/production 样本误差。attestation 可规范写入并在 campaign 启动前重演验证；它不会导出策略或运行 A6/A7 训练。
+6. **campaign 共享预算。** `campaign.py` 引入固定 authorization 列表、共享 CPU/墙钟/工件 reservation、macOS `flock` 互斥 lease 和 append-only final ledger。一个 authorization 一旦 lease 即不可重试或预算重置；单次 experiment 的 CPU、阶段墙钟和工件上限不得超出其 reservation。A6/A7 的 supervised 入口必须携带 campaign authorization；N9 可独立 dry-run 或被 campaign 包裹，但始终不产生策略。
+
+这些能力仅通过有限规则、N9 boundary、父子协议、快照、inventory、campaign 和 estimator preflight 单元测试验证；没有执行 A6/A7 训练、完整 A6/A7 profile/probe、跨 seed 稳定性实验或保留实际实验工件。macOS supervisor 的 `ps` 轮询/进程组终止仍按用户接受的本机采样式监督边界记录，不能表述为不可逃逸内核级 containment。
+
+在实际 A6/A7 前，仍需要用户以 canonical 文件冻结真实 campaign（A6/A7/seed authorization、总预算、artifact 根、quality/stability 阈值）及一次性运行授权。执行时必须从通过的真实 preflight attestation、干净已提交工作树和 campaign authorization 开始；不得用本轮测试 fixture、默认值或任意公开 Python 函数调用替代该授权。
+
+本轮执行完整性修复验证结果：
+
+```text
+cd /Users/bryanylliu/my4/holdem-practice/tools/trainer
+uv run ruff check .
+All checks passed!
+
+uv run pytest -q
+159 passed in 117.16s
+```
+
+### 14.1 已接受且持续披露的限制
+
+- supervisor 是用户确认可接受的 macOS 本机采样式进程组监督：它记录观测到的进程树资源并在阈值命中时终止已知进程组/后代；它不是不可逃逸内核级 containment，也不能被描述为此类能力。
+- 本轮的 N6 estimator preflight 在单元测试中使用冻结有限 fixture/seeds 生成 attestation；真实 campaign 必须重新从用户冻结的 preflight 文件产生和验证真实 attestation，不能复用测试 attestation。
+- campaign 的 authorization reservation 是不可追加的上界与 ledger 约束；真实 A6/A7 仍需由用户明确提供各 authorization、总预算、artifact root、质量门槛和一次性授权。没有这些 canonical 输入，代码不得启动实际训练。

@@ -8,7 +8,7 @@ import signal
 import stat
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -125,11 +125,13 @@ def supervise_command(
     working_directory: str | Path,
     artifact_root: str | Path,
     limits: SupervisorLimits,
+    environment: Mapping[str, str] | None = None,
 ) -> SupervisorReceipt:
     """在新的进程组启动无 shell 子进程，并监督其进程树与工件目录。"""
 
     _require_macos()
     command = _validate_argv(argv)
+    child_environment = _validate_child_environment(environment)
     cwd = _require_directory(working_directory, "工作目录")
     artifact_directory = _require_directory(artifact_root, "工件根目录")
     initial_artifact_bytes = _artifact_bytes(artifact_directory)
@@ -149,6 +151,7 @@ def supervise_command(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
+            env=child_environment,
         )
         accounting = _ProcessAccounting(root_pid=child.pid)
         while True:
@@ -357,6 +360,24 @@ def _artifact_bytes(root: Path) -> int:
                 raise SupervisorError("工件根目录只能包含普通文件")
             total += details.st_size
     return total
+
+
+def _validate_child_environment(environment: Mapping[str, str] | None) -> dict[str, str] | None:
+    if environment is None:
+        return None
+    validated = {}
+    for key, value in environment.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or "=" in key
+            or "\x00" in key
+            or not isinstance(value, str)
+            or "\x00" in value
+        ):
+            raise SupervisorError("受控子进程环境变量不合法")
+        validated[key] = value
+    return validated
 
 
 def _validate_argv(value: Sequence[str]) -> tuple[str, ...]:
