@@ -1,6 +1,8 @@
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from multiplayer_cfr import campaign_executor
 from multiplayer_cfr.campaign import (
     CAMPAIGN_SCHEMA_VERSION,
@@ -8,10 +10,16 @@ from multiplayer_cfr.campaign import (
     create_campaign_manifest,
 )
 from multiplayer_cfr.estimator_preflight import (
-    PREFLIGHT_ATTESTATION_TYPE,
-    EstimatorAttestation,
-    PreflightIdentity,
+    PREFLIGHT_MANIFEST_TYPE,
+    PREFLIGHT_SCHEMA_VERSION,
+    create_preflight_spec,
+    load_attestation,
+    load_preflight_spec,
+    run_preflight,
+    write_attestation,
+    write_preflight_spec,
 )
+from multiplayer_cfr.game import information_set_key
 from multiplayer_cfr.manifest import (
     EXPERIMENT_MANIFEST_TYPE,
     MANIFEST_SCHEMA_VERSION,
@@ -86,36 +94,74 @@ def _experiment_payload(commit: str, *, cpu_limit_milliseconds: int = 10_000) ->
     }
 
 
-def _attestation(commit: str) -> EstimatorAttestation:
-    identity = PreflightIdentity(
-        record_type=PREFLIGHT_ATTESTATION_TYPE,
-        schema_version=1,
-        record_id="n6-preflight",
-        sha256="c" * 64,
-        byte_length=300,
+def _preflight_files(root: Path, commit: str) -> tuple[Path, Path]:
+    """写入可复演的冻结 preflight spec 与 attestation 文件，供 campaign 引用。"""
+
+    spec_name = "preflight-spec.json"
+    attestation_name = "preflight-attestation.json"
+    write_preflight_spec(
+        root,
+        spec_name,
+        create_preflight_spec(
+            {
+                "schema_version": PREFLIGHT_SCHEMA_VERSION,
+                "record_type": PREFLIGHT_MANIFEST_TYPE,
+                "record_id": "n6-estimator-preflight",
+                "code_identity": {"git_commit": commit, "trainer_version": _VERSION},
+                "fixture_id": "three-to-one-regret-v1",
+                "sample_seeds": list(range(8)),
+                "target_infosets": sorted(
+                    [
+                        information_set_key(6, 0, 3, "-"),
+                        information_set_key(6, 1, 3, "b@0"),
+                        information_set_key(6, 2, 3, "b@0|c@1"),
+                    ]
+                ),
+                "regret_tolerance_micros": 1_000_000,
+                "strategy_sum_tolerance_micros": 1_000_000,
+            }
+        ),
     )
-    return EstimatorAttestation(
-        payload={
-            "passed": True,
-            "code_identity": {"git_commit": commit, "trainer_version": _VERSION},
-            "preflight_manifest": {
-                "record_type": "multiplayer-cfr-estimator-preflight",
-                "schema_version": 1,
-                "record_id": "n6-preflight-spec",
-                "sha256": "d" * 64,
-                "byte_length": 200,
-            },
-            "sample_seeds": list(range(8)),
-            "target_infosets": [],
-            "regret_tolerance_micros": 1,
-            "strategy_sum_tolerance_micros": 1,
+    write_attestation(
+        root, attestation_name, run_preflight(load_preflight_spec(root / spec_name))
+    )
+    return root / spec_name, root / attestation_name
+
+
+def _campaign_payload(
+    commit: str,
+    attestation_identity: dict[str, object],
+    experiment_identity: dict[str, object],
+    *,
+    peak_rss_limit_bytes: int = 256 * 1024 * 1024,
+) -> dict[str, object]:
+    return {
+        "schema_version": CAMPAIGN_SCHEMA_VERSION,
+        "record_type": CAMPAIGN_TYPE,
+        "campaign_id": "n9-campaign",
+        "code_identity": {"git_commit": commit, "trainer_version": _VERSION},
+        "preflight_attestation": attestation_identity,
+        "limits": {
+            "cpu_limit_milliseconds": 10_000,
+            "wall_limit_milliseconds": 10_000,
+            "peak_rss_limit_bytes": peak_rss_limit_bytes,
+            "retained_artifact_limit_bytes": 1_000_000,
+            "max_concurrency": 1,
         },
-        identity=identity,
-    )
+        "authorizations": [
+            {
+                "authorization_id": "n9-boundary-1",
+                "experiment_manifest": experiment_identity,
+                "cpu_reservation_milliseconds": 10_000,
+                "wall_reservation_milliseconds": 10_000,
+                "artifact_reservation_bytes": 1_000_000,
+            }
+        ],
+    }
 
 
 def test_campaign_executor_uses_single_lease_and_parent_final_measurement(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path,
 ) -> None:
     worktree, commit = _clean_worktree(tmp_path)
     source_root = tmp_path / "source"
@@ -127,40 +173,22 @@ def test_campaign_executor_uses_single_lease_and_parent_final_measurement(
         "experiment.json",
         create_experiment_manifest(_experiment_payload(commit)),
     )
-    attestation = _attestation(commit)
+    spec_path, attestation_path = _preflight_files(source_root, commit)
     campaign = create_campaign_manifest(
-        {
-            "schema_version": CAMPAIGN_SCHEMA_VERSION,
-            "record_type": CAMPAIGN_TYPE,
-            "campaign_id": "n9-campaign",
-            "code_identity": {"git_commit": commit, "trainer_version": _VERSION},
-            "preflight_attestation": attestation.identity.as_payload(),
-            "limits": {
-                "cpu_limit_milliseconds": 10_000,
-                "wall_limit_milliseconds": 10_000,
-                "peak_rss_limit_bytes": 256 * 1024 * 1024,
-                "retained_artifact_limit_bytes": 1_000_000,
-                "max_concurrency": 1,
-            },
-            "authorizations": [
-                {
-                    "authorization_id": "n9-boundary-1",
-                    "experiment_manifest": experiment.identity.as_payload(),
-                    "cpu_reservation_milliseconds": 10_000,
-                    "wall_reservation_milliseconds": 10_000,
-                    "artifact_reservation_bytes": 1_000_000,
-                }
-            ],
-        }
+        _campaign_payload(
+            commit,
+            load_attestation(attestation_path).identity.as_payload(),
+            experiment.identity.as_payload(),
+        )
     )
-    monkeypatch.setattr(campaign_executor, "verify_attestation", lambda *_: None)
 
     result = campaign_executor.run_campaign_authorization(
         campaign_root=campaign_root,
         campaign=campaign,
-        preflight_attestation=attestation,
         authorization_id="n9-boundary-1",
         experiment_manifest_path=source_root / "experiment.json",
+        preflight_spec_path=spec_path,
+        preflight_attestation_path=attestation_path,
         working_directory=worktree,
         runtime_git_commit=commit,
         runtime_trainer_version=_VERSION,
@@ -169,3 +197,40 @@ def test_campaign_executor_uses_single_lease_and_parent_final_measurement(
     assert result.result.measurement_path.is_file()
     assert (campaign_root / "campaign-ledger.json").is_file()
     assert (campaign_root / "runs" / "n9-boundary-1" / "inputs" / "experiment.json").is_file()
+
+
+def test_campaign_executor_rejects_experiment_rss_above_campaign_envelope(
+    tmp_path: Path,
+) -> None:
+    commit = "a" * 40
+    source_root = tmp_path / "source"
+    campaign_root = tmp_path / "campaign"
+    source_root.mkdir()
+    campaign_root.mkdir()
+    experiment = write_experiment_manifest(
+        source_root, "experiment.json", create_experiment_manifest(_experiment_payload(commit))
+    )
+    spec_path, attestation_path = _preflight_files(source_root, commit)
+    campaign = create_campaign_manifest(
+        _campaign_payload(
+            commit,
+            load_attestation(attestation_path).identity.as_payload(),
+            experiment.identity.as_payload(),
+            peak_rss_limit_bytes=1024,
+        )
+    )
+
+    with pytest.raises(campaign_executor.CampaignExecutorError):
+        campaign_executor.run_campaign_authorization(
+            campaign_root=campaign_root,
+            campaign=campaign,
+            authorization_id="n9-boundary-1",
+            experiment_manifest_path=source_root / "experiment.json",
+            preflight_spec_path=spec_path,
+            preflight_attestation_path=attestation_path,
+            working_directory=tmp_path,
+            runtime_git_commit=commit,
+            runtime_trainer_version=_VERSION,
+        )
+
+    assert not (campaign_root / "runs").exists()

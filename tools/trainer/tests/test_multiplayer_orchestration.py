@@ -1,4 +1,5 @@
 from collections import deque
+from collections.abc import Callable
 from copy import deepcopy
 from pathlib import Path
 
@@ -34,8 +35,23 @@ def _reader(values: list[int]):
     return read
 
 
-def _plan(player_count: int, *, profile_mode: str = "not-requested"):
+def _plan(
+    player_count: int,
+    *,
+    profile_mode: str = "not-requested",
+    stage_wall_milliseconds: dict[str, int] | None = None,
+):
     is_n9 = player_count == 9
+    stage_names = (
+        ("boundary", "measurement")
+        if is_n9
+        else ("training", "export", "profile", "probe", "measurement")
+    )
+    overrides = stage_wall_milliseconds or {}
+    stages = [
+        {"name": name, "wall_time_milliseconds": overrides.get(name, 100)}
+        for name in stage_names
+    ]
     manifest = create_experiment_manifest(
         {
             "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -71,20 +87,7 @@ def _plan(player_count: int, *, profile_mode: str = "not-requested"):
                 "rss_warning_bytes": 100,
                 "rss_hard_limit_bytes": 200,
                 "retained_artifact_limit_bytes": 5_000_000,
-                "stages": (
-                    [
-                        {"name": "boundary", "wall_time_milliseconds": 100},
-                        {"name": "measurement", "wall_time_milliseconds": 100},
-                    ]
-                    if is_n9
-                    else [
-                        {"name": "training", "wall_time_milliseconds": 100},
-                        {"name": "export", "wall_time_milliseconds": 100},
-                        {"name": "profile", "wall_time_milliseconds": 100},
-                        {"name": "probe", "wall_time_milliseconds": 100},
-                        {"name": "measurement", "wall_time_milliseconds": 100},
-                    ]
-                ),
+                "stages": stages,
             },
             "artifacts": {
                 "strategy": (
@@ -99,7 +102,7 @@ def _plan(player_count: int, *, profile_mode: str = "not-requested"):
     return derive_experiment_plan(manifest, None)
 
 
-def _session() -> SupervisorSession:
+def _session(clock: Callable[[], float] | None = None) -> SupervisorSession:
     return SupervisorSession(
         identity=SupervisorIdentity(
             supervisor_id="local-supervisor",
@@ -107,13 +110,25 @@ def _session() -> SupervisorSession:
             rss_scope="process-tree",
             enforcement_mode="external-hard-limit",
         ),
-        monotonic_clock=_reader([0, 0, 0, 0, 0]),
+        monotonic_clock=_reader([0, 0, 0, 0, 0]) if clock is None else clock,
         rss_reader=_reader([0, 0, 0]),
         rss_sampler_id="test-rss-v1",
         git_commit=_COMMIT,
         workspace_state="clean",
         trainer_version="candidate-a-orchestration-v1",
     )
+
+
+def _advancing_clock() -> Callable[[], float]:
+    """每次读取前进一秒，用于让目标阶段单独跨过自己的墙钟预算。"""
+
+    seconds = [0.0]
+
+    def read() -> float:
+        seconds[0] += 1.0
+        return seconds[0]
+
+    return read
 
 
 def test_orchestration_runs_only_manifested_a6_stages_and_declared_artifacts(
@@ -179,3 +194,30 @@ def test_orchestration_allows_n9_boundary_without_strategy_and_rejects_existing_
     (occupied / "measurement.json").write_text("reserved", encoding="utf-8")
     with pytest.raises(OrchestrationError):
         run_manifested_experiment(_plan(9), occupied, _session())
+
+
+def test_orchestration_stops_export_stage_that_exceeds_its_manifest_wall_budget(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(6, stage_wall_milliseconds={"training": 10_000, "export": 100})
+
+    with pytest.raises(OrchestrationError):
+        run_manifested_experiment(plan, tmp_path, _session(_advancing_clock()))
+
+    assert (tmp_path / "strategy.json").is_file()
+    assert not (tmp_path / "measurement.json").exists()
+
+
+def test_orchestration_stops_measurement_stage_that_exceeds_its_manifest_wall_budget(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(
+        6,
+        stage_wall_milliseconds={"training": 10_000, "export": 10_000, "measurement": 100},
+    )
+
+    with pytest.raises(OrchestrationError):
+        run_manifested_experiment(plan, tmp_path, _session(_advancing_clock()))
+
+    assert (tmp_path / "strategy.json").is_file()
+    assert not (tmp_path / "measurement.json").exists()

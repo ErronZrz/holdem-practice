@@ -112,7 +112,7 @@ def build_manifested_measurement_record(
         },
         "execution": execution,
         "supervisor": supervisor.as_payload(),
-        "strategy": _strategy_payload(artifact),
+        "strategy": strategy_identity_payload(artifact),
         "profile": _profile_payload(evaluation.profile if evaluation is not None else None),
         "probes": _probes_payload(evaluation.probes if evaluation is not None else None),
         "diagnostics": diagnostics,
@@ -336,7 +336,11 @@ def _resource_payload(resources: Any, supervisor: SupervisorIdentity) -> dict[st
     }
 
 
-def _strategy_payload(artifact: QuantizedStrategyArtifact | None) -> dict[str, object] | None:
+def strategy_identity_payload(
+    artifact: QuantizedStrategyArtifact | None,
+) -> dict[str, object] | None:
+    """父端与子端共用的策略身份形状，确保两侧记录逐字段可比。"""
+
     if artifact is None:
         return None
     return {

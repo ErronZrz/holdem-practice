@@ -156,7 +156,10 @@ def _run_a6_a7(
 
     strategy_slot = ledger.slot("strategy")
     strategy_path = ledger.path("strategy")
+    export_can_continue = _stage_deadline(plan, supervisor, "export")
     export_strategy(strategy_path, training.result, trainer_version=plan.manifest.trainer_version)
+    if not export_can_continue():
+        raise OrchestrationError("导出阶段超过 manifest 墙钟预算，未生成测量记录")
     artifact = load_quantized_strategy(strategy_path)
     if artifact.identity.artifact_bytes > strategy_slot.maximum_bytes:
         raise OrchestrationError("导出策略超过 manifest 预留槽位")
@@ -215,6 +218,7 @@ def _write_record(
     evaluation=None,
     strategy_path: Path | None = None,
 ) -> ManifestedExperimentResult:
+    measurement_can_continue = _stage_deadline(plan, supervisor, "measurement")
     record = build_manifested_measurement_record(
         plan=plan,
         supervisor=supervisor.identity,
@@ -223,6 +227,8 @@ def _write_record(
         artifact=artifact,
         evaluation=evaluation,
     )
+    if not measurement_can_continue():
+        raise OrchestrationError("measurement 阶段超过 manifest 墙钟预算")
     measurement_slot = ledger.slot("measurement")
     written = write_manifested_measurement_record(
         ledger.root,
@@ -230,6 +236,8 @@ def _write_record(
         record,
         maximum_bytes=measurement_slot.maximum_bytes,
     )
+    if not measurement_can_continue():
+        raise OrchestrationError("measurement 阶段超过 manifest 墙钟预算")
     ledger.commit("measurement", written.record_bytes)
     return ManifestedExperimentResult(
         record=written,
@@ -252,13 +260,18 @@ def _run_limits(plan: ExperimentPlan, stage: str) -> RunLimits:
     )
 
 
-def _evaluation_checkpoint(
+def _stage_deadline(
     plan: ExperimentPlan, supervisor: SupervisorSession, stage: str
-) -> Callable[[int], bool]:
-    stage_budget = plan.stage_budgets[stage]
+) -> Callable[[], bool]:
+    """按阶段墙钟预算返回"仍可继续"的合作式检查，同时响应外部取消与 RSS 预警。"""
+
+    try:
+        stage_budget = plan.stage_budgets[stage]
+    except KeyError as error:
+        raise OrchestrationError("manifest 缺少所需阶段预算") from error
     started_at = supervisor.monotonic_clock()
 
-    def can_continue(_: int) -> bool:
+    def can_continue() -> bool:
         if supervisor.cancellation_requested is not None and supervisor.cancellation_requested():
             return False
         if supervisor.rss_reader() >= plan.manifest.rss_warning_bytes:
@@ -268,3 +281,14 @@ def _evaluation_checkpoint(
         )
 
     return can_continue
+
+
+def _evaluation_checkpoint(
+    plan: ExperimentPlan, supervisor: SupervisorSession, stage: str
+) -> Callable[[int], bool]:
+    can_continue = _stage_deadline(plan, supervisor, stage)
+
+    def check(_: int) -> bool:
+        return can_continue()
+
+    return check

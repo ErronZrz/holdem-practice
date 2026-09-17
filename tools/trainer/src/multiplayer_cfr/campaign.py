@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,18 @@ from .safeio import (
 CAMPAIGN_TYPE = "multiplayer-cfr-campaign"
 CAMPAIGN_LEDGER_TYPE = "multiplayer-cfr-campaign-ledger"
 CAMPAIGN_SCHEMA_VERSION = 1
+
+# 受控标识只允许小写字母数字与连字符，避免标识被拼进路径后越出约定根目录。
+_ID_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+_LEASE_GUARD = object()
+_EVENT_FIELDS = {
+    "event",
+    "authorization_id",
+    "status",
+    "supervisor_receipt_sha256",
+    "final_measurement_sha256",
+    "final_inventory",
+}
 
 
 class CampaignError(ValueError):
@@ -80,6 +93,41 @@ class CampaignLease:
     root: Path
     _lock_descriptor: int
     _finalized: bool = False
+    _guard: object = None
+
+    def __post_init__(self) -> None:
+        if self._guard is not _LEASE_GUARD:
+            raise CampaignError("authorization lease 只能由 campaign 互斥入口签发")
+
+    def is_active(self) -> bool:
+        """lease 仍持有互斥锁且尚未写入终态。"""
+
+        return self._lock_descriptor >= 0 and not self._finalized
+
+    def run_root(self) -> Path:
+        """本次 authorization 独占的 run 根目录，并断言它未越出 campaign 根。"""
+
+        run_root = self.root / "runs" / self.authorization.authorization_id
+        if not _is_within(run_root, self.root):
+            raise CampaignError("authorization run 目录越出 campaign 根")
+        return run_root
+
+    def create_run_directories(self) -> tuple[Path, Path, Path]:
+        """新建空的 run、工件与快照目录；已存在即拒绝覆盖或重试。"""
+
+        run_root = self.run_root()
+        if run_root.exists():
+            raise CampaignError("authorization 已有运行目录，campaign 不允许覆盖或重试")
+        artifact_root = run_root / "artifacts"
+        snapshot_root = run_root / "inputs"
+        artifact_root.mkdir(parents=True)
+        snapshot_root.mkdir()
+        return run_root, artifact_root, snapshot_root
+
+    def owns_path(self, path: str | Path) -> bool:
+        """判断路径是否落在本 lease 的 run 目录之内。"""
+
+        return _is_within(Path(path), self.run_root())
 
     def finalize(
         self,
@@ -207,7 +255,24 @@ def acquire_campaign_lease(
         fcntl.flock(descriptor, fcntl.LOCK_UN)
         os.close(descriptor)
         raise
-    return CampaignLease(campaign, authorization, campaign_root, descriptor)
+    return CampaignLease(campaign, authorization, campaign_root, descriptor, _guard=_LEASE_GUARD)
+
+
+def verify_active_lease(lease: CampaignLease) -> None:
+    """确认 lease 由 campaign 互斥入口签发、仍然有效且与 ledger 记录一致。"""
+
+    if not isinstance(lease, CampaignLease) or lease._guard is not _LEASE_GUARD:
+        raise CampaignError("执行必须持有由 campaign 签发的 authorization lease")
+    if not lease.is_active():
+        raise CampaignError("authorization lease 已释放或已终结")
+    _find_authorization(lease.campaign, lease.authorization.authorization_id)
+    ledger = _load_ledger(lease.root, lease.campaign)
+    if not any(
+        event["authorization_id"] == lease.authorization.authorization_id
+        and event["event"] == "leased"
+        for event in ledger["events"]
+    ):
+        raise CampaignError("campaign ledger 未记录该 authorization 的 lease")
 
 
 def _campaign_from_payload(payload: dict[str, object], raw_bytes: bytes) -> CampaignManifest:
@@ -433,6 +498,17 @@ def _require_campaign_root(root: str | Path) -> Path:
     return path
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    """解析后判断路径是否位于根目录之内，用于拒绝越界拼接。"""
+
+    try:
+        resolved_root = root.resolve()
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return resolved == resolved_root or resolved.is_relative_to(resolved_root)
+
+
 def _acquire_lock(root: Path) -> int:
     lock_path = root / ".campaign.lock"
     try:
@@ -468,6 +544,8 @@ def _load_ledger(root: Path, campaign: CampaignManifest) -> dict[str, object]:
         or not isinstance(ledger["events"], list)
     ):
         raise CampaignError("campaign ledger 与冻结 campaign 不兼容")
+    for event in ledger["events"]:
+        _exact_mapping(event, _EVENT_FIELDS, "campaign ledger event")
     return ledger
 
 
@@ -502,8 +580,8 @@ def _require_int(value: object, label: str, *, minimum: int) -> int:
 
 
 def _require_id(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value or len(value) > 64:
-        raise CampaignError(f"{label}必须是长度受限的非空字符串")
+    if not isinstance(value, str) or _ID_PATTERN.fullmatch(value) is None:
+        raise CampaignError(f"{label}必须是受控标识")
     return value
 
 

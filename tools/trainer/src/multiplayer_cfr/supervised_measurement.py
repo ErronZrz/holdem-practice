@@ -11,6 +11,7 @@ from .experiment_record import (
     ExperimentRecord,
     load_manifested_measurement_record,
     parse_manifested_measurement_payload,
+    strategy_identity_payload,
     verify_child_record_against_plan,
 )
 from .manifest import ExperimentPlan
@@ -85,7 +86,7 @@ def finalize_measurement(
                 "payload": child_measurement.payload,
             }
         ),
-        "strategy": _strategy_payload(strategy),
+        "strategy": strategy_identity_payload(strategy),
     }
     _validate_payload(payload)
     raw_bytes = canonical_json_bytes(payload)
@@ -204,15 +205,6 @@ def _receipt_payload(receipt: SupervisorReceipt) -> dict[str, object]:
         "warning_triggered": receipt.warning_triggered,
         "terminated_with_signal": receipt.terminated_with_signal,
         "monitored_pids": list(receipt.monitored_pids),
-    }
-
-
-def _strategy_payload(artifact: QuantizedStrategyArtifact | None) -> dict[str, object] | None:
-    if artifact is None:
-        return None
-    return {
-        "sha256": artifact.identity.sha256,
-        "artifact_bytes": artifact.identity.artifact_bytes,
     }
 
 

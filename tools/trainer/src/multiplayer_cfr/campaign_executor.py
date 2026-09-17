@@ -6,13 +6,14 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
+from .artifact_inventory import ArtifactInventoryError, remove_declared_artifacts
 from .campaign import (
     CampaignAuthorization,
     CampaignManifest,
     acquire_campaign_lease,
     verify_campaign_preflight,
 )
-from .estimator_preflight import EstimatorAttestation, verify_attestation
+from .estimator_preflight import load_attestation, load_preflight_spec, verify_attestation
 from .manifest import (
     ExperimentManifest,
     ExperimentPlan,
@@ -22,7 +23,11 @@ from .manifest import (
     load_probe_manifest_document,
 )
 from .safeio import canonical_json_bytes
-from .supervised_executor import SupervisedExecutionResult, run_supervised_manifest_executor
+from .supervised_executor import (
+    SupervisedExecutionResult,
+    inventory_slots_for_plan,
+    run_supervised_manifest_executor,
+)
 
 
 class CampaignExecutorError(ValueError):
@@ -41,9 +46,10 @@ def run_campaign_authorization(
     *,
     campaign_root: str | Path,
     campaign: CampaignManifest,
-    preflight_attestation: EstimatorAttestation,
     authorization_id: str,
     experiment_manifest_path: str | Path,
+    preflight_spec_path: str | Path,
+    preflight_attestation_path: str | Path,
     working_directory: str | Path,
     runtime_git_commit: str,
     runtime_trainer_version: str,
@@ -51,12 +57,10 @@ def run_campaign_authorization(
 ) -> CampaignExecutionResult:
     """在持有 campaign lease 的整个生命周期内执行一个预注册 authorization。"""
 
-    verify_campaign_preflight(campaign, preflight_attestation)
-    verify_attestation_identity = preflight_attestation
-    verify_attestation(
-        _preflight_spec_from_attestation(verify_attestation_identity),
-        verify_attestation_identity,
-    )
+    spec = load_preflight_spec(preflight_spec_path)
+    attestation = load_attestation(preflight_attestation_path)
+    verify_campaign_preflight(campaign, attestation)
+    verify_attestation(spec, attestation)
     document = load_experiment_manifest_document(experiment_manifest_path)
     experiment = document.value
     probe_document = (
@@ -76,27 +80,30 @@ def run_campaign_authorization(
     )
     if authorization is None or experiment.identity != authorization.experiment_manifest:
         raise CampaignExecutorError("authorization 与 experiment manifest 身份不匹配")
-    _validate_authorization_budget(authorization, plan)
+    _validate_authorization_budget(authorization, plan, campaign)
     root = Path(campaign_root)
     with acquire_campaign_lease(root, campaign, authorization_id) as lease:
-        run_root = root / "runs" / authorization_id
-        if run_root.exists():
-            raise CampaignExecutorError("authorization 已有运行目录，campaign 不允许覆盖或重试")
-        artifact_root = run_root / "artifacts"
-        snapshot_root = run_root / "inputs"
-        artifact_root.mkdir(parents=True)
-        snapshot_root.mkdir()
-        result = run_supervised_manifest_executor(
-            experiment_manifest_path=experiment_manifest_path,
-            artifact_root=artifact_root,
-            execution_snapshot_root=snapshot_root,
-            working_directory=working_directory,
-            runtime_git_commit=runtime_git_commit,
-            runtime_trainer_version=runtime_trainer_version,
-            campaign_authorization_id=lease.authorization.authorization_id,
-            campaign_experiment_identity=lease.authorization.experiment_manifest,
-            probe_manifest_path=probe_manifest_path,
-        )
+        artifact_root: Path | None = None
+        try:
+            _, artifact_root, snapshot_root = lease.create_run_directories()
+            result = run_supervised_manifest_executor(
+                experiment_manifest_path=experiment_manifest_path,
+                artifact_root=artifact_root,
+                execution_snapshot_root=snapshot_root,
+                working_directory=working_directory,
+                runtime_git_commit=runtime_git_commit,
+                runtime_trainer_version=runtime_trainer_version,
+                campaign_lease=lease,
+                probe_manifest_path=probe_manifest_path,
+            )
+        except BaseException:
+            lease.finalize(
+                status=_failure_status(artifact_root, plan),
+                supervisor_receipt_sha256=None,
+                final_measurement_sha256=None,
+                final_inventory=[],
+            )
+            raise
         lease.finalize(
             status=result.receipt.status.value,
             supervisor_receipt_sha256=_receipt_sha256(result),
@@ -106,38 +113,29 @@ def run_campaign_authorization(
     return CampaignExecutionResult(authorization_id=authorization_id, result=result)
 
 
+def _failure_status(artifact_root: Path | None, plan: ExperimentPlan) -> str:
+    """异常退出时按声明槽位清理残留工件；无法安全清理则记为清单失败。"""
+
+    if artifact_root is None or not artifact_root.is_dir():
+        return "failed"
+    try:
+        remove_declared_artifacts(artifact_root, inventory_slots_for_plan(plan))
+    except ArtifactInventoryError:
+        return "inventory-failed"
+    return "failed"
+
+
 def _validate_authorization_budget(
-    authorization: CampaignAuthorization, plan: ExperimentPlan
+    authorization: CampaignAuthorization, plan: ExperimentPlan, campaign: CampaignManifest
 ) -> None:
     requested_wall = sum(stage.wall_time_milliseconds for stage in plan.manifest.stages)
     if (
         plan.manifest.cpu_limit_milliseconds > authorization.cpu_reservation_milliseconds
         or requested_wall > authorization.wall_reservation_milliseconds
         or plan.manifest.retained_artifact_limit_bytes > authorization.artifact_reservation_bytes
+        or plan.manifest.rss_hard_limit_bytes > campaign.peak_rss_limit_bytes
     ):
         raise CampaignExecutorError("experiment 资源上限超过其 campaign authorization 预留")
-
-
-def _preflight_spec_from_attestation(attestation: EstimatorAttestation):
-    from .estimator_preflight import EstimatorPreflightSpec, PreflightIdentity
-
-    payload = attestation.payload
-    manifest = payload["preflight_manifest"]
-    return EstimatorPreflightSpec(
-        identity=PreflightIdentity(
-            record_type=manifest["record_type"],
-            schema_version=manifest["schema_version"],
-            record_id=manifest["record_id"],
-            sha256=manifest["sha256"],
-            byte_length=manifest["byte_length"],
-        ),
-        git_commit=payload["code_identity"]["git_commit"],
-        trainer_version=payload["code_identity"]["trainer_version"],
-        sample_seeds=tuple(payload["sample_seeds"]),
-        target_infosets=tuple(payload["target_infosets"]),
-        regret_tolerance_micros=payload["regret_tolerance_micros"],
-        strategy_sum_tolerance_micros=payload["strategy_sum_tolerance_micros"],
-    )
 
 
 def _receipt_sha256(result: SupervisedExecutionResult) -> str:

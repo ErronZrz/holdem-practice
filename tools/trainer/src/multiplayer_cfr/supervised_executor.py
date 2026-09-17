@@ -14,12 +14,12 @@ from .artifact_inventory import (
     remove_declared_artifacts,
     require_empty_artifact_root,
 )
+from .campaign import CampaignError, CampaignLease, verify_active_lease
 from .execution_snapshot import ExecutionSnapshot, create_execution_snapshot
 from .experiment_record import load_manifested_measurement_record
 from .manifest import (
     ExperimentManifest,
     ExperimentPlan,
-    ManifestIdentity,
     ProbeManifest,
     derive_experiment_plan,
     load_experiment_manifest_document,
@@ -65,8 +65,7 @@ def run_supervised_manifest_executor(
     working_directory: str | Path,
     runtime_git_commit: str,
     runtime_trainer_version: str,
-    campaign_authorization_id: str | None = None,
-    campaign_experiment_identity: ManifestIdentity | None = None,
+    campaign_lease: CampaignLease | None = None,
     probe_manifest_path: str | Path | None = None,
     python_executable: str | Path = sys.executable,
 ) -> SupervisedExecutionResult:
@@ -85,11 +84,7 @@ def run_supervised_manifest_executor(
     ):
         raise SupervisedExecutorError("父端 manifest document 类型不兼容")
     plan = derive_experiment_plan(experiment, probe)
-    _require_campaign_authorization(
-        plan,
-        campaign_authorization_id=campaign_authorization_id,
-        campaign_experiment_identity=campaign_experiment_identity,
-    )
+    _require_campaign_authorization(plan, campaign_lease)
     cwd = _require_directory(working_directory, "工作目录")
     try:
         runtime = inspect_runtime_identity(cwd)
@@ -102,11 +97,10 @@ def run_supervised_manifest_executor(
         actual_git_commit=runtime.git_commit,
     )
     root = require_empty_artifact_root(artifact_root)
-    snapshot = create_execution_snapshot(
-        _require_directory(execution_snapshot_root, "执行快照根目录"),
-        experiment_document,
-        probe_document,
-    )
+    snapshot_root = _require_directory(execution_snapshot_root, "执行快照根目录")
+    if campaign_lease is not None:
+        _require_lease_paths(campaign_lease, root, snapshot_root)
+    snapshot = create_execution_snapshot(snapshot_root, experiment_document, probe_document)
     executable = _require_python_executable(python_executable)
     if executable.resolve() != runtime.python_executable:
         raise SupervisedExecutorError("受控子进程解释器与父端实际解释器不一致")
@@ -162,7 +156,7 @@ def run_supervised_manifest_executor(
         environment=controlled_child_environment(),
     )
     artifact = _load_child_strategy(receipt, child_measurement_path, strategy_path)
-    slots = _inventory_slots(plan)
+    slots = inventory_slots_for_plan(plan)
     required_pre_final = {plan.manifest.measurement_slot.relative_name}
     if artifact is not None and plan.manifest.strategy_slot is not None:
         required_pre_final.add(plan.manifest.strategy_slot.relative_name)
@@ -214,30 +208,36 @@ def run_supervised_manifest_executor(
 
 
 def _require_campaign_authorization(
-    plan: ExperimentPlan,
-    *,
-    campaign_authorization_id: str | None,
-    campaign_experiment_identity: ManifestIdentity | None,
+    plan: ExperimentPlan, campaign_lease: CampaignLease | None
 ) -> None:
-    if plan.manifest.execution_kind == "n9-boundary-sample":
-        if campaign_authorization_id is None and campaign_experiment_identity is None:
+    """A6/A7 必须携带由 campaign 签发的有效 lease；N9 允许独立执行。"""
+
+    if campaign_lease is None:
+        if plan.manifest.execution_kind == "n9-boundary-sample":
             return
-        if (
-            not isinstance(campaign_authorization_id, str)
-            or not campaign_authorization_id
-            or campaign_experiment_identity != plan.manifest.identity
-        ):
-            raise SupervisedExecutorError("N9 campaign authorization 与冻结 boundary 不一致")
-        return
-    if (
-        not isinstance(campaign_authorization_id, str)
-        or not campaign_authorization_id
-        or campaign_experiment_identity != plan.manifest.identity
-    ):
         raise SupervisedExecutorError("A6/A7 必须通过冻结 campaign authorization 执行")
+    try:
+        verify_active_lease(campaign_lease)
+    except CampaignError as error:
+        raise SupervisedExecutorError("campaign authorization lease 无效") from error
+    if (
+        campaign_lease.authorization.experiment_manifest != plan.manifest.identity
+        or campaign_lease.campaign.git_commit != plan.manifest.code_commit
+        or campaign_lease.campaign.trainer_version != plan.manifest.trainer_version
+    ):
+        raise SupervisedExecutorError("campaign authorization 与冻结 experiment 不一致")
 
 
-def _inventory_slots(plan: ExperimentPlan) -> tuple[InventorySlot, ...]:
+def _require_lease_paths(
+    lease: CampaignLease, artifact_root: Path, snapshot_root: Path
+) -> None:
+    """工件与快照目录必须落在这条 authorization 独占的 run 目录之内。"""
+
+    if not lease.owns_path(artifact_root) or not lease.owns_path(snapshot_root):
+        raise SupervisedExecutorError("工件或快照目录越出 authorization run 目录")
+
+
+def inventory_slots_for_plan(plan: ExperimentPlan) -> tuple[InventorySlot, ...]:
     slots = [
         InventorySlot(
             relative_name=plan.manifest.measurement_slot.relative_name,

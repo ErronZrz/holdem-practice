@@ -4,6 +4,13 @@ from pathlib import Path
 
 import pytest
 
+from multiplayer_cfr.campaign import (
+    CAMPAIGN_SCHEMA_VERSION,
+    CAMPAIGN_TYPE,
+    acquire_campaign_lease,
+    create_campaign_manifest,
+)
+from multiplayer_cfr.estimator_preflight import PREFLIGHT_ATTESTATION_TYPE
 from multiplayer_cfr.manifest import (
     EXPERIMENT_MANIFEST_TYPE,
     MANIFEST_SCHEMA_VERSION,
@@ -88,6 +95,73 @@ def _n9_manifest(commit: str) -> dict[str, object]:
             "strategy": None,
             "measurement": {"relative_name": "measurement.json", "maximum_bytes": 500_000},
         },
+    }
+
+
+def _a6_manifest(commit: str) -> dict[str, object]:
+    payload = deepcopy(_n9_manifest(commit))
+    payload["manifest_id"] = "a6-supervised-training"
+    payload["game"]["player_count"] = 6
+    payload["execution"] = {
+        "kind": "a6-a7-training",
+        "iterations": 1,
+        "average_strategy_start_iteration": 1,
+        "master_seed": 6,
+    }
+    payload["budget"]["cpu_limit_milliseconds"] = 120_000
+    payload["budget"]["rss_warning_bytes"] = 256 * 1024 * 1024
+    payload["budget"]["rss_hard_limit_bytes"] = 512 * 1024 * 1024
+    payload["budget"]["retained_artifact_limit_bytes"] = 5_000_000
+    payload["budget"]["stages"] = [
+        {"name": name, "wall_time_milliseconds": 60_000}
+        for name in ("training", "export", "profile", "probe", "measurement")
+    ]
+    payload["artifacts"] = {
+        "strategy": {"relative_name": "strategy.json", "maximum_bytes": 3_000_000},
+        "measurement": {"relative_name": "measurement.json", "maximum_bytes": 1_000_000},
+    }
+    return payload
+
+
+def _campaign_payload(
+    commit: str,
+    experiment_identity: dict[str, object],
+    *,
+    campaign_id: str = "n9-lease-campaign",
+    authorization_id: str = "n9-lease-1",
+    cpu_milliseconds: int = 10_000,
+    wall_milliseconds: int = 10_000,
+    retained_artifact_bytes: int = 1_000_000,
+    peak_rss_limit_bytes: int = 256 * 1024 * 1024,
+) -> dict[str, object]:
+    return {
+        "schema_version": CAMPAIGN_SCHEMA_VERSION,
+        "record_type": CAMPAIGN_TYPE,
+        "campaign_id": campaign_id,
+        "code_identity": {"git_commit": commit, "trainer_version": _TRAINER_VERSION},
+        "preflight_attestation": {
+            "record_type": PREFLIGHT_ATTESTATION_TYPE,
+            "schema_version": 1,
+            "record_id": "n6-preflight",
+            "sha256": "c" * 64,
+            "byte_length": 200,
+        },
+        "limits": {
+            "cpu_limit_milliseconds": cpu_milliseconds,
+            "wall_limit_milliseconds": wall_milliseconds,
+            "peak_rss_limit_bytes": peak_rss_limit_bytes,
+            "retained_artifact_limit_bytes": retained_artifact_bytes,
+            "max_concurrency": 1,
+        },
+        "authorizations": [
+            {
+                "authorization_id": authorization_id,
+                "experiment_manifest": experiment_identity,
+                "cpu_reservation_milliseconds": cpu_milliseconds,
+                "wall_reservation_milliseconds": wall_milliseconds,
+                "artifact_reservation_bytes": retained_artifact_bytes,
+            }
+        ],
     }
 
 
@@ -176,6 +250,47 @@ def test_parent_rejects_a6_execution_without_campaign_authorization(tmp_path: Pa
     assert list(artifact_root.iterdir()) == []
 
 
+def test_parent_rejects_lease_bound_to_another_experiment(tmp_path: Path) -> None:
+    commit = "a" * 40
+    manifest_root = tmp_path / "manifests"
+    campaign_root = tmp_path / "campaign"
+    manifest_root.mkdir()
+    campaign_root.mkdir()
+    experiment_path = manifest_root / "experiment.json"
+    write_experiment_manifest(
+        manifest_root, experiment_path.name, create_experiment_manifest(_n9_manifest(commit))
+    )
+    campaign = create_campaign_manifest(
+        _campaign_payload(
+            commit,
+            {
+                "manifest_type": "multiplayer-cfr-experiment",
+                "schema_version": 1,
+                "manifest_id": "other-experiment",
+                "sha256": "b" * 64,
+                "byte_length": 100,
+            },
+        )
+    )
+
+    with acquire_campaign_lease(campaign_root, campaign, "n9-lease-1") as lease:
+        _, artifact_root, snapshot_root = lease.create_run_directories()
+
+        with pytest.raises(SupervisedExecutorError):
+            run_supervised_manifest_executor(
+                experiment_manifest_path=experiment_path,
+                artifact_root=artifact_root,
+                execution_snapshot_root=snapshot_root,
+                working_directory=tmp_path,
+                runtime_git_commit=commit,
+                runtime_trainer_version=_TRAINER_VERSION,
+                campaign_lease=lease,
+            )
+
+        assert list(artifact_root.iterdir()) == []
+        assert list(snapshot_root.iterdir()) == []
+
+
 def test_parent_rejects_runtime_identity_before_starting_child(tmp_path: Path) -> None:
     worktree, commit = _clean_worktree(tmp_path)
     manifest_root = tmp_path / "manifests"
@@ -201,3 +316,57 @@ def test_parent_rejects_runtime_identity_before_starting_child(tmp_path: Path) -
         )
 
     assert list(artifact_root.iterdir()) == []
+
+
+def test_parent_runs_a6_training_under_campaign_lease(tmp_path: Path) -> None:
+    worktree, commit = _clean_worktree(tmp_path)
+    manifest_root = tmp_path / "manifests"
+    campaign_root = tmp_path / "campaign"
+    manifest_root.mkdir()
+    campaign_root.mkdir()
+    experiment_path = manifest_root / "experiment.json"
+    experiment = write_experiment_manifest(
+        manifest_root,
+        experiment_path.name,
+        create_experiment_manifest(_a6_manifest(commit)),
+    )
+    campaign = create_campaign_manifest(
+        _campaign_payload(
+            commit,
+            experiment.identity.as_payload(),
+            campaign_id="a6-lease-campaign",
+            authorization_id="a6-lease-1",
+            cpu_milliseconds=120_000,
+            wall_milliseconds=300_000,
+            retained_artifact_bytes=5_000_000,
+            peak_rss_limit_bytes=512 * 1024 * 1024,
+        )
+    )
+
+    with acquire_campaign_lease(campaign_root, campaign, "a6-lease-1") as lease:
+        _, artifact_root, snapshot_root = lease.create_run_directories()
+        result = run_supervised_manifest_executor(
+            experiment_manifest_path=experiment_path,
+            artifact_root=artifact_root,
+            execution_snapshot_root=snapshot_root,
+            working_directory=worktree,
+            runtime_git_commit=commit,
+            runtime_trainer_version=_TRAINER_VERSION,
+            campaign_lease=lease,
+        )
+        lease.finalize(
+            status=result.receipt.status.value,
+            supervisor_receipt_sha256="0" * 64,
+            final_measurement_sha256=result.measurement.sha256,
+            final_inventory=[entry.as_payload() for entry in result.final_inventory],
+        )
+
+    final = load_supervised_measurement(result.measurement_path)
+    assert result.receipt.status is SupervisorStatus.COMPLETED
+    assert result.strategy_path is not None and result.strategy_path.is_file()
+    assert final.payload["strategy"] is not None
+    assert final.payload["child_execution"] is not None
+    assert [entry.relative_name for entry in result.final_inventory] == [
+        "measurement.json",
+        "strategy.json",
+    ]
