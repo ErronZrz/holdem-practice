@@ -30,6 +30,8 @@ class LegalActions:
     can_check: bool
     can_call: bool
     call_amount: int
+    actual_call_amount: int
+    is_short_all_in_call: bool
     can_bet: bool
     min_bet: int
     max_bet: int

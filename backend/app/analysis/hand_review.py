@@ -338,8 +338,12 @@ def _analyze_decision(
 
     eq = equity(hero_state.hole_cards, snapshot.board, opponents, rng, _EQUITY_SAMPLES)
     to_call = legal.call_amount
-    pot_odds = to_call / (snapshot.pot + to_call) if to_call > 0 else None
-    call_ev = round(eq * (snapshot.pot + to_call) - to_call) if to_call > 0 else None
+    actual_call_amount = legal.actual_call_amount
+    is_short_all_in_call = legal.is_short_all_in_call
+    reference_pot_odds = to_call / (snapshot.pot + to_call) if to_call > 0 else None
+    reference_call_ev = (
+        round(eq * (snapshot.pot + to_call) - to_call) if to_call > 0 else None
+    )
     baseline = reference_bot.action_distribution(snapshot, legal)
     distribution = _conservative_distribution(snapshot, legal, hero_state, eq, baseline)
     bot_action = _mode_action(distribution)
@@ -349,10 +353,16 @@ def _analyze_decision(
         "board": [str(c) for c in snapshot.board],
         "pot": snapshot.pot,
         "to_call": to_call,
+        "actual_call_amount": actual_call_amount,
+        "is_short_all_in_call": is_short_all_in_call,
         "opponents": opponents,
         "equity": round(eq, 4),
-        "pot_odds": round(pot_odds, 4) if pot_odds is not None else None,
-        "call_ev": call_ev,
+        "pot_odds": (
+            round(reference_pot_odds, 4)
+            if reference_pot_odds is not None and not is_short_all_in_call
+            else None
+        ),
+        "call_ev": reference_call_ev if not is_short_all_in_call else None,
         "action": {"action": action.type.value, "amount": action.amount},
         "bot_action": {"action": bot_action.type.value, "amount": bot_action.amount},
         "bot_distribution": [
@@ -362,7 +372,7 @@ def _analyze_decision(
         "mistakes": _detect_mistakes(
             action=action,
             equity=eq,
-            pot_odds=pot_odds,
+            pot_odds=reference_pot_odds,
             to_call=to_call,
             pot=snapshot.pot,
             can_raise=legal.can_raise,

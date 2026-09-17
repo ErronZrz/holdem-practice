@@ -103,6 +103,8 @@ def _install_probe() -> list[dict]:
                 "raw_dist": baseline,
                 "reference_dist": result,
                 "pot_odds": pot_odds,
+                "actual_call_amount": legal.actual_call_amount,
+                "is_short_all_in_call": legal.is_short_all_in_call,
                 "margin": margin,
                 "made_hand": hand_review._is_made_hand(me.hole_cards, snapshot.board)
                 if postflop
@@ -220,9 +222,14 @@ def _print_decisions(review: dict, records: list[dict]) -> None:
         print("-" * 90)
         print(f"决策点 #{i}  {d['street']:>7}  board={d['board']}  底牌={hole}")
         print(
-            f"  底池={d['pot']}  跟注额={d['to_call']}  pot_odds={d['pot_odds']}  "
-            f"equity={d['equity']:.4f}  call_ev={d['call_ev']}  对手数={d['opponents']}"
+            f"  底池={d['pot']}  完整欠注={d['to_call']}  "
+            f"实际支付={d['actual_call_amount']}  equity={d['equity']:.4f}  "
+            f"对手数={d['opponents']}"
         )
+        if d["is_short_all_in_call"]:
+            print("  短码全下：未建立逐池资格与 EV 模型，复盘不显示单池赔率和跟注 EV")
+        else:
+            print(f"  pot_odds={d['pot_odds']}  call_ev={d['call_ev']}")
         print(
             f"  真人动作={d['action']['action']}({d['action']['amount']})  "
             f"启发式基线={_format_dist(rec.get('raw_dist'))}"
@@ -243,7 +250,7 @@ def _print_decisions(review: dict, records: list[dict]) -> None:
                 margin = rec["margin"]
                 threshold = rec["pot_odds"] + margin
                 print(
-                    f"  判据·赔率余量：equity({d['equity']:.4f}) > "
+                    f"  判据·完整差额赔率余量：equity({d['equity']:.4f}) > "
                     f"pot_odds({rec['pot_odds']:.4f})"
                     f" + margin({margin:.4f}) = {threshold:.4f}  ->  {rec['equity'] > threshold}"
                 )

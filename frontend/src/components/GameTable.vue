@@ -672,7 +672,10 @@ onUnmounted(() => {
             </button>
             <button v-if="legal.can_check" @click="act('check')">过牌<kbd>C</kbd></button>
             <button v-if="legal.can_call" @click="act('call')">
-              跟注 {{ legal.call_amount }}<kbd>C</kbd>
+              <template v-if="legal.is_short_all_in_call">
+                跟注（补齐 {{ legal.call_amount }}，实际全下 {{ legal.actual_call_amount }}）<kbd>C</kbd>
+              </template>
+              <template v-else>跟注 {{ legal.call_amount }}<kbd>C</kbd></template>
             </button>
             <button v-if="legal.can_bet" class="primary" @click="openBet">下注<kbd>B</kbd></button>
             <button v-if="legal.can_raise" class="primary" @click="openRaise">
@@ -785,7 +788,10 @@ onUnmounted(() => {
               <span v-if="d.board.length" class="cards-mini">
                 <PlayingCard v-for="(c, j) in d.board" :key="j" :code="c" small />
               </span>
-              <span class="muted">底池 {{ d.pot }} · 面对下注 {{ d.to_call }}</span>
+              <span class="muted">
+                底池 {{ d.pot }} · 完整欠注 {{ d.to_call }}
+                <template v-if="d.is_short_all_in_call">· 实际全下 {{ d.actual_call_amount }}</template>
+              </span>
             </div>
             <div class="review-row">
               <span>你：{{ actionText(d.action) }}</span>
@@ -798,6 +804,9 @@ onUnmounted(() => {
               <span>胜率 {{ pct(d.equity) }}</span>
               <span v-if="d.pot_odds != null">赔率 {{ pct(d.pot_odds) }}</span>
               <span v-if="d.call_ev != null">跟注 EV {{ evText(d.call_ev) }}</span>
+            </div>
+            <div v-if="d.is_short_all_in_call" class="review-row muted">
+              <span>短码全下尚未建立逐池资格与 EV 模型，未显示单池赔率和跟注 EV。</span>
             </div>
             <div v-for="(m, k) in d.mistakes" :key="k" class="mistake" :class="mistakeClass(m.severity)">
               {{ m.message }}

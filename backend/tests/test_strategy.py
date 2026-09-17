@@ -34,6 +34,8 @@ def _legal(**kw) -> LegalActions:
         can_check=False,
         can_call=False,
         call_amount=0,
+        actual_call_amount=0,
+        is_short_all_in_call=False,
         can_bet=False,
         min_bet=0,
         max_bet=0,

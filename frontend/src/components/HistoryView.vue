@@ -262,7 +262,10 @@ onActivated(() => {
               <span v-if="d.board.length" class="cards-mini">
                 <PlayingCard v-for="(c, j) in d.board" :key="j" :code="c" small />
               </span>
-              <span class="muted">底池 {{ d.pot }} · 面对下注 {{ d.to_call }}</span>
+              <span class="muted">
+                底池 {{ d.pot }} · 完整欠注 {{ d.to_call }}
+                <template v-if="d.is_short_all_in_call">· 实际全下 {{ d.actual_call_amount }}</template>
+              </span>
             </div>
             <div class="review-row">
               <span>你：{{ actionLabel(d.action) }}</span>
@@ -275,6 +278,9 @@ onActivated(() => {
               <span>胜率 {{ pct(d.equity) }}</span>
               <span v-if="d.pot_odds != null">赔率 {{ pct(d.pot_odds) }}</span>
               <span v-if="d.call_ev != null">跟注 EV {{ evText(d.call_ev) }}</span>
+            </div>
+            <div v-if="d.is_short_all_in_call" class="review-row muted">
+              <span>短码全下尚未建立逐池资格与 EV 模型，未显示单池赔率和跟注 EV。</span>
             </div>
             <div
               v-for="(m, k) in d.mistakes"

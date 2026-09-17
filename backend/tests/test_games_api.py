@@ -3,8 +3,13 @@
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api import games
 from app.main import app
+from app.poker.actions import Action, ActionType
+from app.poker.engine import PokerEngine
 from app.storage.db import init_db
+
+from .helpers import cards
 
 
 @pytest.fixture(autouse=True)
@@ -61,10 +66,41 @@ def test_create_and_get_game() -> None:
     assert data["is_human_turn"] is True
     assert data["legal_actions"]["can_raise"] is True
     assert data["legal_actions"]["min_raise_to"] == 20
+    assert data["legal_actions"]["call_amount"] == 5
+    assert data["legal_actions"]["actual_call_amount"] == 5
+    assert data["legal_actions"]["is_short_all_in_call"] is False
 
     got = client.get(f"/games/{data['session_id']}")
     assert got.status_code == 200
     assert got.json()["session_id"] == data["session_id"]
+
+
+def test_game_view_reports_short_call_payment() -> None:
+    client = TestClient(app)
+    created = client.post("/games", json={"num_players": 2, "seed": 1}).json()
+    engine = PokerEngine(2, small_blind=5, big_blind=10, starting_stack=110, seed=0)
+    engine.players[0].stack = 100
+    engine.start_hand_with(
+        button=1,
+        hole_cards={0: cards("As Kd"), 1: cards("Qh Jc")},
+        board=cards("2c 7d 9h Ts 3c"),
+    )
+    for action in (
+        Action(ActionType.CALL),
+        Action(ActionType.CHECK),
+        Action(ActionType.CHECK),
+        Action(ActionType.BET, 100),
+    ):
+        engine.apply_action(action)
+    assert engine.current_seat == 0
+
+    games._registry[created["session_id"]].engine = engine
+    data = client.get(f"/games/{created['session_id']}").json()
+
+    assert data["is_human_turn"] is True
+    assert data["legal_actions"]["call_amount"] == 100
+    assert data["legal_actions"]["actual_call_amount"] == 90
+    assert data["legal_actions"]["is_short_all_in_call"] is True
 
 
 def test_bot_hole_cards_masked_until_showdown() -> None:

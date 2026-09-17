@@ -9,6 +9,12 @@ from .actions import Action, ActionType, IllegalActionError, LegalActions
 from .cards import Card
 from .deck import Deck
 from .evaluator import best_five, evaluate
+from .pot_projection import (
+    CandidateCallProjection,
+    PotParticipant,
+    project_candidate_call,
+    project_pot_layers,
+)
 from .state import GameState, PlayerState, Street
 
 
@@ -166,13 +172,28 @@ class PokerEngine:
         """当前玩家的合法动作集合。"""
         p = self.current_player
         if self.hand_over or p.folded or p.all_in:
-            return LegalActions(False, False, False, 0, False, 0, 0, False, 0, 0)
+            return LegalActions(
+                can_fold=False,
+                can_check=False,
+                can_call=False,
+                call_amount=0,
+                actual_call_amount=0,
+                is_short_all_in_call=False,
+                can_bet=False,
+                min_bet=0,
+                max_bet=0,
+                can_raise=False,
+                min_raise_to=0,
+                max_raise_to=0,
+            )
 
         to_call = self.current_bet - p.street_bet
         all_in_total = p.street_bet + p.stack
 
         can_check = to_call == 0
         can_call = to_call > 0
+        actual_call_amount = min(to_call, p.stack) if can_call else 0
+        is_short_all_in_call = can_call and to_call > p.stack
         can_bet = False
         can_raise = False
         min_bet = 0
@@ -201,12 +222,33 @@ class PokerEngine:
             can_check=can_check,
             can_call=can_call,
             call_amount=to_call,
+            actual_call_amount=actual_call_amount,
+            is_short_all_in_call=is_short_all_in_call,
             can_bet=can_bet,
             min_bet=min_bet,
             max_bet=max_bet,
             can_raise=can_raise,
             min_raise_to=min_raise_to,
             max_raise_to=max_raise_to,
+        )
+
+    def candidate_call_pot_projection(self) -> CandidateCallProjection | None:
+        """投影当前座位以实际支付 CALL 后的逐层资格，不改变牌局状态。"""
+        legal = self.legal_actions()
+        if not legal.can_call:
+            return None
+        participants = tuple(
+            PotParticipant(
+                seat=player.seat,
+                total_committed=player.total_committed,
+                folded=player.folded,
+            )
+            for player in self.players
+        )
+        return project_candidate_call(
+            participants=participants,
+            caller_seat=self.current_seat,
+            actual_call_amount=legal.actual_call_amount,
         )
 
     # ------------------------------------------------------------------ 盲注与行动顺序
@@ -406,25 +448,23 @@ class PokerEngine:
         self.hand_over = True
 
     def _settle_showdown(self) -> None:
-        contribs = [p.total_committed for p in self.players]
+        participants = tuple(
+            PotParticipant(
+                seat=player.seat,
+                total_committed=player.total_committed,
+                folded=player.folded,
+            )
+            for player in self.players
+        )
         pots: list[tuple[int, list[int]]] = []
         returns = [0] * self.num_players
 
-        # 按所有玩家的投入层级切分边池；某层若无人可争夺，则整层退还给投入者本人。
-        levels = sorted({c for c in contribs if c > 0})
-        prev = 0
-        for level in levels:
-            contributors = [i for i in range(self.num_players) if contribs[i] >= level]
-            eligible = [i for i in contributors if not self.players[i].folded]
-            amount = (level - prev) * len(contributors)
-            if amount > 0:
-                if eligible:
-                    pots.append((amount, eligible))
-                else:
-                    share = level - prev
-                    for i in contributors:
-                        returns[i] += share
-            prev = level
+        for layer in project_pot_layers(participants):
+            if layer.eligible_seats:
+                pots.append((layer.amount, list(layer.eligible_seats)))
+            else:
+                for refund in layer.refunds:
+                    returns[refund.seat] += refund.amount
 
         for i in range(self.num_players):
             self.players[i].stack += returns[i]

@@ -170,6 +170,30 @@ def test_all_in_runs_out_and_shows_down() -> None:
     assert sum(engine.players[i].stack for i in range(2)) == 2000
 
 
+def test_short_call_reports_actual_payment_and_records_it() -> None:
+    engine = PokerEngine(2, small_blind=5, big_blind=10, starting_stack=110, seed=0)
+    engine.players[1].stack = 100
+    engine.start_hand()
+    engine.apply_action(_call())
+    engine.apply_action(_check())
+    engine.apply_action(_check())
+    engine.apply_action(_bet(100))
+
+    legal = engine.legal_actions()
+    assert legal.call_amount == 100
+    assert legal.actual_call_amount == 90
+    assert legal.is_short_all_in_call is True
+    assert legal.can_call and not legal.can_raise
+
+    engine.apply_action(_call())
+
+    assert engine.history[-1]["action"] == ActionType.CALL.value
+    assert engine.history[-1]["amount"] == 90
+    assert engine.players[1].all_in is True
+    assert sum(player.stack for player in engine.players) == 210
+    assert sum(engine.last_net.values()) == 0
+
+
 def test_side_pot_split_and_uncalled_return() -> None:
     # 直接构造结算状态，验证边池切分与未跟注退还。
     engine = PokerEngine(3, small_blind=1, big_blind=2, starting_stack=100, seed=0)

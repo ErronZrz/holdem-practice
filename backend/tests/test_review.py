@@ -2,6 +2,7 @@
 
 import pytest
 
+import app.analysis.hand_review as hand_review_module
 from app.analysis.hand_review import (
     _conservative_distribution,
     _detect_mistakes,
@@ -120,6 +121,8 @@ def test_review_reports_reference_bot_action() -> None:
     assert review["decisions"], "应至少存在一个真人决策点"
     for d in review["decisions"]:
         assert 0.0 <= d["equity"] <= 1.0
+        assert d["actual_call_amount"] == d["to_call"]
+        assert d["is_short_all_in_call"] is False
         assert d["bot_action"]["action"] in ("fold", "check", "call", "bet", "raise")
         distribution = d["bot_distribution"]
         assert distribution, "每个决策点都应给出参考动作分布"
@@ -156,6 +159,52 @@ def test_review_replays_per_player_stacks() -> None:
     assert captured[1] == (500, 0)
 
 
+def test_review_short_call_keeps_complete_gap_for_internal_checks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # 对外不展示单池结果，但既有参考与错误判据继续使用完整欠注差额。
+    engine = PokerEngine(2, 5, 10, 110)
+    engine.players[1].stack = 100
+    engine.start_hand_with(
+        button=0,
+        hole_cards={
+            0: [card("Qh"), card("Jc")],
+            1: [card("2c"), card("7d")],
+        },
+        board=[card(s) for s in ("As", "Kd", "9s", "Th", "3c")],
+    )
+    for action_type, amount in (
+        (ActionType.CALL, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.BET, 100),
+        (ActionType.FOLD, 0),
+    ):
+        _apply(engine, action_type, amount)
+    assert engine.hand_over
+
+    captured: list[tuple[int, float | None]] = []
+    original = hand_review_module._detect_mistakes
+
+    def capture_mistakes(*args, **kwargs):
+        if kwargs["to_call"] == 100:
+            captured.append((kwargs["to_call"], kwargs["pot_odds"]))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(hand_review_module, "_detect_mistakes", capture_mistakes)
+    review = build_review(build_hand_history(engine, hand_number=1, human_seat=1))
+    flop = next(
+        decision
+        for decision in review["decisions"]
+        if decision["street"] == "flop" and decision["to_call"] == 100
+    )
+
+    assert flop["actual_call_amount"] == 90
+    assert flop["pot_odds"] is None
+    assert flop["call_ev"] is None
+    assert captured == [(100, pytest.approx(100 / 220))]
+
+
 def test_review_reference_counts_all_in_opponent() -> None:
     # 复盘参考分布复用策略口径，唯一全下对手仍应参与翻后估值。
     engine = PokerEngine(2, 5, 10, 110)
@@ -187,6 +236,10 @@ def test_review_reference_counts_all_in_opponent() -> None:
 
     assert flop["opponents"] == 1
     assert flop["to_call"] == 100
+    assert flop["actual_call_amount"] == 90
+    assert flop["is_short_all_in_call"] is True
+    assert flop["pot_odds"] is None
+    assert flop["call_ev"] is None
     assert flop["bot_action"]["action"] == ActionType.FOLD.value
 
 
@@ -443,6 +496,8 @@ def _legal(**kw) -> LegalActions:
         can_check=False,
         can_call=False,
         call_amount=0,
+        actual_call_amount=0,
+        is_short_all_in_call=False,
         can_bet=False,
         min_bet=0,
         max_bet=0,

@@ -148,6 +148,8 @@ def build_game_view(runtime: GameRuntime, db: Session) -> schemas.GameView:
             can_check=la.can_check,
             can_call=la.can_call,
             call_amount=la.call_amount,
+            actual_call_amount=la.actual_call_amount,
+            is_short_all_in_call=la.is_short_all_in_call,
             can_bet=la.can_bet,
             min_bet=la.min_bet,
             max_bet=la.max_bet,
