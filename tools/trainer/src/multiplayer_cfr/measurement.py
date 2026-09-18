@@ -22,6 +22,10 @@ MAX_MEASUREMENT_BYTES = 4 * 1024 * 1024
 _MAX_JSON_DEPTH = 32
 _MAX_TEXT_LENGTH = 256
 
+# 精确有理数的位数由规则树深度决定，而非标识符长度：每个动作的概率分母整除 10^12，
+# 单条历史至多 2N-1 个动作，因此理论上界随人数增长，而标识符的短上限并不适用。
+MAX_RATIONAL_DIGITS = 4_096
+
 _TOP_LEVEL_FIELDS = {
     "schema_version",
     "record_type",
@@ -532,8 +536,8 @@ def _parse_rational(value: object, label: str) -> RationalValue:
     rational = _expect_exact_keys(value, {"numerator", "denominator"}, label)
     try:
         return RationalValue(
-            numerator=_require_string(rational["numerator"], f"{label}.numerator"),
-            denominator=_require_string(rational["denominator"], f"{label}.denominator"),
+            numerator=_require_rational_text(rational["numerator"], f"{label}.numerator"),
+            denominator=_require_rational_text(rational["denominator"], f"{label}.denominator"),
         )
     except MeasurementRecordError:
         raise
@@ -646,6 +650,14 @@ def _require_int(value: object, label: str, *, minimum: int) -> int:
 def _require_string(value: object, label: str) -> str:
     if not isinstance(value, str) or not value or len(value) > _MAX_TEXT_LENGTH:
         raise MeasurementRecordError(f"{label} 必须是长度受限的非空字符串")
+    return value
+
+
+def _require_rational_text(value: object, label: str) -> str:
+    """校验精确有理数的分子或分母文本，其长度上界独立于标识符字段。"""
+
+    if not isinstance(value, str) or not value or len(value) > MAX_RATIONAL_DIGITS:
+        raise MeasurementRecordError(f"{label} 必须是长度受限的非空十进制字符串")
     return value
 
 

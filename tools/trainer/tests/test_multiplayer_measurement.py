@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from multiplayer_cfr.measurement import (
+    MAX_RATIONAL_DIGITS,
     MEASUREMENT_RECORD_TYPE,
     MEASUREMENT_SCHEMA_VERSION,
     MeasurementRecordError,
@@ -148,6 +149,33 @@ def test_measurement_rejects_invalid_rationals_and_inconsistent_unproduced_strat
     payload["strategy_ref"]["sha256"] = _HASH
     with pytest.raises(MeasurementRecordError):
         create_measurement_record(payload)
+
+
+def _payload_with_long_utilities(numerator: str) -> dict[str, object]:
+    """构造一个仅首位效用取长分子、其相反数配平的常和 profile。"""
+
+    payload = _valid_payload(completed=True)
+    payload["profile"]["utilities"][0] = {"numerator": numerator, "denominator": "1"}
+    payload["profile"]["utilities"][1] = {"numerator": f"-{numerator}", "denominator": "1"}
+    return payload
+
+
+def test_measurement_accepts_exact_rationals_longer_than_text_bound() -> None:
+    numerator = "1" + "0" * 300
+    assert len(numerator) > 256
+
+    record = create_measurement_record(_payload_with_long_utilities(numerator))
+
+    assert record.payload["profile"]["utilities"][0]["numerator"] == numerator
+    assert record.payload["profile"]["utilities"][1]["numerator"] == f"-{numerator}"
+
+
+def test_measurement_rejects_exact_rationals_beyond_the_dedicated_bound() -> None:
+    numerator = "1" + "0" * MAX_RATIONAL_DIGITS
+    assert len(numerator) > MAX_RATIONAL_DIGITS
+
+    with pytest.raises(MeasurementRecordError):
+        create_measurement_record(_payload_with_long_utilities(numerator))
 
 
 def test_measurement_rejects_noncanonical_or_inconsistent_profile_files(tmp_path: Path) -> None:
