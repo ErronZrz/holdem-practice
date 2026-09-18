@@ -71,6 +71,9 @@ def get_review(
         hand_number=review["hand_number"],
         human_seat=review["human_seat"],
         reference_strategy=review["reference_strategy"],
+        reference_version=review["reference_version"],
+        evaluation_version=review["evaluation_version"],
+        reference_coverage=review["reference_coverage"],
         decisions=review["decisions"],
         mistake_count=review["mistake_count"],
     )

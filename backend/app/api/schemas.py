@@ -209,11 +209,18 @@ class DecisionReview(BaseModel):
 
 
 class HandReview(BaseModel):
-    """单手复盘总览。"""
+    """单手复盘总览。
+
+    参考身份由 ``reference_strategy`` + ``reference_version`` + ``reference_coverage`` 共同声明，
+    ``evaluation_version`` 声明评估口径版本；四者一起保证复盘结果可追溯。
+    """
 
     hand_id: str
     hand_number: int
     human_seat: int
     reference_strategy: str
+    reference_version: int
+    evaluation_version: int
+    reference_coverage: str
     decisions: list[DecisionReview]
     mistake_count: int

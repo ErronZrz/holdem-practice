@@ -16,6 +16,7 @@
 import random
 from collections.abc import Sequence
 
+from app.analysis.reference_identity import reference_identity
 from app.poker.actions import Action, ActionType, LegalActions
 from app.poker.cards import Card, card_from_str
 from app.poker.engine import PokerEngine
@@ -431,7 +432,8 @@ def build_review(history: dict) -> dict:
     return {
         "hand_number": history["hand_number"],
         "human_seat": human_seat,
-        "reference_strategy": "heuristic-conservative",
+        # 参考与评估的版本身份来自唯一事实源，避免在分析层另写字面量。
+        **reference_identity(),
         "decisions": decisions,
         "mistake_count": sum(len(d["mistakes"]) for d in decisions),
     }

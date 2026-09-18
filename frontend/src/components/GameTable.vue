@@ -13,6 +13,7 @@ import {
 import { api } from '../api.js'
 import { actionText, distributionText, HAND_CATEGORY_CN, STREET_CN } from '../cards.js'
 import { copyText } from '../clipboard.js'
+import { referenceText } from '../reviewText.js'
 import PlayingCard from './PlayingCard.vue'
 
 const emit = defineEmits(['navigate'])
@@ -743,6 +744,7 @@ onUnmounted(() => {
         <h3>本手复盘</h3>
         <p v-if="!review" class="muted">复盘生成中…</p>
         <template v-else>
+          <p class="muted">{{ referenceText(review) }}</p>
           <p class="muted">共 {{ review.decisions.length }} 个决策点 · 命中 {{ review.mistake_count }} 处问题</p>
           <p class="muted hand-id-line">
             手牌 ID：<code class="hand-id">{{ review.hand_id }}</code>

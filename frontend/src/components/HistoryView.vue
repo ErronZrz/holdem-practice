@@ -9,6 +9,7 @@ import {
   distributionText,
 } from '../cards.js'
 import { copyText } from '../clipboard.js'
+import { referenceText } from '../reviewText.js'
 import PlayingCard from './PlayingCard.vue'
 
 const sessions = ref([])
@@ -215,7 +216,7 @@ onActivated(() => {
         <div v-if="review" class="review">
           <h4>复盘</h4>
           <p class="muted">
-            参考策略：启发式-保守（vs 随机胜率 + 底池赔率 + 牌力门槛） ·
+            {{ referenceText(review) }} ·
             共 {{ review.decisions.length }} 个决策点 · 命中 {{ review.mistake_count }} 处问题
           </p>
           <p class="muted hand-id-line">
