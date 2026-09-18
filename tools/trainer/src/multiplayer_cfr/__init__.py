@@ -20,6 +20,8 @@ from .campaign import (
     acquire_campaign_lease,
     create_campaign_manifest,
     load_campaign_manifest,
+    require_authorization_within_reservation,
+    require_campaign_preflight_files,
     verify_campaign_preflight,
     write_campaign_manifest,
 )
@@ -367,6 +369,8 @@ __all__ = [
     "load_supervised_measurement",
     "remove_declared_artifacts",
     "replace_with_final_measurement",
+    "require_authorization_within_reservation",
+    "require_campaign_preflight_files",
     "require_empty_artifact_root",
     "run_audit_iteration",
     "run_campaign_authorization",

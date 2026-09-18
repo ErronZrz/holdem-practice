@@ -9,8 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .estimator_preflight import EstimatorAttestation, PreflightIdentity
-from .manifest import ManifestIdentity
+from .estimator_preflight import (
+    EstimatorAttestation,
+    PreflightIdentity,
+    load_attestation,
+    load_preflight_spec,
+    verify_attestation,
+)
+from .manifest import ExperimentPlan, ManifestIdentity
 from .safeio import (
     MAX_TEXT_BYTES,
     SafeJsonError,
@@ -222,6 +228,44 @@ def verify_campaign_preflight(
         or attestation.payload["code_identity"]["trainer_version"] != campaign.trainer_version
     ):
         raise CampaignError("campaign preflight attestation 身份或代码版本不匹配")
+
+
+def require_campaign_preflight_files(
+    campaign: CampaignManifest,
+    preflight_spec_path: str | Path,
+    preflight_attestation_path: str | Path,
+) -> None:
+    """按真实文件字节重验冻结 preflight spec 与 attestation，并重演其固定核验。
+
+    这是 A6/A7 的 preflight 门禁的唯一实现，供 campaign 授权入口与父端监督入口共用，
+    避免两条入口各写一份判断而再次分叉。
+    """
+
+    spec = load_preflight_spec(preflight_spec_path)
+    attestation = load_attestation(preflight_attestation_path)
+    verify_campaign_preflight(campaign, attestation)
+    verify_attestation(spec, attestation)
+
+
+def require_authorization_within_reservation(
+    authorization: CampaignAuthorization,
+    plan: ExperimentPlan,
+    campaign: CampaignManifest,
+) -> None:
+    """拒绝 experiment 资源上限超过 authorization 预留或 campaign envelope 的授权。
+
+    墙钟按 manifest 声明的全部阶段求和；单并发下 experiment 的 RSS 硬停阈值与 campaign
+    峰值 RSS 上限同口径绑定，避免用一份远超 envelope 的 experiment 绕过共享预算。
+    """
+
+    requested_wall = sum(stage.wall_time_milliseconds for stage in plan.manifest.stages)
+    if (
+        plan.manifest.cpu_limit_milliseconds > authorization.cpu_reservation_milliseconds
+        or requested_wall > authorization.wall_reservation_milliseconds
+        or plan.manifest.retained_artifact_limit_bytes > authorization.artifact_reservation_bytes
+        or plan.manifest.rss_hard_limit_bytes > campaign.peak_rss_limit_bytes
+    ):
+        raise CampaignError("experiment 资源上限超过其 campaign authorization 预留")
 
 
 def acquire_campaign_lease(

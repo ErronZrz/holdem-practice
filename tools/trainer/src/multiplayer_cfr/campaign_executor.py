@@ -9,11 +9,13 @@ from pathlib import Path
 from .artifact_inventory import ArtifactInventoryError, remove_declared_artifacts
 from .campaign import (
     CampaignAuthorization,
+    CampaignError,
     CampaignManifest,
     acquire_campaign_lease,
-    verify_campaign_preflight,
+    require_authorization_within_reservation,
+    require_campaign_preflight_files,
 )
-from .estimator_preflight import load_attestation, load_preflight_spec, verify_attestation
+from .estimator_preflight import EstimatorPreflightError
 from .manifest import (
     ExperimentManifest,
     ExperimentPlan,
@@ -57,10 +59,6 @@ def run_campaign_authorization(
 ) -> CampaignExecutionResult:
     """在持有 campaign lease 的整个生命周期内执行一个预注册 authorization。"""
 
-    spec = load_preflight_spec(preflight_spec_path)
-    attestation = load_attestation(preflight_attestation_path)
-    verify_campaign_preflight(campaign, attestation)
-    verify_attestation(spec, attestation)
     document = load_experiment_manifest_document(experiment_manifest_path)
     experiment = document.value
     probe_document = (
@@ -80,7 +78,9 @@ def run_campaign_authorization(
     )
     if authorization is None or experiment.identity != authorization.experiment_manifest:
         raise CampaignExecutorError("authorization 与 experiment manifest 身份不匹配")
-    _validate_authorization_budget(authorization, plan, campaign)
+    _require_authorization_gate(
+        campaign, authorization, plan, preflight_spec_path, preflight_attestation_path
+    )
     root = Path(campaign_root)
     with acquire_campaign_lease(root, campaign, authorization_id) as lease:
         artifact_root: Path | None = None
@@ -94,6 +94,8 @@ def run_campaign_authorization(
                 runtime_git_commit=runtime_git_commit,
                 runtime_trainer_version=runtime_trainer_version,
                 campaign_lease=lease,
+                preflight_spec_path=preflight_spec_path,
+                preflight_attestation_path=preflight_attestation_path,
                 probe_manifest_path=probe_manifest_path,
             )
         except BaseException:
@@ -125,17 +127,20 @@ def _failure_status(artifact_root: Path | None, plan: ExperimentPlan) -> str:
     return "failed"
 
 
-def _validate_authorization_budget(
-    authorization: CampaignAuthorization, plan: ExperimentPlan, campaign: CampaignManifest
+def _require_authorization_gate(
+    campaign: CampaignManifest,
+    authorization: CampaignAuthorization,
+    plan: ExperimentPlan,
+    preflight_spec_path: str | Path,
+    preflight_attestation_path: str | Path,
 ) -> None:
-    requested_wall = sum(stage.wall_time_milliseconds for stage in plan.manifest.stages)
-    if (
-        plan.manifest.cpu_limit_milliseconds > authorization.cpu_reservation_milliseconds
-        or requested_wall > authorization.wall_reservation_milliseconds
-        or plan.manifest.retained_artifact_limit_bytes > authorization.artifact_reservation_bytes
-        or plan.manifest.rss_hard_limit_bytes > campaign.peak_rss_limit_bytes
-    ):
-        raise CampaignExecutorError("experiment 资源上限超过其 campaign authorization 预留")
+    """在获取 lease 之前完成资源预留与 preflight 校验，门禁失败不消耗一次性授权。"""
+
+    try:
+        require_authorization_within_reservation(authorization, plan, campaign)
+        require_campaign_preflight_files(campaign, preflight_spec_path, preflight_attestation_path)
+    except (CampaignError, EstimatorPreflightError) as error:
+        raise CampaignExecutorError("campaign authorization 门禁未通过") from error
 
 
 def _receipt_sha256(result: SupervisedExecutionResult) -> str:

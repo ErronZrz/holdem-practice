@@ -10,7 +10,17 @@ from multiplayer_cfr.campaign import (
     acquire_campaign_lease,
     create_campaign_manifest,
 )
-from multiplayer_cfr.estimator_preflight import PREFLIGHT_ATTESTATION_TYPE
+from multiplayer_cfr.estimator_preflight import (
+    PREFLIGHT_MANIFEST_TYPE,
+    PREFLIGHT_SCHEMA_VERSION,
+    create_preflight_spec,
+    load_attestation,
+    load_preflight_spec,
+    run_preflight,
+    write_attestation,
+    write_preflight_spec,
+)
+from multiplayer_cfr.game import information_set_key
 from multiplayer_cfr.manifest import (
     EXPERIMENT_MANIFEST_TYPE,
     MANIFEST_SCHEMA_VERSION,
@@ -123,9 +133,44 @@ def _a6_manifest(commit: str) -> dict[str, object]:
     return payload
 
 
+def _preflight_files(root: Path, commit: str) -> tuple[Path, Path]:
+    """写入可复演的冻结 preflight spec 与 attestation 文件，供 campaign 引用。"""
+
+    spec_name = "preflight-spec.json"
+    attestation_name = "preflight-attestation.json"
+    write_preflight_spec(
+        root,
+        spec_name,
+        create_preflight_spec(
+            {
+                "schema_version": PREFLIGHT_SCHEMA_VERSION,
+                "record_type": PREFLIGHT_MANIFEST_TYPE,
+                "record_id": "n6-estimator-preflight",
+                "code_identity": {"git_commit": commit, "trainer_version": _TRAINER_VERSION},
+                "fixture_id": "three-to-one-regret-v1",
+                "sample_seeds": list(range(8)),
+                "target_infosets": sorted(
+                    [
+                        information_set_key(6, 0, 3, "-"),
+                        information_set_key(6, 1, 3, "b@0"),
+                        information_set_key(6, 2, 3, "b@0|c@1"),
+                    ]
+                ),
+                "regret_tolerance_micros": 1_000_000,
+                "strategy_sum_tolerance_micros": 1_000_000,
+            }
+        ),
+    )
+    write_attestation(
+        root, attestation_name, run_preflight(load_preflight_spec(root / spec_name))
+    )
+    return root / spec_name, root / attestation_name
+
+
 def _campaign_payload(
     commit: str,
     experiment_identity: dict[str, object],
+    preflight_identity: dict[str, object],
     *,
     campaign_id: str = "n9-lease-campaign",
     authorization_id: str = "n9-lease-1",
@@ -139,13 +184,7 @@ def _campaign_payload(
         "record_type": CAMPAIGN_TYPE,
         "campaign_id": campaign_id,
         "code_identity": {"git_commit": commit, "trainer_version": _TRAINER_VERSION},
-        "preflight_attestation": {
-            "record_type": PREFLIGHT_ATTESTATION_TYPE,
-            "schema_version": 1,
-            "record_id": "n6-preflight",
-            "sha256": "c" * 64,
-            "byte_length": 200,
-        },
+        "preflight_attestation": preflight_identity,
         "limits": {
             "cpu_limit_milliseconds": cpu_milliseconds,
             "wall_limit_milliseconds": wall_milliseconds,
@@ -260,6 +299,7 @@ def test_parent_rejects_lease_bound_to_another_experiment(tmp_path: Path) -> Non
     write_experiment_manifest(
         manifest_root, experiment_path.name, create_experiment_manifest(_n9_manifest(commit))
     )
+    spec_path, attestation_path = _preflight_files(manifest_root, commit)
     campaign = create_campaign_manifest(
         _campaign_payload(
             commit,
@@ -270,6 +310,7 @@ def test_parent_rejects_lease_bound_to_another_experiment(tmp_path: Path) -> Non
                 "sha256": "b" * 64,
                 "byte_length": 100,
             },
+            load_attestation(attestation_path).identity.as_payload(),
         )
     )
 
@@ -285,6 +326,8 @@ def test_parent_rejects_lease_bound_to_another_experiment(tmp_path: Path) -> Non
                 runtime_git_commit=commit,
                 runtime_trainer_version=_TRAINER_VERSION,
                 campaign_lease=lease,
+                preflight_spec_path=spec_path,
+                preflight_attestation_path=attestation_path,
             )
 
         assert list(artifact_root.iterdir()) == []
@@ -330,10 +373,12 @@ def test_parent_runs_a6_training_under_campaign_lease(tmp_path: Path) -> None:
         experiment_path.name,
         create_experiment_manifest(_a6_manifest(commit)),
     )
+    spec_path, attestation_path = _preflight_files(manifest_root, commit)
     campaign = create_campaign_manifest(
         _campaign_payload(
             commit,
             experiment.identity.as_payload(),
+            load_attestation(attestation_path).identity.as_payload(),
             campaign_id="a6-lease-campaign",
             authorization_id="a6-lease-1",
             cpu_milliseconds=120_000,
@@ -353,6 +398,8 @@ def test_parent_runs_a6_training_under_campaign_lease(tmp_path: Path) -> None:
             runtime_git_commit=commit,
             runtime_trainer_version=_TRAINER_VERSION,
             campaign_lease=lease,
+            preflight_spec_path=spec_path,
+            preflight_attestation_path=attestation_path,
         )
         lease.finalize(
             status=result.receipt.status.value,
@@ -370,3 +417,131 @@ def test_parent_runs_a6_training_under_campaign_lease(tmp_path: Path) -> None:
         "measurement.json",
         "strategy.json",
     ]
+
+
+def test_parent_rejects_a6_lease_without_preflight_evidence(tmp_path: Path) -> None:
+    """持有真实 lease 但省略 preflight 证据时必须在启动子进程前失败。"""
+
+    worktree, commit = _clean_worktree(tmp_path)
+    manifest_root = tmp_path / "manifests"
+    campaign_root = tmp_path / "campaign"
+    manifest_root.mkdir()
+    campaign_root.mkdir()
+    experiment_path = manifest_root / "experiment.json"
+    experiment = write_experiment_manifest(
+        manifest_root,
+        experiment_path.name,
+        create_experiment_manifest(_a6_manifest(commit)),
+    )
+    _preflight_files(manifest_root, commit)
+    campaign = create_campaign_manifest(
+        _campaign_payload(
+            commit,
+            experiment.identity.as_payload(),
+            load_attestation(manifest_root / "preflight-attestation.json").identity.as_payload(),
+            campaign_id="a6-no-preflight-campaign",
+            authorization_id="a6-no-preflight",
+            cpu_milliseconds=120_000,
+            wall_milliseconds=300_000,
+            retained_artifact_bytes=5_000_000,
+            peak_rss_limit_bytes=512 * 1024 * 1024,
+        )
+    )
+
+    with acquire_campaign_lease(campaign_root, campaign, "a6-no-preflight") as lease:
+        _, artifact_root, snapshot_root = lease.create_run_directories()
+
+        with pytest.raises(SupervisedExecutorError):
+            run_supervised_manifest_executor(
+                experiment_manifest_path=experiment_path,
+                artifact_root=artifact_root,
+                execution_snapshot_root=snapshot_root,
+                working_directory=worktree,
+                runtime_git_commit=commit,
+                runtime_trainer_version=_TRAINER_VERSION,
+                campaign_lease=lease,
+            )
+
+        assert list(artifact_root.iterdir()) == []
+        assert list(snapshot_root.iterdir()) == []
+
+
+def test_parent_rejects_a6_experiment_above_authorization_reservation(tmp_path: Path) -> None:
+    """绕过 campaign 授权入口时，父端仍须拒绝超出授权预留的 experiment。"""
+
+    worktree, commit = _clean_worktree(tmp_path)
+    manifest_root = tmp_path / "manifests"
+    campaign_root = tmp_path / "campaign"
+    manifest_root.mkdir()
+    campaign_root.mkdir()
+    experiment_path = manifest_root / "experiment.json"
+    experiment = write_experiment_manifest(
+        manifest_root,
+        experiment_path.name,
+        create_experiment_manifest(_a6_manifest(commit)),
+    )
+    spec_path, attestation_path = _preflight_files(manifest_root, commit)
+    campaign = create_campaign_manifest(
+        _campaign_payload(
+            commit,
+            experiment.identity.as_payload(),
+            load_attestation(attestation_path).identity.as_payload(),
+            campaign_id="a6-underfunded-campaign",
+            authorization_id="a6-underfunded",
+            cpu_milliseconds=100_000,
+            wall_milliseconds=300_000,
+            retained_artifact_bytes=5_000_000,
+            peak_rss_limit_bytes=512 * 1024 * 1024,
+        )
+    )
+
+    with acquire_campaign_lease(campaign_root, campaign, "a6-underfunded") as lease:
+        _, artifact_root, snapshot_root = lease.create_run_directories()
+
+        with pytest.raises(SupervisedExecutorError):
+            run_supervised_manifest_executor(
+                experiment_manifest_path=experiment_path,
+                artifact_root=artifact_root,
+                execution_snapshot_root=snapshot_root,
+                working_directory=worktree,
+                runtime_git_commit=commit,
+                runtime_trainer_version=_TRAINER_VERSION,
+                campaign_lease=lease,
+                preflight_spec_path=spec_path,
+                preflight_attestation_path=attestation_path,
+            )
+
+        assert list(artifact_root.iterdir()) == []
+        assert list(snapshot_root.iterdir()) == []
+
+
+def test_parent_rejects_preflight_evidence_on_n9_boundary(tmp_path: Path) -> None:
+    """N9 boundary 不接受 campaign preflight 证据，避免把独立采样伪装成授权实验。"""
+
+    worktree, commit = _clean_worktree(tmp_path)
+    manifest_root = tmp_path / "manifests"
+    artifact_root = tmp_path / "artifacts"
+    manifest_root.mkdir()
+    artifact_root.mkdir()
+    (tmp_path / "snapshots").mkdir()
+    experiment_path = manifest_root / "experiment.json"
+    write_experiment_manifest(
+        manifest_root,
+        experiment_path.name,
+        create_experiment_manifest(_n9_manifest(commit)),
+    )
+    spec_path, attestation_path = _preflight_files(manifest_root, commit)
+
+    with pytest.raises(SupervisedExecutorError):
+        run_supervised_manifest_executor(
+            experiment_manifest_path=experiment_path,
+            artifact_root=artifact_root,
+            execution_snapshot_root=tmp_path / "snapshots",
+            working_directory=worktree,
+            runtime_git_commit=commit,
+            runtime_trainer_version=_TRAINER_VERSION,
+            preflight_spec_path=spec_path,
+            preflight_attestation_path=attestation_path,
+        )
+
+    assert list(artifact_root.iterdir()) == []

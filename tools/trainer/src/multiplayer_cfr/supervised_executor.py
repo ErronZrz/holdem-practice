@@ -14,7 +14,14 @@ from .artifact_inventory import (
     remove_declared_artifacts,
     require_empty_artifact_root,
 )
-from .campaign import CampaignError, CampaignLease, verify_active_lease
+from .campaign import (
+    CampaignError,
+    CampaignLease,
+    require_authorization_within_reservation,
+    require_campaign_preflight_files,
+    verify_active_lease,
+)
+from .estimator_preflight import EstimatorPreflightError
 from .execution_snapshot import ExecutionSnapshot, create_execution_snapshot
 from .experiment_record import load_manifested_measurement_record
 from .manifest import (
@@ -66,6 +73,8 @@ def run_supervised_manifest_executor(
     runtime_git_commit: str,
     runtime_trainer_version: str,
     campaign_lease: CampaignLease | None = None,
+    preflight_spec_path: str | Path | None = None,
+    preflight_attestation_path: str | Path | None = None,
     probe_manifest_path: str | Path | None = None,
     python_executable: str | Path = sys.executable,
 ) -> SupervisedExecutionResult:
@@ -84,7 +93,12 @@ def run_supervised_manifest_executor(
     ):
         raise SupervisedExecutorError("父端 manifest document 类型不兼容")
     plan = derive_experiment_plan(experiment, probe)
-    _require_campaign_authorization(plan, campaign_lease)
+    _require_campaign_authorization(
+        plan,
+        campaign_lease,
+        preflight_spec_path=preflight_spec_path,
+        preflight_attestation_path=preflight_attestation_path,
+    )
     cwd = _require_directory(working_directory, "工作目录")
     try:
         runtime = inspect_runtime_identity(cwd)
@@ -208,14 +222,22 @@ def run_supervised_manifest_executor(
 
 
 def _require_campaign_authorization(
-    plan: ExperimentPlan, campaign_lease: CampaignLease | None
+    plan: ExperimentPlan,
+    campaign_lease: CampaignLease | None,
+    *,
+    preflight_spec_path: str | Path | None,
+    preflight_attestation_path: str | Path | None,
 ) -> None:
-    """A6/A7 必须携带由 campaign 签发的有效 lease；N9 允许独立执行。"""
+    """A6/A7 必须同时满足：有效 lease、冻结 preflight 证据、不超授权预留；N9 允许独立执行。"""
 
     if campaign_lease is None:
         if plan.manifest.execution_kind == "n9-boundary-sample":
+            if preflight_spec_path is not None or preflight_attestation_path is not None:
+                raise SupervisedExecutorError("N9 boundary 不接受 campaign preflight 证据")
             return
         raise SupervisedExecutorError("A6/A7 必须通过冻结 campaign authorization 执行")
+    if preflight_spec_path is None or preflight_attestation_path is None:
+        raise SupervisedExecutorError("A6/A7 必须引用冻结的 preflight spec 与 attestation 文件")
     try:
         verify_active_lease(campaign_lease)
     except CampaignError as error:
@@ -226,6 +248,18 @@ def _require_campaign_authorization(
         or campaign_lease.campaign.trainer_version != plan.manifest.trainer_version
     ):
         raise SupervisedExecutorError("campaign authorization 与冻结 experiment 不一致")
+    try:
+        require_authorization_within_reservation(
+            campaign_lease.authorization, plan, campaign_lease.campaign
+        )
+    except CampaignError as error:
+        raise SupervisedExecutorError("experiment 资源上限超过授权预留") from error
+    try:
+        require_campaign_preflight_files(
+            campaign_lease.campaign, preflight_spec_path, preflight_attestation_path
+        )
+    except (CampaignError, EstimatorPreflightError) as error:
+        raise SupervisedExecutorError("campaign preflight 证据未通过复验") from error
 
 
 def _require_lease_paths(
