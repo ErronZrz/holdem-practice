@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,10 +25,15 @@ from .safeio import (
     replace_canonical_json,
     sha256_identity,
 )
-from .supervisor import SupervisorReceipt, SupervisorStatus
+from .supervisor import (
+    CHILD_OUTPUT_TAIL_CHARACTERS,
+    SupervisorReceipt,
+    SupervisorStatus,
+)
 
 SUPERVISED_MEASUREMENT_TYPE = "multiplayer-cfr-supervised-measurement"
 SUPERVISED_MEASUREMENT_SCHEMA_VERSION = 2
+_EMPTY_CHILD_OUTPUT_SHA256 = hashlib.sha256(b"").hexdigest()
 
 
 class SupervisedMeasurementError(ValueError):
@@ -205,6 +211,9 @@ def _receipt_payload(receipt: SupervisorReceipt) -> dict[str, object]:
         "warning_triggered": receipt.warning_triggered,
         "terminated_with_signal": receipt.terminated_with_signal,
         "monitored_pids": list(receipt.monitored_pids),
+        "child_output_bytes": receipt.child_output_bytes,
+        "child_output_sha256": receipt.child_output_sha256,
+        "child_output_tail": receipt.child_output_tail,
     }
 
 
@@ -324,6 +333,9 @@ def _validate_receipt(value: object) -> str:
             "warning_triggered",
             "terminated_with_signal",
             "monitored_pids",
+            "child_output_bytes",
+            "child_output_sha256",
+            "child_output_tail",
         },
         "supervisor receipt",
     )
@@ -359,7 +371,27 @@ def _validate_receipt(value: object) -> str:
         for pid in receipt["monitored_pids"]
     ):
         raise SupervisedMeasurementError("supervisor receipt PID 字段不兼容")
+    _validate_child_output(
+        receipt["child_output_bytes"], receipt["child_output_sha256"], receipt["child_output_tail"]
+    )
     return receipt["status"]
+
+
+def _validate_child_output(total_bytes: object, digest: object, tail: object) -> None:
+    """子进程输出摘要必须与"无输出"这一确定状态自洽。"""
+
+    if isinstance(total_bytes, bool) or not isinstance(total_bytes, int) or total_bytes < 0:
+        raise SupervisedMeasurementError("supervisor receipt 子进程输出字节数不兼容")
+    if (
+        not isinstance(digest, str)
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise SupervisedMeasurementError("supervisor receipt 子进程输出摘要不兼容")
+    if not isinstance(tail, str) or len(tail) > CHILD_OUTPUT_TAIL_CHARACTERS:
+        raise SupervisedMeasurementError("supervisor receipt 子进程输出尾部不兼容")
+    if total_bytes == 0 and (tail != "" or digest != _EMPTY_CHILD_OUTPUT_SHA256):
+        raise SupervisedMeasurementError("supervisor receipt 空子进程输出字段不一致")
 
 
 def _validate_child_execution(value: object, strategy: object) -> None:

@@ -1,9 +1,11 @@
+import hashlib
 import sys
 from pathlib import Path
 
 import pytest
 
 from multiplayer_cfr.supervisor import (
+    CHILD_OUTPUT_TAIL_CHARACTERS,
     SupervisorError,
     SupervisorLimits,
     SupervisorStatus,
@@ -106,3 +108,56 @@ def test_supervisor_rejects_parallel_budget_or_invalid_command(tmp_path: Path) -
             artifact_root=tmp_path,
             limits=_limits(),
         )
+
+
+def test_supervisor_records_empty_child_output_for_silent_success(tmp_path: Path) -> None:
+    receipt = supervise_command(
+        (sys.executable, "-c", "pass"),
+        working_directory=tmp_path,
+        artifact_root=tmp_path,
+        limits=_limits(),
+    )
+
+    assert receipt.status is SupervisorStatus.COMPLETED
+    assert receipt.child_output_bytes == 0
+    assert receipt.child_output_sha256 == hashlib.sha256(b"").hexdigest()
+    assert receipt.child_output_tail == ""
+
+
+def test_supervisor_captures_child_diagnostic_output_when_child_fails(tmp_path: Path) -> None:
+    diagnostic = b"child-traceback-marker: synthetic failure\n"
+    script = f"import os, sys; os.write(2, {diagnostic!r}); sys.exit(3)"
+    receipt = supervise_command(
+        (sys.executable, "-c", script),
+        working_directory=tmp_path,
+        artifact_root=tmp_path,
+        limits=_limits(),
+    )
+
+    assert receipt.status is SupervisorStatus.FAILED
+    assert receipt.stop_reason is SupervisorStopReason.CHILD_EXIT_NONZERO
+    assert receipt.exit_code == 3
+    assert receipt.child_output_bytes == len(diagnostic)
+    assert receipt.child_output_sha256 == hashlib.sha256(diagnostic).hexdigest()
+    assert receipt.child_output_tail == diagnostic.decode("utf-8")
+
+
+def test_supervisor_bounds_captured_child_output_tail(tmp_path: Path) -> None:
+    expected = "".join(f"{index:07d}\n" for index in range(2000))
+    script = (
+        "import os, sys; "
+        "payload = ''.join(f'{index:07d}\\n' for index in range(2000)).encode(); "
+        "os.write(1, payload); sys.exit(1)"
+    )
+    receipt = supervise_command(
+        (sys.executable, "-c", script),
+        working_directory=tmp_path,
+        artifact_root=tmp_path,
+        limits=_limits(),
+    )
+
+    assert receipt.status is SupervisorStatus.FAILED
+    assert receipt.child_output_bytes == len(expected.encode("utf-8"))
+    assert receipt.child_output_sha256 == hashlib.sha256(expected.encode("utf-8")).hexdigest()
+    assert len(receipt.child_output_tail) == CHILD_OUTPUT_TAIL_CHARACTERS
+    assert receipt.child_output_tail == expected[-CHILD_OUTPUT_TAIL_CHARACTERS:]

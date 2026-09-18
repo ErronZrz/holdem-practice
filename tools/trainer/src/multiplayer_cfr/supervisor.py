@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import platform
 import signal
@@ -13,10 +14,17 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
+from typing import IO, Any
 
 SUPERVISOR_ID = "macos-process-tree-supervisor"
-SUPERVISOR_VERSION = "v1"
+SUPERVISOR_VERSION = "v2"
 _PS_PATH = "/bin/ps"
+
+# 子进程输出只在内存中保留受限尾部，避免诊断能力反过来引入无界资源占用。
+CHILD_OUTPUT_TAIL_BYTES = 8_192
+CHILD_OUTPUT_TAIL_CHARACTERS = 2_048
+_CHILD_OUTPUT_READ_BYTES = 65_536
+_CHILD_OUTPUT_DRAIN_GRACE_MILLISECONDS = 200
 
 
 class SupervisorError(ValueError):
@@ -73,7 +81,7 @@ class SupervisorLimits:
 
 @dataclass(frozen=True)
 class SupervisorReceipt:
-    """由父监督器生成的资源与停止回执，不是子进程自述。"""
+    """由父监督器生成的资源、停止原因与子进程输出摘要回执，不是子进程自述。"""
 
     supervisor_id: str
     supervisor_version: str
@@ -88,6 +96,9 @@ class SupervisorReceipt:
     warning_triggered: bool
     terminated_with_signal: int | None
     monitored_pids: tuple[int, ...]
+    child_output_bytes: int
+    child_output_sha256: str
+    child_output_tail: str
 
 
 @dataclass(frozen=True)
@@ -119,6 +130,62 @@ class _ProcessAccounting:
         return sum(self.maximum_cpu_by_pid.values()), current_rss
 
 
+@dataclass
+class _ChildOutput:
+    """合并子进程输出收集器：累计字节与全量摘要，只在内存中保留受限尾部。"""
+
+    maximum_tail_bytes: int
+    total_bytes: int = 0
+    _tail: bytearray = field(default_factory=bytearray)
+    _digest: Any = None
+
+    def __post_init__(self) -> None:
+        if isinstance(self.maximum_tail_bytes, bool) or self.maximum_tail_bytes <= 0:
+            raise SupervisorError("子进程输出尾部上限必须是正整数")
+        self._digest = hashlib.sha256()
+
+    def observe(self, stream: IO[bytes] | None) -> bool:
+        """非阻塞读取当前可用输出；返回是否已读到流结束。"""
+
+        if stream is None:
+            return True
+        descriptor = stream.fileno()
+        try:
+            os.set_blocking(descriptor, False)
+        except OSError:
+            return True
+        while True:
+            try:
+                chunk = os.read(descriptor, _CHILD_OUTPUT_READ_BYTES)
+            except BlockingIOError:
+                return False
+            except OSError:
+                return True
+            if not chunk:
+                return True
+            self.total_bytes += len(chunk)
+            self._digest.update(chunk)
+            self._tail.extend(chunk)
+            overflow = len(self._tail) - self.maximum_tail_bytes
+            if overflow > 0:
+                del self._tail[:overflow]
+
+    def drain_until_closed(self, stream: IO[bytes] | None, grace_milliseconds: int) -> None:
+        """在有限宽限期内读完剩余输出，避免子进程退出后管道中的诊断信息丢失。"""
+
+        deadline = time.monotonic() + grace_milliseconds / 1000
+        while time.monotonic() < deadline:
+            if self.observe(stream):
+                return
+            time.sleep(0.01)
+
+    def digest(self) -> str:
+        return self._digest.hexdigest()
+
+    def tail_text(self) -> str:
+        return self._tail.decode("utf-8", errors="replace")[-CHILD_OUTPUT_TAIL_CHARACTERS:]
+
+
 def supervise_command(
     argv: Sequence[str],
     *,
@@ -127,7 +194,12 @@ def supervise_command(
     limits: SupervisorLimits,
     environment: Mapping[str, str] | None = None,
 ) -> SupervisorReceipt:
-    """在新的进程组启动无 shell 子进程，并监督其进程树与工件目录。"""
+    """在新的进程组启动无 shell 子进程，并监督其进程树、工件目录与合并输出。
+
+    子进程的 stdout 与 stderr 合并到同一管道，由父端边采样边排空；父端只保留受限
+    尾部用于定位失败原因，因此该诊断能力不会引入无界磁盘或内存占用。若子进程持续
+    高速输出，它会因管道背压而变慢，但不会被丢弃或死锁。
+    """
 
     _require_macos()
     command = _validate_argv(argv)
@@ -143,18 +215,20 @@ def supervise_command(
     terminated_with_signal: int | None = None
     accounting: _ProcessAccounting | None = None
     child: subprocess.Popen[bytes] | None = None
+    output = _ChildOutput(maximum_tail_bytes=CHILD_OUTPUT_TAIL_BYTES)
     try:
         child = subprocess.Popen(
             command,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             start_new_session=True,
             env=child_environment,
         )
         accounting = _ProcessAccounting(root_pid=child.pid)
         while True:
+            output.observe(child.stdout)
             samples = _snapshot_processes()
             cpu_milliseconds, current_rss = accounting.observe(samples)
             elapsed_milliseconds = _elapsed_milliseconds(started_at)
@@ -175,6 +249,9 @@ def supervise_command(
                     accounting.monitored_pids,
                     limits.termination_grace_milliseconds,
                 )
+                output.drain_until_closed(
+                    child.stdout, _CHILD_OUTPUT_DRAIN_GRACE_MILLISECONDS
+                )
                 return _receipt(
                     status=SupervisorStatus.STOPPED,
                     stop_reason=reason,
@@ -185,9 +262,13 @@ def supervise_command(
                     final_artifact_bytes=_artifact_bytes(artifact_directory),
                     warning_triggered=warning_triggered,
                     terminated_with_signal=terminated_with_signal,
+                    child_output=output,
                 )
             exit_code = child.poll()
             if exit_code is not None:
+                output.drain_until_closed(
+                    child.stdout, _CHILD_OUTPUT_DRAIN_GRACE_MILLISECONDS
+                )
                 return _receipt(
                     status=(
                         SupervisorStatus.COMPLETED if exit_code == 0 else SupervisorStatus.FAILED
@@ -204,6 +285,7 @@ def supervise_command(
                     final_artifact_bytes=_artifact_bytes(artifact_directory),
                     warning_triggered=warning_triggered,
                     terminated_with_signal=None,
+                    child_output=output,
                 )
             time.sleep(limits.poll_interval_milliseconds / 1000)
     except (OSError, SupervisorError):
@@ -215,6 +297,7 @@ def supervise_command(
             )
         if child is None or accounting is None:
             raise
+        output.drain_until_closed(child.stdout, _CHILD_OUTPUT_DRAIN_GRACE_MILLISECONDS)
         return _receipt(
             status=SupervisorStatus.FAILED,
             stop_reason=SupervisorStopReason.MONITOR_FAILURE,
@@ -225,6 +308,7 @@ def supervise_command(
             final_artifact_bytes=_artifact_bytes(artifact_directory),
             warning_triggered=warning_triggered,
             terminated_with_signal=terminated_with_signal,
+            child_output=output,
         )
 
 
@@ -239,6 +323,7 @@ def _receipt(
     final_artifact_bytes: int,
     warning_triggered: bool,
     terminated_with_signal: int | None,
+    child_output: _ChildOutput,
 ) -> SupervisorReceipt:
     return SupervisorReceipt(
         supervisor_id=SUPERVISOR_ID,
@@ -254,6 +339,9 @@ def _receipt(
         warning_triggered=warning_triggered,
         terminated_with_signal=terminated_with_signal,
         monitored_pids=tuple(sorted(accounting.monitored_pids)),
+        child_output_bytes=child_output.total_bytes,
+        child_output_sha256=child_output.digest(),
+        child_output_tail=child_output.tail_text(),
     )
 
 
