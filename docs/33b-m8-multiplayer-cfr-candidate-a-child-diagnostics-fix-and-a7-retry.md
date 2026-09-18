@@ -116,6 +116,112 @@ uv run pytest -q
 
 若重做再次失败，按 `docs/33a` 的先例如实记录代价，**不自动发起第三次**。
 
-## 8. A7 加轮重做的实际回执
+## 8. A7 加轮重做的实际回执（第二次提交追加）
 
-见本文件第二次提交追加的内容。
+### 8.1 结论摘要
+
+**重做再次失败，但诊断修复生效：失败根因第一次被完整落盘。** 根因不是预算、不是训练质量，而是**测量记录校验器对一个字段的长度上限过紧**，导致子进程在质量阶段完成后无法写出记录并以退出码 1 结束。该根因属于**第三个独立缺陷**，本轮**未修复**（见第 8.5 节），也**未自动发起第三次运行**。
+
+### 8.2 冻结输入身份（全部在 `578a56565b3a74ee99b86fbf9a5a235a8c1c1c42` 上重新生成）
+
+| 文件 | id | sha256 | 字节 |
+|---|---|---|---:|
+| `campaign.json` | `m8-a-campaign-4` | `2f87586ffe3ed707c00972c8cfed317c22474ed483ea5fc486e215cd5d518411` | 1018 |
+| `source/a7-probe.json` | `a7-probe-tight-loose-i1000-r2` | `e7540557702c0e9b62db1dc4b40d3c0bcad7090463be72544b4c11170b1f6421` | 461 |
+| `source/a7-experiment.json` | `a7-seed-7926-i1000-r2` | `1590f9776cb14507e6e060f7a3ca595c6b2ef9852d2ea8e84b6f78b5f122f19f` | 1310 |
+| `source/preflight-spec.json` | `n6-estimator-preflight` | `d4995c7c475f0ace488f1d0addcf0cc648ef4e0cd8c4a270b896f59299c8d801` | 527 |
+| `source/preflight-attestation.json` | `n6-estimator-preflight` | `61f9d6076dbc0d3aca9f7105a18bac6540ef251d9737ca8b269e16440c6e023e` | 1018 |
+
+attestation 由 `run_preflight` 实跑产生，`passed = true`。参数与预算 envelope 与第一次尝试逐字相同（`player_count = 7`、`iterations = 1000`、`average_strategy_start_iteration = 100`、`master_seed = 7926`、cpu / wall `4 740 000 ms`）。
+
+### 8.3 回执与终态
+
+| 项 | 值 |
+|---|---|
+| 父监督回执 | `status = failed` / `stop_reason = child-exit-nonzero` / `exit_code = 1` / 无信号终止 |
+| 墙钟 / CPU | `399 117 ms`（6 min 39 s）/ `396 580 ms`（6 min 37 s） |
+| 峰值 RSS | `49 872 896 B`（约 47.6 MiB） |
+| 警告触发 | `false`（未触及 CPU、阶段墙钟、RSS 任一阈值） |
+| 失败时工件总量 | `final_artifact_bytes = 1 142 972`（= 已写出的 `strategy.json`） |
+| 终态 ledger | `leased` → `finalized(status = "failed")` |
+| `final_measurement_sha256` | `91bfd85405303fb420388f2e4778f5a9bac5dbf82cd893c989aa5e5f628e5a1d` |
+| `supervisor_receipt_sha256` | `8c26a0ec1891f7dfc6476a9cd51b15da01790cdff9f9b01e047d7beb557038cc` |
+| `final_inventory` | `measurement.json`，3 495 B |
+
+`strategy.json` 已按 fail-closed 清理；`monitored_pids = [34735]`。
+
+### 8.4 失败根因（本次由回执直接给出，不再靠推断）
+
+回执新增字段的实测值：
+
+```text
+child_output_bytes  = 3152
+child_output_sha256 = 6a9d3a4d5f8772713d27a5b0ffbe9519131dda131fb62815569ff8042e502a74
+child_output_tail   = （截取尾部，见下）
+```
+
+`child_output_tail` 的末尾即子进程异常回溯（原文照录，前面被尾部截断）：
+
+```text
+  File ".../experiment_record.py", line 121, in build_manifested_measurement_record
+    _validate_payload(payload)
+  File ".../experiment_record.py", line 430, in _validate_payload
+    profile_identity = _validate_profile_payload(record["profile"], strategy_identity, player_count)
+  File ".../experiment_record.py", line 509, in _validate_profile_payload
+    utilities = _validate_rational_array(profile["utilities"], player_count, "profile.utilities")
+  File ".../experiment_record.py", line 704, in _validate_rational_array
+    return tuple(_validate_rational(entry, label) for entry in value)
+  File ".../experiment_record.py", line 688, in _validate_rational
+    numerator = _require_string(rational["numerator"], f"{label}.numerator")
+  File ".../experiment_record.py", line 675, in _require_string
+    raise ExperimentRecordError(f"{label} 必须是长度受限的非空字符串")
+multiplayer_cfr.experiment_record.ExperimentRecordError: profile.utilities.numerator 必须是长度受限的非空字符串
+```
+
+即：**质量阶段（profile 与 probe）已经算完**，子进程在构造测量记录时被 `_require_string` 拒绝，因而退出码 1。
+
+### 8.5 根因的机制与影响面（需要用户另作决定，本轮未修）
+
+- 该判据是 `experiment_record._require_string` 的 `len(value) > 128` 上限；它被复用于所有字符串字段，其中也包括**精确有理数的分子与分母**。
+- 精确有理数的位数**由规则树结构决定**，不由轮次决定：候选 A 在开池前每座位可 check/bet、开池后至多 N−1 个回应者，因此单条历史的动作数至多 `2N − 1`（N=6 → 11，N=7 → 13，N=9 → 17）；每个动作的概率分母整除 `10^12`，故分母位数上界约为 `12 × (2N − 1)`（N=7 → 约 156 位），再经约分后变小。
+- 既有**通过**记录的实测最大位数是 **110**（A6 为 `probes[loose-open][3].delta.numerator`；A7（300 轮）为 `profile.utilities[3].denominator`）——距 128 只有 18 位余量。是否超过 128 取决于该策略量化后分子分母的**约分程度**，因此**同一人数在不同轮次下时通过、时失败**。
+- 结论：`128` 不是该字段的安全上界，**N=6 也存在同样的边缘风险**（其理论上界约 132 位）。另一份独立测量 schema（`measurement.py`）对同类字段用的是 `256`，两份 schema 的口径彼此不一致。
+
+**建议的最小修复（本轮未实施）**：给有理数的分子/分母一个独立的、宽裕的长度上限（例如 `1 024` 或 `4 096`），不改变标识符字段仍在 `128` 的既有强度；整条记录的字节上限（`MAX_TEXT_BYTES` 与 measurement 槽位上限）仍然独立生效。
+
+### 8.6 代价（不淡化）
+
+- `a7-seed-7926-i1000-r2` **已永久消耗**：不可重试、不可重置预算、不可追加 seed。
+- 该次 1000 轮训练与完整质量评估的算力**全部白费**——注意此处比 campaign-1 / campaign-3 更可惜：**评估结果确实算出来了，只因校验器不接受而无法落盘**。
+- 累计实测 CPU 消耗 396.58 s（约 6.61 min）计入本机预算。
+- 两轮 A7 加轮尝试合计消耗两条不可重试 authorization 与约 13.3 min CPU，**均未换回任何质量证据**。
+- 本文**不**把本次结果表述为"验证了诊断修复"或"有价值的探索"；它是一次**有实际代价的失败**，唯一的新增可用物是**根因本身**（这正是修复的直接目的）。
+
+一处必须如实说明的影响：第一次尝试（`docs/33a` 第 3.5 节）的根因**当时未落盘**，现在只能作为**有证据支持的推断**——其可观测事实（质量阶段、已写出策略、退出码 1、约 400 s）与本次记录的机制完全一致，可以据此推断两次是同一根因，但**不得当作已记录的事实**。
+
+### 8.7 campaign-4 驱动脚本自身的缺陷（如实记录）
+
+驱动脚本在打印回执时把 `SupervisedExecutionResult` 当作 `CampaignExecutionResult` 使用，抛出了 `AttributeError`，因此**驱动输出日志只留下了只读复验段**，未包含回执打印。该缺陷**不影响证据**：终态 ledger 与最终 measurement 由受监督链在驱动崩溃之前就已写入，本次根因正是从 measurement 工件中读出的。缺陷已在原处修正。
+
+### 8.8 预算核算（更新）
+
+```text
+campaign-1 A6（不可核算）          记 0            （记账约定，非"未消耗"）
+campaign-2 A6 + A7（实测 CPU）     8.40 min
+N9 boundary（实测 CPU 450 ms）     0.01 min
+campaign-3 A7-1000（实测 CPU）     6.65 min
+campaign-4 A7-1000-r2（实测 CPU）  6.61 min
+合计实测                           21.67 min ≤ 120 min   （余约 98 min）
+```
+
+本轮同样发生了若干次 estimator preflight 核验重演（生成时 1 次 `run_preflight`，加上只读复验、父端门禁与子端门禁的重演），按 `docs/30` D3 **不计入**本机实验预算。
+
+### 8.9 本轮未做事项与下一步
+
+未做：未修复第 8.5 节的校验器上限缺口；未发起第三次 A7 加轮；未重试任何已消耗 authorization；未追加 seed、未扩预算、未转云、未转 GPU；未改写 `docs/20` 至 `docs/32a`。
+
+下一步**唯一建议动作**（需用户另行授权）：先决定是否按第 8.5 节的最小方案修复有理数长度上限（会再次改变 HEAD，使既有 `code_identity` 失效），再决定是否在新 HEAD 上发起第三次 A7 加轮。按第 7 节的先例，**在获得授权之前不自动重跑**。
+
+### 8.10 持续披露（延续）
+
+本轮结论仍限于固定抽象、固定人数、固定 seed 与固定轮次；macOS supervisor 仍是本机 `ps` 采样式进程组监督，**不是内核级 containment**；新增的子进程输出捕获是**父端合作式观察**，不是安全边界，且只保留受限尾部（8 KiB 字节 / 2 048 字符），完整输出不留存。即使未来 A7 加轮成功，候选 A 也不得被表述为多人 Hold'em GTO、均衡、NashConv、exploitability、真实牌局 EV 或生产可用策略。
