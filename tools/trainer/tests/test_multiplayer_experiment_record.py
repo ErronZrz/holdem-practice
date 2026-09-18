@@ -5,19 +5,31 @@ import pytest
 
 from multiplayer_cfr.control import RunLimits, run_controlled_training, run_n9_boundary_sample
 from multiplayer_cfr.experiment_record import (
+    EXPERIMENT_RECORD_SCHEMA_VERSION,
+    EXPERIMENT_RECORD_TYPE,
+    MAX_RATIONAL_DIGITS,
     ExperimentRecordError,
     SupervisorIdentity,
     build_manifested_measurement_record,
     load_manifested_measurement_record,
+    parse_manifested_measurement_payload,
     write_manifested_measurement_record,
 )
 from multiplayer_cfr.manifest import (
+    EVALUATOR_ID,
+    EVALUATOR_VERSION,
     EXPERIMENT_MANIFEST_TYPE,
     MANIFEST_SCHEMA_VERSION,
     create_experiment_manifest,
     derive_experiment_plan,
 )
-from multiplayer_cfr.policy import export_strategy, load_quantized_strategy
+from multiplayer_cfr.policy import (
+    ARTIFACT_TYPE,
+    PROBABILITY_UNITS,
+    export_strategy,
+    load_quantized_strategy,
+)
+from multiplayer_cfr.policy import SCHEMA_VERSION as STRATEGY_SCHEMA_VERSION
 
 _COMMIT = "2" * 40
 
@@ -196,3 +208,104 @@ def test_builder_rejects_manual_cross_plan_strategy_binding(tmp_path: Path) -> N
             training=training,
             artifact=artifact,
         )
+
+
+def _synthetic_child_payload(*, numerator: str) -> dict[str, object]:
+    """构造结构完整、只把 profile 首位效用换成指定分子的候选 A 子进程记录。"""
+
+    player_count = 6
+    strategy_sha256 = "b" * 64
+    strategy_bytes = 1234
+    utilities = [
+        {"numerator": numerator, "denominator": "1"},
+        {"numerator": f"-{numerator}", "denominator": "1"},
+    ]
+    utilities.extend(
+        {"numerator": "0", "denominator": "1"} for _ in range(player_count - len(utilities))
+    )
+    supervisor = {
+        "supervisor_id": "local-supervisor",
+        "supervisor_version": "v1",
+        "rss_scope": "process-tree",
+        "enforcement_mode": "external-hard-limit",
+    }
+    return {
+        "schema_version": EXPERIMENT_RECORD_SCHEMA_VERSION,
+        "record_type": EXPERIMENT_RECORD_TYPE,
+        "experiment_manifest": {
+            "manifest_type": EXPERIMENT_MANIFEST_TYPE,
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "manifest_id": "a6-length-probe",
+            "sha256": "c" * 64,
+            "byte_length": 1300,
+        },
+        "game": {
+            "id": "m8-unique-rank-single-open",
+            "version": "m8-a-v1",
+            "player_count": player_count,
+        },
+        "execution": {
+            "plan_kind": "a6-a7-training",
+            "status": "completed",
+            "stage": "training",
+            "stop_reason": "completed",
+            "completed_iterations": 1,
+            "player_count": player_count,
+            "iterations": 1,
+            "average_strategy_start_iteration": 1,
+            "master_seed": 6,
+            "traverser": None,
+        },
+        "supervisor": dict(supervisor),
+        "strategy": {
+            "sha256": strategy_sha256,
+            "artifact_bytes": strategy_bytes,
+            "artifact_type": ARTIFACT_TYPE,
+            "artifact_schema_version": STRATEGY_SCHEMA_VERSION,
+        },
+        "profile": {
+            "ordered_deal_count": 720,
+            "terminal_leaf_count": 720,
+            "utilities": utilities,
+            "strategy_sha256": strategy_sha256,
+            "strategy_bytes": strategy_bytes,
+            "evaluator_id": EVALUATOR_ID,
+            "evaluator_version": EVALUATOR_VERSION,
+            "probability_units": PROBABILITY_UNITS,
+        },
+        "probes": None,
+        "diagnostics": {
+            "average_strategy_start_iteration": 1,
+            "coverage": [],
+            "importance_weights": [],
+        },
+        "resources": {
+            "elapsed_milliseconds": 0,
+            "wall_time_limit_milliseconds": 1000,
+            "peak_rss_bytes": 0,
+            "rss_warning_bytes": 100,
+            "rss_hard_limit_bytes": 200,
+            "warning_triggered": False,
+            "retained_artifact_bytes": 0,
+            "retained_artifact_limit_bytes": 1024,
+            **supervisor,
+        },
+    }
+
+
+def test_record_accepts_exact_rationals_longer_than_identifier_bound() -> None:
+    numerator = "1" + "0" * 200
+    assert len(numerator) > 128
+
+    record = parse_manifested_measurement_payload(_synthetic_child_payload(numerator=numerator))
+
+    assert record.payload["profile"]["utilities"][0]["numerator"] == numerator
+    assert record.payload["profile"]["utilities"][1]["numerator"] == f"-{numerator}"
+
+
+def test_record_rejects_exact_rationals_beyond_the_dedicated_bound() -> None:
+    numerator = "1" + "0" * MAX_RATIONAL_DIGITS
+    assert len(numerator) > MAX_RATIONAL_DIGITS
+
+    with pytest.raises(ExperimentRecordError):
+        parse_manifested_measurement_payload(_synthetic_child_payload(numerator=numerator))

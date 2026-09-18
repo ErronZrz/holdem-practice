@@ -27,6 +27,10 @@ EXPERIMENT_RECORD_TYPE = "multiplayer-cfr-manifested-measurement"
 EXPERIMENT_RECORD_SCHEMA_VERSION = 1
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
 
+# 精确有理数的位数只受规则树深度约束：每个动作的概率分母整除 10^12，单条历史至多
+# 2N-1 个动作，因此 N=9 的分母理论上界也远小于该值。它不适用标识符字段的短上限。
+MAX_RATIONAL_DIGITS = 4_096
+
 
 class ExperimentRecordError(ValueError):
     """manifest 驱动测量记录的身份、阶段或规范 JSON 不一致时抛出。"""
@@ -676,6 +680,14 @@ def _require_string(value: object, label: str) -> str:
     return value
 
 
+def _require_rational_text(value: object, label: str) -> str:
+    """校验精确有理数的分子或分母文本，其长度上界独立于标识符字段。"""
+
+    if not isinstance(value, str) or not value or len(value) > MAX_RATIONAL_DIGITS:
+        raise ExperimentRecordError(f"{label} 必须是长度受限的非空十进制字符串")
+    return value
+
+
 def _require_hash(value: object, label: str) -> str:
     value = _require_string(value, label)
     if re.fullmatch(r"[0-9a-f]{64}", value) is None:
@@ -685,8 +697,8 @@ def _require_hash(value: object, label: str) -> str:
 
 def _validate_rational(value: object, label: str) -> Fraction:
     rational = _exact_mapping(value, {"numerator", "denominator"}, label)
-    numerator = _require_string(rational["numerator"], f"{label}.numerator")
-    denominator = _require_string(rational["denominator"], f"{label}.denominator")
+    numerator = _require_rational_text(rational["numerator"], f"{label}.numerator")
+    denominator = _require_rational_text(rational["denominator"], f"{label}.denominator")
     if (
         re.fullmatch(r"0|-?[1-9][0-9]*", numerator) is None
         or re.fullmatch(r"[1-9][0-9]*", denominator) is None
