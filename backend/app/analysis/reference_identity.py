@@ -18,6 +18,17 @@ REFERENCE_COVERAGE = "vs-random"
 # 缓存键格式版本：键结构本身变化时递增。
 CACHE_KEY_VERSION = 1
 
+# 参考适用域：说明参考动作在哪些局面经过保守收窄、哪些局面沿用启发式基线。
+REFERENCE_SCOPE = (
+    "翻牌后面对下注与无人下注的局面经过保守收窄；翻牌前与加注沿用启发式基线。"
+)
+# 参考局限：如实声明模型假设与不可推断事项，避免参考被当作求解器结论。
+REFERENCE_LIMITATIONS = (
+    "胜率口径为 vs 随机范围的静态近似，未做对手范围与位置建模。",
+    "参考由启发式规则加保守收窄构成，属非均衡近似；不构成求解器或训练产物的质量结论。",
+    "与参考动作或其分布众数不同，本身不构成错误；错误只来自既有判据。",
+)
+
 
 def reference_identity() -> dict[str, object]:
     """返回参考与评估的版本身份，供对外响应声明。"""
@@ -26,6 +37,18 @@ def reference_identity() -> dict[str, object]:
         "reference_version": REFERENCE_VERSION,
         "evaluation_version": EVALUATION_VERSION,
         "reference_coverage": REFERENCE_COVERAGE,
+    }
+
+
+def reference_declaration() -> dict[str, object]:
+    """在版本身份之上叠加适用域与局限声明，供对外响应一次性声明参考契约。
+
+    适用域与局限在此集中定义，界面上出现的说明文案也据此渲染，避免多处各写一份。
+    """
+    return {
+        **reference_identity(),
+        "reference_scope": REFERENCE_SCOPE,
+        "reference_limitations": list(REFERENCE_LIMITATIONS),
     }
 
 

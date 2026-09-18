@@ -9,7 +9,7 @@ import {
   distributionText,
 } from '../cards.js'
 import { copyText } from '../clipboard.js'
-import { referenceText } from '../reviewText.js'
+import { referenceLimitationText, referenceScopeText, referenceText } from '../reviewText.js'
 import PlayingCard from './PlayingCard.vue'
 
 const sessions = ref([])
@@ -218,6 +218,10 @@ onActivated(() => {
           <p class="muted">
             {{ referenceText(review) }} ·
             共 {{ review.decisions.length }} 个决策点 · 命中 {{ review.mistake_count }} 处问题
+          </p>
+          <p v-if="referenceScopeText(review)" class="muted">{{ referenceScopeText(review) }}</p>
+          <p v-if="referenceLimitationText(review)" class="muted">
+            {{ referenceLimitationText(review) }}
           </p>
           <p class="muted hand-id-line">
             手牌 ID：<code class="hand-id">{{ review.hand_id }}</code>

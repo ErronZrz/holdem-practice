@@ -74,6 +74,8 @@ def get_review(
         reference_version=review["reference_version"],
         evaluation_version=review["evaluation_version"],
         reference_coverage=review["reference_coverage"],
+        reference_scope=review["reference_scope"],
+        reference_limitations=review["reference_limitations"],
         decisions=review["decisions"],
         mistake_count=review["mistake_count"],
     )

@@ -11,12 +11,15 @@
   避免用高张盲目跟注、用被压制的对子跟注、用弱踢脚顶对薄价值下注。
 
 本模块只读引擎公开状态、不修改引擎，属于 analysis 层对 poker 层公开能力的消费。
+
+对外声明的是**参考契约**而非对手目标：参考分布由策略层唯一事实源生产，本层只做保守收窄与
+错误判定，不另写一套与策略重复的分支判据；参考动作与其分布众数仅作展示，错误只来自既有判据。
 """
 
 import random
 from collections.abc import Sequence
 
-from app.analysis.reference_identity import reference_identity
+from app.analysis.reference_identity import reference_declaration
 from app.poker.actions import Action, ActionType, LegalActions
 from app.poker.cards import Card, card_from_str
 from app.poker.engine import PokerEngine
@@ -432,8 +435,8 @@ def build_review(history: dict) -> dict:
     return {
         "hand_number": history["hand_number"],
         "human_seat": human_seat,
-        # 参考与评估的版本身份来自唯一事实源，避免在分析层另写字面量。
-        **reference_identity(),
+        # 参考契约（来源/版本/覆盖/适用域/局限）来自唯一事实源，避免在分析层另写字面量。
+        **reference_declaration(),
         "decisions": decisions,
         "mistake_count": sum(len(d["mistakes"]) for d in decisions),
     }
