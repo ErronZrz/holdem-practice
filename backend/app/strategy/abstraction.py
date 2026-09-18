@@ -47,6 +47,17 @@ CoverageStatus = Literal[
     "version-mismatch",
 ]
 
+# 触发回退的覆盖状态：抽象层的三个非命中结论，加上产物层的三种供应结论。
+# 「抽象内」不是触发值；抽象内只表示落在抽象博弈的合法空间内，不代表存在可用产物。
+FallbackTrigger = Literal[
+    "out-of-abstraction",
+    "incomplete-infoset",
+    "version-mismatch",
+    "artifact-unavailable",
+    "artifact-mismatch",
+    "key-not-in-artifact",
+]
+
 # 契约默认的回退来源：必须是受控注册表内的规范标识，不新增策略命名体系。
 DEFAULT_FALLBACK_IDENTIFIER = "heuristic@1"
 # 回退来源标注：表明回退来自契约声明，而不是某个已落地的动作实现。
@@ -111,7 +122,7 @@ class FallbackDeclaration(_FrozenModel):
     """回退来源声明：只标注回退来源与触发依据，不承载任何动作实现。"""
 
     fallback_identifier: str
-    triggering_coverage: CoverageStatus
+    triggering_coverage: FallbackTrigger
     abstraction_key: str | None = None
     reasons: tuple[str, ...] = ()
     source: str = FALLBACK_SOURCE_DECLARED_CONTRACT

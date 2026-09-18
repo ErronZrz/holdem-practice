@@ -24,8 +24,28 @@ from .abstraction import (
     judge_game_state_coverage,
     require_in_abstraction,
 )
+from .artifact import (
+    ARTIFACT_TYPE,
+    LookupOutcome,
+    LookupRegistry,
+    LookupStatus,
+    LookupTable,
+    StrategyArtifact,
+    StrategyArtifactError,
+    StrategyInfoset,
+    load_lookup_registry,
+    load_lookup_table,
+    load_strategy_artifact,
+)
 from .heuristic import HeuristicStrategy
 from .interface import Strategy, hero
+from .lookup_budget import (
+    DECISION_BUDGET_MS,
+    LookupBudgetReport,
+    PlayerCountCoverage,
+    build_report,
+    summarize_decision_latencies,
+)
 from .projection import project_for_actor
 from .random_strategy import RandomStrategy
 from .registry import StrategySpec, UnknownStrategyError, create_strategy, resolve_identifier
@@ -62,4 +82,20 @@ __all__ = [
     "judge_coverage",
     "judge_game_state_coverage",
     "require_in_abstraction",
+    "ARTIFACT_TYPE",
+    "LookupOutcome",
+    "LookupRegistry",
+    "LookupStatus",
+    "LookupTable",
+    "StrategyArtifact",
+    "StrategyArtifactError",
+    "StrategyInfoset",
+    "load_lookup_registry",
+    "load_lookup_table",
+    "load_strategy_artifact",
+    "DECISION_BUDGET_MS",
+    "LookupBudgetReport",
+    "PlayerCountCoverage",
+    "build_report",
+    "summarize_decision_latencies",
 ]
