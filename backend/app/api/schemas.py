@@ -2,7 +2,9 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+from app.strategy.registry import UnknownStrategyError, resolve_identifier
 
 
 class CreateGameRequest(BaseModel):
@@ -10,6 +12,7 @@ class CreateGameRequest(BaseModel):
 
     大盲必须是偶数，小盲由大盲推导（= 大盲 / 2）；``target_hands`` 省略表示不限手数。
     ``small_blind`` / ``target_hands`` / ``bot_strategy`` 保留以兼容旧客户端，界面已不再提供这三项。
+    ``bot_strategy`` 只接受受控注册表内的标识，旧值会被规范化到对应历史版本。
     """
 
     num_players: int = Field(default=2, ge=2, le=10)
@@ -18,7 +21,17 @@ class CreateGameRequest(BaseModel):
     seed: int | None = None
     small_blind: int | None = Field(default=None, ge=1)
     target_hands: int | None = Field(default=None, ge=1, le=10000)
-    bot_strategy: Literal["heuristic", "random"] = "heuristic"
+    # 默认取规范标识，并让校验器同样作用于默认值，避免绕过受控注册表。
+    bot_strategy: str = Field(default="heuristic@1", validate_default=True)
+
+    @field_validator("bot_strategy")
+    @classmethod
+    def _normalize_bot_strategy(cls, value: str) -> str:
+        """规范化受控策略标识；未知标识校验失败，不静默回退到默认策略。"""
+        try:
+            return resolve_identifier(value)
+        except UnknownStrategyError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class SubmitActionRequest(BaseModel):

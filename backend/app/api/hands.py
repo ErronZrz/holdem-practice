@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.analysis.hand_review import build_review
 from app.storage import repository
 from app.storage.db import get_db
+from app.storage.hand_history import project_hand_history
 from app.storage.models import HandModel
 
 from . import schemas
@@ -17,7 +18,7 @@ router = APIRouter(tags=["hands"])
 
 
 def _hand_summary(hand: HandModel) -> schemas.HandSummary:
-    history = json.loads(hand.history_json)
+    history = project_hand_history(json.loads(hand.history_json))
     return schemas.HandSummary(
         id=hand.id,
         session_id=hand.session_id,
@@ -52,7 +53,7 @@ def get_hand(
         session_id=hand.session_id,
         hand_number=hand.hand_number,
         created_at=hand.created_at.isoformat(),
-        history=json.loads(hand.history_json),
+        history=project_hand_history(json.loads(hand.history_json)),
     )
 
 

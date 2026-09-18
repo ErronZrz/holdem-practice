@@ -24,9 +24,7 @@ from app.storage import repository
 from app.storage.db import get_db
 from app.storage.hand_history import build_hand_history
 from app.storage.models import utcnow
-from app.strategy import Strategy
-from app.strategy.heuristic import HeuristicStrategy
-from app.strategy.random_strategy import RandomStrategy
+from app.strategy import Strategy, create_strategy, project_for_actor
 
 from . import schemas
 
@@ -49,13 +47,14 @@ class GameRuntime:
     bot_seats: list[int]
     hand_number: int
     last_bot_ts: float
+    # 本局使用的规范策略标识，随每手历史落库以便追溯。
+    bot_strategy: str
     last_hand_id: str | None = None
 
 
 def _make_bot(strategy_name: str, seed: int | None) -> Strategy:
-    if strategy_name == "random":
-        return RandomStrategy(seed=seed)
-    return HeuristicStrategy(seed=seed)
+    """经受控注册表构造 Bot，未知标识在此前已由请求校验拦下。"""
+    return create_strategy(strategy_name, seed)
 
 
 def _blind_seats(button: int, num_players: int) -> tuple[int, int]:
@@ -72,7 +71,9 @@ def _advance_if_bot_turn(runtime: GameRuntime) -> bool:
         return False
     if time.monotonic() - runtime.last_bot_ts < BOT_DELAY:
         return False
-    action = runtime.bot.choose_action(engine.snapshot(), engine.legal_actions())
+    # 传入受控投影，保证 Bot 视角拿不到其他座位的暗牌。
+    state = project_for_actor(engine.snapshot())
+    action = runtime.bot.choose_action(state, engine.legal_actions())
     engine.apply_action(action)
     runtime.last_bot_ts = time.monotonic()
     return True
@@ -90,7 +91,12 @@ def _build_action(req: schemas.SubmitActionRequest) -> Action:
 def _finalize_hand(runtime: GameRuntime, db: Session) -> None:
     """本手结束后持久化 Hand History 并更新对局统计。"""
     engine = runtime.engine
-    history = build_hand_history(engine, runtime.hand_number, runtime.human_seat)
+    history = build_hand_history(
+        engine,
+        runtime.hand_number,
+        runtime.human_seat,
+        bot_strategy=runtime.bot_strategy,
+    )
     human_net = engine.last_net.get(runtime.human_seat, 0)
     hand = repository.add_hand(
         db,
@@ -252,6 +258,7 @@ def create_game(
         bot_seats=[seat for seat in range(req.num_players) if seat != 0],
         hand_number=1,
         last_bot_ts=time.monotonic(),
+        bot_strategy=req.bot_strategy,
     )
     engine.start_hand()
     if engine.hand_over:
