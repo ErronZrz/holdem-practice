@@ -22,11 +22,17 @@ from multiplayer_cfr.estimator_preflight import (
 )
 from multiplayer_cfr.game import information_set_key
 from multiplayer_cfr.manifest import (
+    EVALUATOR_ID,
+    EVALUATOR_VERSION,
     EXPERIMENT_MANIFEST_TYPE,
     MANIFEST_SCHEMA_VERSION,
+    PROBE_MANIFEST_TYPE,
     create_experiment_manifest,
+    create_probe_manifest,
     write_experiment_manifest,
+    write_probe_manifest,
 )
+from multiplayer_cfr.policy import PROBABILITY_UNITS
 from multiplayer_cfr.supervised_executor import (
     SupervisedExecutorError,
     run_supervised_manifest_executor,
@@ -130,6 +136,49 @@ def _a6_manifest(commit: str) -> dict[str, object]:
         "strategy": {"relative_name": "strategy.json", "maximum_bytes": 3_000_000},
         "measurement": {"relative_name": "measurement.json", "maximum_bytes": 1_000_000},
     }
+    return payload
+
+
+def _a6_probe_manifest(player_count: int) -> dict[str, object]:
+    """两组预注册阈值策略，按 probe_id 升序排列。"""
+
+    return {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "manifest_type": PROBE_MANIFEST_TYPE,
+        "manifest_id": "a6-probe-tight-loose",
+        "game": {
+            "id": "m8-unique-rank-single-open",
+            "version": "m8-a-v1",
+            "player_count": player_count,
+        },
+        "evaluator": {
+            "evaluator_id": EVALUATOR_ID,
+            "evaluator_version": EVALUATOR_VERSION,
+            "probability_units": PROBABILITY_UNITS,
+        },
+        "probes": [
+            {"probe_id": "loose-open", "open_threshold": 1, "call_threshold": 0},
+            {"probe_id": "tight-open", "open_threshold": 4, "call_threshold": 3},
+        ],
+    }
+
+
+def _a6_manifest_with_probes(commit: str, probe_identity: dict[str, object]) -> dict[str, object]:
+    """引用真实 probe 的计划必须用 full-chance profile，并按实测锚点放宽质量阶段预算。"""
+
+    payload = _a6_manifest(commit)
+    payload["quality"] = {"profile_mode": "full-chance", "probe_manifest": probe_identity}
+    payload["budget"]["cpu_limit_milliseconds"] = 1_140_000
+    payload["budget"]["stages"] = [
+        {"name": name, "wall_time_milliseconds": wall_time}
+        for name, wall_time in (
+            ("training", 600_000),
+            ("export", 60_000),
+            ("profile", 120_000),
+            ("probe", 300_000),
+            ("measurement", 60_000),
+        )
+    ]
     return payload
 
 
@@ -545,3 +594,73 @@ def test_parent_rejects_preflight_evidence_on_n9_boundary(tmp_path: Path) -> Non
         )
 
     assert list(artifact_root.iterdir()) == []
+
+
+def test_parent_runs_a6_with_preregistered_probes_under_campaign_lease(tmp_path: Path) -> None:
+    """携带真实 probe manifest 时，父端最终 measurement 必须保留 probe 身份与两种工件。"""
+
+    worktree, commit = _clean_worktree(tmp_path)
+    manifest_root = tmp_path / "manifests"
+    campaign_root = tmp_path / "campaign"
+    manifest_root.mkdir()
+    campaign_root.mkdir()
+    probe = write_probe_manifest(
+        manifest_root,
+        "a6-probe.json",
+        create_probe_manifest(_a6_probe_manifest(6)),
+    )
+    experiment_path = manifest_root / "experiment.json"
+    experiment = write_experiment_manifest(
+        manifest_root,
+        experiment_path.name,
+        create_experiment_manifest(_a6_manifest_with_probes(commit, probe.identity.as_payload())),
+    )
+    spec_path, attestation_path = _preflight_files(manifest_root, commit)
+    campaign = create_campaign_manifest(
+        _campaign_payload(
+            commit,
+            experiment.identity.as_payload(),
+            load_attestation(attestation_path).identity.as_payload(),
+            campaign_id="a6-probe-campaign",
+            authorization_id="a6-probe-run",
+            cpu_milliseconds=1_140_000,
+            wall_milliseconds=1_140_000,
+            retained_artifact_bytes=5_000_000,
+            peak_rss_limit_bytes=512 * 1024 * 1024,
+        )
+    )
+
+    with acquire_campaign_lease(campaign_root, campaign, "a6-probe-run") as lease:
+        _, artifact_root, snapshot_root = lease.create_run_directories()
+        result = run_supervised_manifest_executor(
+            experiment_manifest_path=experiment_path,
+            artifact_root=artifact_root,
+            execution_snapshot_root=snapshot_root,
+            working_directory=worktree,
+            runtime_git_commit=commit,
+            runtime_trainer_version=_TRAINER_VERSION,
+            campaign_lease=lease,
+            preflight_spec_path=spec_path,
+            preflight_attestation_path=attestation_path,
+            probe_manifest_path=manifest_root / "a6-probe.json",
+        )
+        lease.finalize(
+            status=result.receipt.status.value,
+            supervisor_receipt_sha256="0" * 64,
+            final_measurement_sha256=result.measurement.sha256,
+            final_inventory=[entry.as_payload() for entry in result.final_inventory],
+        )
+
+    final = load_supervised_measurement(result.measurement_path)
+    assert result.receipt.status is SupervisorStatus.COMPLETED
+    assert final.payload["execution_snapshots"]["probe"] == probe.identity.as_payload()
+    assert final.payload["child_execution"] is not None
+    assert final.payload["child_execution"]["payload"]["probes"] is not None
+    assert [entry.relative_name for entry in result.pre_final_inventory] == [
+        "measurement.json",
+        "strategy.json",
+    ]
+    assert [entry.relative_name for entry in result.final_inventory] == [
+        "measurement.json",
+        "strategy.json",
+    ]

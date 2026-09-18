@@ -14,7 +14,7 @@ from .experiment_record import (
     strategy_identity_payload,
     verify_child_record_against_plan,
 )
-from .manifest import ExperimentPlan
+from .manifest import EXPERIMENT_MANIFEST_TYPE, PROBE_MANIFEST_TYPE, ExperimentPlan
 from .policy import QuantizedStrategyArtifact
 from .safeio import (
     MAX_TEXT_BYTES,
@@ -228,7 +228,9 @@ def _validate_payload(value: object) -> None:
         or record["record_type"] != SUPERVISED_MEASUREMENT_TYPE
     ):
         raise SupervisedMeasurementError("父监督器最终 measurement 版本不兼容")
-    _validate_identity(record["experiment_manifest"])
+    _validate_identity(
+        record["experiment_manifest"], EXPERIMENT_MANIFEST_TYPE, "experiment manifest"
+    )
     _validate_execution_snapshots(record["execution_snapshots"], record["experiment_manifest"])
     _validate_inventory_payload(record["pre_final_inventory"])
     receipt_status = _validate_receipt(record["supervisor_receipt"])
@@ -259,11 +261,11 @@ def _validate_inventory(entries: tuple[InventoryEntry, ...]) -> None:
 
 def _validate_execution_snapshots(value: object, experiment_identity: object) -> None:
     snapshots = _exact_mapping(value, {"experiment", "probe"}, "execution snapshots")
-    _validate_identity(snapshots["experiment"])
+    _validate_identity(snapshots["experiment"], EXPERIMENT_MANIFEST_TYPE, "experiment manifest")
     if snapshots["experiment"] != experiment_identity:
         raise SupervisedMeasurementError("execution experiment snapshot 与最终 manifest 身份不一致")
     if snapshots["probe"] is not None:
-        _validate_identity(snapshots["probe"])
+        _validate_identity(snapshots["probe"], PROBE_MANIFEST_TYPE, "probe manifest")
 
 
 def _validate_inventory_payload(value: object) -> None:
@@ -286,21 +288,23 @@ def _validate_inventory_payload(value: object) -> None:
         raise SupervisedMeasurementError("pre-final inventory 必须按文件名排序且不重复")
 
 
-def _validate_identity(value: object) -> None:
+def _validate_identity(value: object, expected_type: str, label: str) -> None:
+    """按调用方声明的槽位类型校验 manifest 身份，experiment 与 probe 不共用判据。"""
+
     identity = _exact_mapping(
         value,
         {"manifest_type", "schema_version", "manifest_id", "sha256", "byte_length"},
-        "experiment manifest 身份",
+        f"{label}身份",
     )
     if (
-        identity["manifest_type"] != "multiplayer-cfr-experiment"
+        identity["manifest_type"] != expected_type
         or not isinstance(identity["schema_version"], int)
         or not isinstance(identity["manifest_id"], str)
         or not isinstance(identity["sha256"], str)
         or len(identity["sha256"]) != 64
         or not isinstance(identity["byte_length"], int)
     ):
-        raise SupervisedMeasurementError("experiment manifest 身份不兼容")
+        raise SupervisedMeasurementError(f"{label}身份不兼容")
 
 
 def _validate_receipt(value: object) -> str:
