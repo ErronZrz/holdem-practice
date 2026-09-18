@@ -1,12 +1,14 @@
-# 31 M8：多人 CFR 候选 A——Canonical Campaign 冻结清单
+# 31a M8：多人 CFR 候选 A——Canonical Campaign 冻结清单
 
 > 日期：2026-09-18。
 >
-> 本文件是 `docs/31a-m8-multiplayer-cfr-candidate-a-freeze-readiness-review.md` 的配套决策与冻结记录，只使用 `docs/31` 编号族（`31a` 沿用 `docs/30` D6 记录的拆分约定）。
+> 本文件是 `docs/31-m8-multiplayer-cfr-candidate-a-freeze-readiness-review.md` 的配套决策与冻结记录；`31a` 沿用 `docs/30` D6 记录的拆分约定，表示接在 `docs/31` 之后的追加文档。因此 `docs/31` 编号族在本轮恰好包含两个文件：`31` 为只读复核与加固记录，`31a` 为本冻结清单。`docs/20` 至 `docs/30` 未被改写。
 >
-> 状态：**决策已全部确认，等待 commit 与一次性执行授权**。未生成任何真实 campaign manifest、probe manifest、preflight spec/attestation、策略工件、measurement 或 ledger，未启动任何 A6/A7 运行。
+> 状态：**决策已全部确认，本文件随本轮改动一并提交**。尚未生成任何真实 campaign manifest、probe manifest、preflight spec/attestation、策略工件、measurement 或 ledger，未启动任何 A6/A7 运行，也未获得一次性实际执行授权。
 >
 > 用途：把即将冻结的输入逐项写死，供生成实际文件时逐字段比对。**本文件中的数值在用于真实执行前，必须与最终生成的 manifest 逐字段一致。**
+>
+> 冻结 commit 的说明：本轮代码改动已提交为 `8f8d8fd feat: enforce campaign preflight and reservation gates at supervised entry`，`docs/31` 与 `docs/31a` 的定稿提交紧随其后。**冻结 commit 的实际哈希不写回任何被提交的文档**——写入哈希会使文档自身发生改动，从而改变 commit，形成循环；该哈希只记录在工作树之外生成的 manifest 文件中。
 
 ## 1. 决策汇总
 
@@ -196,13 +198,14 @@
 1. 工作区完全干净——`git status --porcelain=v1 --untracked-files=all` 必须为空，因此**以上所有执行期输入都必须在工作树之外**，工作树内不得残留任何未提交文件。
 2. 冻结 commit 必须等于启动时刻实际 `HEAD`，且同时等于两个 experiment manifest 与 campaign manifest 的 `code_identity.git_commit`。
 3. 每条 authorization 只 lease 一次；run 目录只创建一次。
-4. 2026-09-17 之前的所有 `docs/31` 文档与代码改动必须先 commit，否则工作区不干净。
+4. 本轮全部代码改动与 `docs/31`、`docs/31a` 文档必须先提交，否则工作区不干净。
+5. `docs/31` 编号族只允许两个已提交文件（`31` 复核、`31a` 清单）；不得再新增同族文件，也不得让同名文件同时以两个路径存在。
 
 ## 9. 执行顺序（冻结后）
 
 ```text
 1. 确认 C1–C6（已完成）
-2. commit docs/31 两个文件与 tools/trainer/ 改动，记录新 HEAD
+2. 提交 docs/31 与 docs/31a（代码改动已在 8f8d8fd 提交），记录新 HEAD
 3. 在工作树之外建 campaign root 与 source/
 4. 写 probe manifest（A6、A7 各一份）与两个 experiment manifest，code_identity 用第 2 步的 HEAD
 5. 写 preflight spec（同一 commit）→ run_preflight → 写 attestation
