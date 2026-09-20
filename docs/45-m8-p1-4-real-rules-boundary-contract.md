@@ -132,18 +132,20 @@ REAL_RULES_BOUNDARY_SCHEMA_VERSION = "real-rules-boundary.v1"
 REAL_RULES_BOUNDARY_BASIS = "abstraction-slice-vs-real-rule-slices"
 ```
 
-### 4.2 受限抽象切片事实（冻结，声明常量 + 测试锁定）
+### 4.2 受限抽象切片事实（冻结：复用既有契约 + 补充声明）
 
-以下常量与本轮**只读引用**的受限抽象描述逐字对齐，并由**一条测试**读取训练器源文件锁定其不漂移；本模块**不 import** 训练器（后端与训练器是两个独立 `uv` 工程）：
+**事实源只有一处**：抽象版本、训练覆盖人数与动作词表**复用** P0-3 已有契约模块的常量（`ABSTRACTION_GAME_VERSION` / `ABSTRACTION_TRAINED_PLAYER_COUNTS` / `ABSTRACTION_ACTIONS`）；本模块只在其上补充 `game id` 与固定投入单位，并派生排序后的元组，**不另造**第二份字面量。
 
-| 常量 | 值 |
-|---|---|
-| `ABSTRACTION_GAME_ID` | `"m8-unique-rank-single-open"` |
-| `ABSTRACTION_GAME_VERSION` | `"m8-a-v1"` |
-| `ABSTRACTION_PLAYER_COUNTS` | `(6, 7, 9)` |
-| `ABSTRACTION_ANTE` | `1` |
-| `ABSTRACTION_BET` | `1` |
-| `ABSTRACTION_ACTION_TOKENS` | `("x", "b", "c", "f")` |
+与训练器描述的逐字一致，由**一条测试**读取训练器源文件 `tools/trainer/src/multiplayer_cfr/game.py` 锁定；本模块**不 import** 训练器（后端与训练器是两个独立 `uv` 工程）。
+
+| 常量 | 值 | 来源 |
+|---|---|---|
+| `ABSTRACTION_GAME_ID` | `"m8-unique-rank-single-open"` | 本模块补充声明 |
+| `ABSTRACTION_GAME_VERSION` | `"m8-a-v1"` | **复用**抽象契约模块 |
+| `ABSTRACTION_PLAYER_COUNTS` | `(6, 7, 9)` | 由抽象契约模块的人数集合派生 |
+| `ABSTRACTION_ANTE` | `1` | 本模块补充声明 |
+| `ABSTRACTION_BET` | `1` | 本模块补充声明 |
+| `ABSTRACTION_ACTION_TOKENS` | `("b", "c", "f", "x")` | 由抽象契约模块的动作集合派生（排序后） |
 
 ### 4.3 边界判定取值 `BoundaryVerdict`（冻结，闭集三值）
 
@@ -260,11 +262,13 @@ PREREQUISITES = (
 
 失败的**分类型**异常：
 
-| 异常 | 含义 | 触发条件 |
+| 异常 | 含义 | 触发条件（**查询与失败入口**） |
 |---|---|---|
 | `RealRulesBoundaryError` | 基类 | —— |
-| `RealRulesBoundaryContractError` | **契约违规**（结构性非法或越界主张） | 条目与冻结目录不一致（改写判定 / 未知 feature / 重复 feature / 缺漏）；`verdict`、`prerequisite`、抽象常量、`schema_version` 不匹配；`require_in_abstraction_slice` 收到非界内切片 |
-| `UnknownBoundaryFeatureError` | **切片标识未知** | `boundary_for` / `verdict_for` 收到冻结目录外的标识 |
+| `RealRulesBoundaryContractError` | **契约违规 / 越界主张** | `require_in_abstraction_slice` 收到非界内切片；`features_with` 收到未知判定取值；`boundary_for` / `verdict_for` 收到非字符串标识 |
+| `UnknownBoundaryFeatureError` | **切片标识未知** | `boundary_for` / `verdict_for` / `require_in_abstraction_slice` 收到冻结目录外的标识 |
+
+**模型构造期的目录一致性检查**（改写判定或前置、注入未知 / 重复 / 缺漏条目、抽象常量或基准或 `schema_version` 不匹配）由 Pydantic 在 `model_post_init` 处包装为 `ValidationError`（它是 `ValueError` 的子类）；因此**构造不可能产出被改写的契约**。两类失败都属**明确失败**，无静默回退。
 
 **禁止静默回退**：未知、缺漏或抽象外的切片**一律不得**被当作界内处理，也**不得**用最近桶、补零、默认尺度或插值冒充映射。本模块**不替代** `judge_coverage`：它**不**接收 `GameState`，**不**判定真实局面是否落入抽象。
 
@@ -283,16 +287,16 @@ PREREQUISITES = (
 
 | # | 验收项 | 判据 |
 |---|---|---|
-| C1 | 受限抽象切片事实齐备 | §4.2 六个常量与训练器描述逐字一致（由测试读取训练器源文件锁定） |
+| C1 | 受限抽象切片事实齐备 | §4.2 六个常量与训练器描述逐字一致（由测试读取训练器源文件锁定）；版本 / 人数 / 动作**复用**既有抽象契约，不另造字面量 |
 | C2 | 真实规则切片逐条划分 | 冻结目录 20 条，`feature` 唯一且不重不漏 |
 | C3 | 判定为受控闭集三值 | §4.3 三值；`features_with` 三个取值并集等于全部切片 |
-| C4 | 判定不可由调用方改写 | 改写 `verdict` / `prerequisite` 或注入未知 / 重复 / 缺漏 feature 一律抛 `RealRulesBoundaryContractError` |
+| C4 | 判定不可由调用方改写 | 改写 `verdict` / `prerequisite` 或注入未知 / 重复 / 缺漏 feature **一律构造失败**（`ValidationError`）；构造不可能产出被改写的契约 |
 | C5 | 前置标识为闭集且真实存在 | §4.5 闭集；每个标识对应的模块入口由测试导入并断言存在 |
 | C6 | 真实下注尺度与公共牌被明确划到界外 | `variable-bet-sizing` 与 `public-board` 的判定恒为 `out-of-abstraction` |
-| C7 | 明确失败 | 未知切片抛 `UnknownBoundaryFeatureError`；非界内切片经 `require_in_abstraction_slice` 抛 `RealRulesBoundaryContractError` |
+| C7 | 明确失败 | 未知切片抛 `UnknownBoundaryFeatureError`；非界内切片经 `require_in_abstraction_slice` 抛 `RealRulesBoundaryContractError`；越界或不一致的模型构造抛 `ValidationError` |
 | C8 | 不替代 `judge_coverage` | 模块不接收 `GameState`、不 import `abstraction`；字段中不存在真实局面 |
 | C9 | 不实现真实牌堆 / 公共牌 / 尺度 | 模块不含牌面、公共牌、尺度或抽样字段与入口 |
-| C10 | 不 import 既有策略模块与训练器 | 源码中不出现既有策略模块名、`app.poker.*`、`tools.*` |
+| C10 | 只复用抽象契约、不 import 其他应用模块与训练器 | 源码中不出现其他策略模块名、`app.poker.*`、`app.analysis.*`、`tools.*`；只出现 `app.strategy.abstraction` 一条应用内导入 |
 | C11 | 无生产调用方 | `app/**` 内除自身与包导出外无引用；对外响应与缓存键不变 |
 | C12 | 既有语义零改动 | `equity()`、`call_ev`、结算、参考身份、P1-1 / P1-2 / P1-3 模块均不被触碰 |
 
