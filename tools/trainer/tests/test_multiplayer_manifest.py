@@ -110,6 +110,47 @@ def _experiment_payload(
     }
 
 
+def _a9_training_payload() -> dict[str, object]:
+    return {
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "manifest_type": EXPERIMENT_MANIFEST_TYPE,
+        "manifest_id": "a9-training",
+        "code_identity": {
+            "git_commit": _COMMIT,
+            "workspace_state": "clean",
+            "trainer_version": "candidate-a-n9-v1",
+        },
+        "game": {
+            "id": "m8-unique-rank-single-open",
+            "version": "m8-a-v1",
+            "player_count": 9,
+        },
+        "execution": {
+            "kind": "a9-training",
+            "iterations": 4,
+            "average_strategy_start_iteration": 2,
+            "master_seed": 1215,
+        },
+        "quality": {"profile_mode": "not-requested", "probe_manifest": None},
+        "budget": {
+            "cpu_limit_milliseconds": 1000,
+            "max_concurrency": 1,
+            "rss_warning_bytes": 100,
+            "rss_hard_limit_bytes": 200,
+            "retained_artifact_limit_bytes": 1_000_000,
+            "stages": [
+                {"name": "training", "wall_time_milliseconds": 100},
+                {"name": "export", "wall_time_milliseconds": 100},
+                {"name": "measurement", "wall_time_milliseconds": 100},
+            ],
+        },
+        "artifacts": {
+            "strategy": {"relative_name": "strategy.json", "maximum_bytes": 500_000},
+            "measurement": {"relative_name": "measurement.json", "maximum_bytes": 100_000},
+        },
+    }
+
+
 def test_canonical_manifests_round_trip_and_uniquely_derive_a6_plan(tmp_path: Path) -> None:
     probe = create_probe_manifest(_probe_payload())
     loaded_probe = write_probe_manifest(tmp_path, "probes.json", probe)
@@ -159,3 +200,67 @@ def test_manifest_rejects_noncanonical_files_and_mismatched_probe_reference(tmp_
     pretty.write_text(str(deepcopy(experiment_payload)), encoding="utf-8")
     with pytest.raises(ManifestError):
         load_experiment_manifest(pretty)
+
+
+def test_a9_training_manifest_round_trips_and_derives_a_three_stage_plan(tmp_path: Path) -> None:
+    loaded = write_experiment_manifest(
+        tmp_path, "a9.json", create_experiment_manifest(_a9_training_payload())
+    )
+    plan = derive_experiment_plan(loaded, None)
+
+    assert loaded.execution_kind == "a9-training"
+    assert loaded.player_count == 9
+    assert [stage.name for stage in loaded.stages] == ["training", "export", "measurement"]
+    assert plan.training_config is not None
+    assert plan.training_config.player_count == 9
+    assert plan.training_config.iterations == 4
+    assert plan.training_config.average_strategy_start_iteration == 2
+    assert plan.probe_manifest is None
+    assert load_experiment_manifest(tmp_path / "a9.json") == loaded
+
+
+def test_a9_training_manifest_rejects_quality_stage_and_player_count_violations() -> None:
+    full_chance = _a9_training_payload()
+    full_chance["quality"] = {"profile_mode": "full-chance", "probe_manifest": None}
+    with pytest.raises(ManifestError):
+        create_experiment_manifest(full_chance)
+
+    with_probe = _a9_training_payload()
+    with_probe["quality"] = {
+        "profile_mode": "not-requested",
+        "probe_manifest": {
+            "manifest_type": PROBE_MANIFEST_TYPE,
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "manifest_id": "a9-probes",
+            "sha256": "0" * 64,
+            "byte_length": 1,
+        },
+    }
+    with pytest.raises(ManifestError):
+        create_experiment_manifest(with_probe)
+
+    five_stages = _a9_training_payload()
+    five_stages["budget"]["stages"] = [
+        {"name": "training", "wall_time_milliseconds": 100},
+        {"name": "export", "wall_time_milliseconds": 100},
+        {"name": "profile", "wall_time_milliseconds": 100},
+        {"name": "probe", "wall_time_milliseconds": 100},
+        {"name": "measurement", "wall_time_milliseconds": 100},
+    ]
+    with pytest.raises(ManifestError):
+        create_experiment_manifest(five_stages)
+
+    no_strategy = _a9_training_payload()
+    no_strategy["artifacts"]["strategy"] = None
+    with pytest.raises(ManifestError):
+        create_experiment_manifest(no_strategy)
+
+    wrong_count = _a9_training_payload()
+    wrong_count["game"]["player_count"] = 7
+    with pytest.raises(ManifestError):
+        create_experiment_manifest(wrong_count)
+
+    a6_with_nine_seats = _experiment_payload()
+    a6_with_nine_seats["game"]["player_count"] = 9
+    with pytest.raises(ManifestError):
+        create_experiment_manifest(a6_with_nine_seats)

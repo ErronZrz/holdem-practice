@@ -228,14 +228,14 @@ def _require_campaign_authorization(
     preflight_spec_path: str | Path | None,
     preflight_attestation_path: str | Path | None,
 ) -> None:
-    """A6/A7 必须同时满足：有效 lease、冻结 preflight 证据、不超授权预留；N9 允许独立执行。"""
+    """长期训练必须有有效 lease、冻结 preflight 证据且不超授权预留；N9 边界采样可独立执行。"""
 
     if campaign_lease is None:
         if plan.manifest.execution_kind == "n9-boundary-sample":
             if preflight_spec_path is not None or preflight_attestation_path is not None:
                 raise SupervisedExecutorError("N9 boundary 不接受 campaign preflight 证据")
             return
-        raise SupervisedExecutorError("A6/A7 必须通过冻结 campaign authorization 执行")
+        raise SupervisedExecutorError("长期训练必须通过冻结 campaign authorization 执行")
     if preflight_spec_path is None or preflight_attestation_path is None:
         raise SupervisedExecutorError("A6/A7 必须引用冻结的 preflight spec 与 attestation 文件")
     try:

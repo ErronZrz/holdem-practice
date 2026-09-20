@@ -194,8 +194,6 @@ def run_controlled_training(
 ) -> ControlledTrainingResult:
     """在 iteration 边界采样外部资源并合作式停止，不启动子进程。"""
 
-    if config.player_count == 9:
-        raise ControlError("N9 只能使用 run_n9_boundary_sample，不能走长期训练入口")
     if not callable(monotonic_clock) or not callable(rss_reader):
         raise ControlError("时钟和 RSS 读取器必须可调用")
     if not isinstance(rss_sampler_id, str) or not rss_sampler_id:

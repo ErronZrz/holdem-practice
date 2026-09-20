@@ -187,6 +187,90 @@ def test_builder_allows_completed_n9_boundary_only_without_strategy_or_quality()
     assert record.payload["probes"] is None
 
 
+def _a9_training_plan() -> object:
+    manifest = create_experiment_manifest(
+        {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "manifest_type": EXPERIMENT_MANIFEST_TYPE,
+            "manifest_id": "a9-record",
+            "code_identity": {
+                "git_commit": _COMMIT,
+                "workspace_state": "clean",
+                "trainer_version": "candidate-a-record-v1",
+            },
+            "game": {
+                "id": "m8-unique-rank-single-open",
+                "version": "m8-a-v1",
+                "player_count": 9,
+            },
+            "execution": {
+                "kind": "a9-training",
+                "iterations": 1,
+                "average_strategy_start_iteration": 1,
+                "master_seed": 1215,
+            },
+            "quality": {"profile_mode": "not-requested", "probe_manifest": None},
+            "budget": {
+                "cpu_limit_milliseconds": 1000,
+                "max_concurrency": 1,
+                "rss_warning_bytes": 100,
+                "rss_hard_limit_bytes": 200,
+                "retained_artifact_limit_bytes": 20_971_520,
+                "stages": [
+                    {"name": "training", "wall_time_milliseconds": 100},
+                    {"name": "export", "wall_time_milliseconds": 100},
+                    {"name": "measurement", "wall_time_milliseconds": 100},
+                ],
+            },
+            "artifacts": {
+                "strategy": {"relative_name": "strategy.json", "maximum_bytes": 16_777_216},
+                "measurement": {"relative_name": "measurement.json", "maximum_bytes": 1_048_576},
+            },
+        }
+    ).value
+    return derive_experiment_plan(manifest, None)
+
+
+def test_builder_records_a9_training_with_strategy_and_without_quality(tmp_path: Path) -> None:
+    plan = _a9_training_plan()
+    assert plan.training_config is not None
+    training = run_controlled_training(
+        plan.training_config,
+        _limits(),
+        monotonic_clock=_reader([0, 0, 0]),
+        rss_reader=_reader([0, 0]),
+        rss_sampler_id="test-rss-v1",
+    )
+    assert training.result is not None
+    path = tmp_path / "strategy.json"
+    export_strategy(path, training.result, trainer_version=plan.manifest.trainer_version)
+    artifact = load_quantized_strategy(path)
+
+    record = build_manifested_measurement_record(
+        plan=plan,
+        supervisor=_supervisor(),
+        training=training,
+        artifact=artifact,
+    )
+    written = write_manifested_measurement_record(
+        tmp_path, "measurement.json", record, maximum_bytes=1_048_576
+    )
+
+    assert written.payload["execution"]["plan_kind"] == "a9-training"
+    assert written.payload["execution"]["player_count"] == 9
+    assert written.payload["execution"]["traverser"] is None
+    assert written.payload["strategy"] is not None
+    assert written.payload["profile"] is None
+    assert written.payload["probes"] is None
+    assert written.payload["stability"] == {
+        "status": "not-requested",
+        "seed_set_sha256": None,
+        "audit_infosets_sha256": None,
+        "max_l1": None,
+    }
+    assert load_manifested_measurement_record(tmp_path / "measurement.json") == written
+
+
 def test_builder_rejects_manual_cross_plan_strategy_binding(tmp_path: Path) -> None:
     plan = _plan(player_count=6)
     assert plan.training_config is not None

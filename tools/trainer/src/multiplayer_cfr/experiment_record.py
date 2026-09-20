@@ -105,9 +105,9 @@ def build_manifested_measurement_record(
     if not isinstance(plan, ExperimentPlan) or not isinstance(supervisor, SupervisorIdentity):
         raise ExperimentRecordError("测量记录必须由已验证计划和监督器身份构造")
     manifest = plan.manifest
-    if manifest.execution_kind == "a6-a7-training":
+    if manifest.execution_kind in {"a6-a7-training", "a9-training"}:
         if training is None or boundary is not None:
-            raise ExperimentRecordError("A6/A7 记录必须关联唯一训练回执")
+            raise ExperimentRecordError("训练记录必须关联唯一训练回执")
         execution, diagnostics, resources = _training_sections(training, supervisor, plan)
         if training.result is None:
             if artifact is not None or evaluation is not None:
@@ -210,7 +210,7 @@ def verify_child_record_against_plan(record: ExperimentRecord, plan: ExperimentP
         or execution["master_seed"] != plan.manifest.master_seed
     ):
         raise ExperimentRecordError("子记录人数或 seed 与父端计划不一致")
-    if plan.manifest.execution_kind == "a6-a7-training":
+    if plan.manifest.execution_kind in {"a6-a7-training", "a9-training"}:
         if (
             execution["iterations"] != plan.manifest.iterations
             or execution["average_strategy_start_iteration"]
@@ -279,7 +279,7 @@ def _training_sections(
     plan: ExperimentPlan,
 ) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
     execution = {
-        "plan_kind": "a6-a7-training",
+        "plan_kind": plan.manifest.execution_kind,
         "status": result.status.value,
         "stage": "training",
         "stop_reason": result.stop_reason.value,
@@ -641,7 +641,7 @@ def _validate_execution_payload(
     }:
         raise ExperimentRecordError("执行回执字段不匹配")
     plan_kind = execution["plan_kind"]
-    if plan_kind not in {"a6-a7-training", "n9-boundary-sample"}:
+    if plan_kind not in {"a6-a7-training", "a9-training", "n9-boundary-sample"}:
         raise ExperimentRecordError("执行计划类型不兼容")
     if plan_kind == "n9-boundary-sample" and any(
         value is not None for value in (strategy, profile, probes)

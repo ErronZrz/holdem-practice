@@ -221,3 +221,65 @@ def test_orchestration_stops_measurement_stage_that_exceeds_its_manifest_wall_bu
 
     assert (tmp_path / "strategy.json").is_file()
     assert not (tmp_path / "measurement.json").exists()
+
+
+def _a9_training_plan():
+    manifest = create_experiment_manifest(
+        {
+            "schema_version": MANIFEST_SCHEMA_VERSION,
+            "manifest_type": EXPERIMENT_MANIFEST_TYPE,
+            "manifest_id": "a9-orchestration",
+            "code_identity": {
+                "git_commit": _COMMIT,
+                "workspace_state": "clean",
+                "trainer_version": "candidate-a-orchestration-v1",
+            },
+            "game": {
+                "id": "m8-unique-rank-single-open",
+                "version": "m8-a-v1",
+                "player_count": 9,
+            },
+            "execution": {
+                "kind": "a9-training",
+                "iterations": 1,
+                "average_strategy_start_iteration": 1,
+                "master_seed": 9,
+            },
+            "quality": {"profile_mode": "not-requested", "probe_manifest": None},
+            "budget": {
+                "cpu_limit_milliseconds": 1000,
+                "max_concurrency": 1,
+                "rss_warning_bytes": 100,
+                "rss_hard_limit_bytes": 200,
+                "retained_artifact_limit_bytes": 20_971_520,
+                "stages": [
+                    {"name": "training", "wall_time_milliseconds": 600_000},
+                    {"name": "export", "wall_time_milliseconds": 600_000},
+                    {"name": "measurement", "wall_time_milliseconds": 600_000},
+                ],
+            },
+            "artifacts": {
+                "strategy": {"relative_name": "strategy.json", "maximum_bytes": 16_777_216},
+                "measurement": {"relative_name": "measurement.json", "maximum_bytes": 1_048_576},
+            },
+        }
+    ).value
+    return derive_experiment_plan(manifest, None)
+
+
+def test_orchestration_runs_a9_training_and_writes_only_declared_artifacts(
+    tmp_path: Path,
+) -> None:
+    result = run_manifested_experiment(_a9_training_plan(), tmp_path, _session())
+
+    assert result.strategy_path == tmp_path / "strategy.json"
+    assert result.measurement_path == tmp_path / "measurement.json"
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        "measurement.json",
+        "strategy.json",
+    ]
+    assert result.record.payload["execution"]["plan_kind"] == "a9-training"
+    assert result.record.payload["execution"]["player_count"] == 9
+    assert result.record.payload["strategy"] is not None
+    assert result.record.payload["profile"] is None
+    assert result.record.payload["probes"] is None

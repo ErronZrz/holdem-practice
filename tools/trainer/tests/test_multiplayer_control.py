@@ -1,9 +1,6 @@
 from collections import deque
 
-import pytest
-
 from multiplayer_cfr.control import (
-    ControlError,
     RunLimits,
     RunStatus,
     StopReason,
@@ -51,32 +48,45 @@ def test_controlled_n7_short_path_collects_diagnostics_without_exporting_artifac
     assert result.resources.peak_rss_bytes == 1024
 
 
-def test_n9_requires_boundary_entry_and_returns_only_one_non_training_sample() -> None:
-    limits = RunLimits(
-        stage="n9-boundary",
+def test_n9_controlled_training_and_boundary_entry_are_both_available() -> None:
+    """N=9 既走受控长期训练，也保留只返回单次采样的边界入口。"""
+
+    training_limits = RunLimits(
+        stage="n9-training",
         wall_time_seconds=10.0,
         rss_warning_bytes=6 * 1024**3,
         rss_hard_limit_bytes=8 * 1024**3,
         retained_artifact_limit_bytes=1024,
     )
-    with pytest.raises(ControlError):
-        run_controlled_training(
-            MCCFRConfig(
-                player_count=9,
-                iterations=1,
-                master_seed=103,
-                average_strategy_start_iteration=1,
-            ),
-            limits,
-            monotonic_clock=_reader([0, 0]),
-            rss_reader=_reader([512]),
-            rss_sampler_id="test-rss-v1",
-        )
+    trained = run_controlled_training(
+        MCCFRConfig(
+            player_count=9,
+            iterations=1,
+            master_seed=103,
+            average_strategy_start_iteration=1,
+        ),
+        training_limits,
+        monotonic_clock=_reader([0, 0, 0]),
+        rss_reader=_reader([512, 1024]),
+        rss_sampler_id="test-rss-v1",
+    )
+
+    assert trained.status is RunStatus.COMPLETED
+    assert trained.stop_reason is StopReason.COMPLETED
+    assert trained.result is not None
+    assert trained.result.infoset_count == 20736
+    assert [item.traverser for item in trained.diagnostics.coverage] == list(range(9))
 
     boundary = run_n9_boundary_sample(
         master_seed=103,
         traverser=4,
-        limits=limits,
+        limits=RunLimits(
+            stage="n9-boundary",
+            wall_time_seconds=10.0,
+            rss_warning_bytes=6 * 1024**3,
+            rss_hard_limit_bytes=8 * 1024**3,
+            retained_artifact_limit_bytes=1024,
+        ),
         monotonic_clock=_reader([0, 0, 0]),
         rss_reader=_reader([512, 1024]),
         rss_sampler_id="test-rss-v1",
@@ -87,6 +97,7 @@ def test_n9_requires_boundary_entry_and_returns_only_one_non_training_sample() -
     assert boundary.sample is not None
     assert boundary.sample.traverser == 4
     assert boundary.sample.infoset_count == 20736
+    assert boundary.sample.trace is not None
 
 
 def test_controlled_runner_records_quota_and_rss_warning_stops() -> None:

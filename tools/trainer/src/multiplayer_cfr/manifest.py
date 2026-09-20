@@ -92,7 +92,7 @@ class ArtifactSlot:
 
 @dataclass(frozen=True)
 class ExperimentManifest:
-    """训练前冻结的 A6/A7 或 N9 boundary 实验定义。"""
+    """训练前冻结的 A6/A7、N9 长期训练或 N9 boundary 实验定义。"""
 
     identity: ManifestIdentity
     code_commit: str
@@ -251,7 +251,7 @@ def derive_experiment_plan(
         raise ManifestError("probe manifest 人数与 experiment manifest 不匹配")
 
     stage_budgets = {stage.name: stage for stage in manifest.stages}
-    if manifest.execution_kind == "a6-a7-training":
+    if manifest.execution_kind in {"a6-a7-training", "a9-training"}:
         assert manifest.average_strategy_start_iteration is not None
         training_config = MCCFRConfig(
             player_count=manifest.player_count,
@@ -469,14 +469,16 @@ def _parse_execution(value: object, player_count: int) -> dict[str, object]:
     if not isinstance(value, dict):
         raise ManifestError("execution 必须是对象")
     kind = value.get("kind")
-    if kind == "a6-a7-training":
+    if kind in {"a6-a7-training", "a9-training"}:
         execution = _exact_keys(
             value,
             {"kind", "iterations", "average_strategy_start_iteration", "master_seed"},
             "execution",
         )
-        if player_count not in {6, 7}:
+        if kind == "a6-a7-training" and player_count not in {6, 7}:
             raise ManifestError("长期训练只允许 A6 或 A7")
+        if kind == "a9-training" and player_count != 9:
+            raise ManifestError("N9 长期训练只允许 9 名相对座位")
         iterations = _require_int(execution["iterations"], "execution.iterations", minimum=1)
         average_start = _require_int(
             execution["average_strategy_start_iteration"],
@@ -516,9 +518,9 @@ def _parse_quality(value: object, player_count: int, execution_kind: str) -> dic
     quality = _exact_keys(value, {"profile_mode", "probe_manifest"}, "quality")
     profile_mode = quality["profile_mode"]
     reference = quality["probe_manifest"]
-    if execution_kind == "n9-boundary-sample":
+    if execution_kind in {"n9-boundary-sample", "a9-training"}:
         if profile_mode != "not-requested" or reference is not None:
-            raise ManifestError("N9 boundary 不能请求 profile 或 probe")
+            raise ManifestError("N9 执行类型不能请求 profile 或 probe")
     elif profile_mode not in {"full-chance", "not-requested"}:
         raise ManifestError("A6/A7 quality profile 模式不兼容")
     if reference is not None:
@@ -545,11 +547,15 @@ def _parse_budget(value: object, execution_kind: str) -> dict[str, object]:
     hard = _require_int(budget["rss_hard_limit_bytes"], "budget.rss_hard_limit_bytes", minimum=1)
     if warning >= hard:
         raise ManifestError("RSS 预警阈值必须小于硬停阈值")
-    expected_stages = (
-        ("training", "export", "profile", "probe", "measurement")
-        if execution_kind == "a6-a7-training"
-        else ("boundary", "measurement")
-    )
+    if execution_kind in {"a6-a7-training", "a9-training"}:
+        # 仅 N=6/7 的长期训练允许质量阶段，N=9 训练按三阶段冻结。
+        expected_stages = (
+            ("training", "export", "profile", "probe", "measurement")
+            if execution_kind == "a6-a7-training"
+            else ("training", "export", "measurement")
+        )
+    else:
+        expected_stages = ("boundary", "measurement")
     stages = _parse_stages(budget["stages"], expected_stages)
     return {
         "cpu_limit_milliseconds": _require_int(

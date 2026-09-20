@@ -194,7 +194,7 @@ def evaluate_manifested_plan(
     """仅按已验证实验计划执行 A6/A7 的完整 profile 与预注册 probe。"""
 
     if plan.manifest.execution_kind != "a6-a7-training":
-        raise EvaluationError("N9 boundary 不允许 profile 或 probe 评估")
+        raise EvaluationError("只有 A6/A7 训练计划允许 profile 或 probe 评估")
     if artifact.artifact.game.player_count != plan.manifest.player_count:
         raise EvaluationError("量化策略人数与 experiment manifest 不一致")
     if plan.manifest.profile_mode == "not-requested":

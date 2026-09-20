@@ -229,8 +229,6 @@ class SynchronousExternalSamplingMCCFR:
     def run_iteration(self, iteration: int) -> IterationTrace:
         """执行一个同步批次，所有 pass 结束后才写入 regret 和平均策略累计量。"""
 
-        if self.config.player_count == 9:
-            raise MCCFRError("N9 仅允许专用单次边界采样，不能执行训练 iteration")
         iteration = _require_positive_int(iteration, "iteration")
         if iteration != self._completed_iterations + 1:
             raise MCCFRError("iteration 必须按顺序从一开始执行")
@@ -264,8 +262,6 @@ class SynchronousExternalSamplingMCCFR:
     def completed_result(self) -> MCCFRResult:
         """仅在全部显式 iteration 完成后返回可导出的内存结果。"""
 
-        if self.config.player_count == 9:
-            raise MCCFRError("N9 边界采样不产生可导出的训练结果")
         if self._completed_iterations != self.config.iterations:
             raise MCCFRError("尚未完成全部 iteration，不能生成训练结果")
         return MCCFRResult(
@@ -474,8 +470,6 @@ def sample_n9_boundary(*, master_seed: int, traverser: int) -> N9BoundarySample:
 def train(config: MCCFRConfig) -> MCCFRResult:
     """从零开始执行显式配置的同步 MCCFR，避免复用跨调用状态。"""
 
-    if config.player_count == 9:
-        raise MCCFRError("N9 仅允许 sample_n9_boundary，不能执行长期训练")
     return SynchronousExternalSamplingMCCFR(config).train()
 
 

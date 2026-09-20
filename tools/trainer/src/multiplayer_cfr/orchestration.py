@@ -113,7 +113,7 @@ def run_manifested_experiment(
     artifact_root: str | Path,
     supervisor: SupervisorSession,
 ) -> ManifestedExperimentResult:
-    """按冻结计划顺序运行 A6/A7 或 N9 boundary，并仅写预声明工件。"""
+    """按冻结计划顺序运行长期训练或 N9 boundary，并仅写预声明工件。"""
 
     if not isinstance(plan, ExperimentPlan) or not isinstance(supervisor, SupervisorSession):
         raise OrchestrationError("实验只能接受已验证计划和外部监督器会话")
@@ -122,7 +122,7 @@ def run_manifested_experiment(
     manifest = plan.manifest
     if manifest.execution_kind == "n9-boundary-sample":
         return _run_n9(plan, ledger, supervisor)
-    return _run_a6_a7(plan, ledger, supervisor)
+    return _run_training(plan, ledger, supervisor)
 
 
 def _validate_runtime_code_identity(plan: ExperimentPlan, supervisor: SupervisorSession) -> None:
@@ -135,14 +135,14 @@ def _validate_runtime_code_identity(plan: ExperimentPlan, supervisor: Supervisor
         raise OrchestrationError("运行时代码身份与冻结 experiment manifest 不匹配")
 
 
-def _run_a6_a7(
+def _run_training(
     plan: ExperimentPlan,
     ledger: _ArtifactLedger,
     supervisor: SupervisorSession,
 ) -> ManifestedExperimentResult:
     config = plan.training_config
     if config is None:
-        raise OrchestrationError("A6/A7 计划缺少训练配置")
+        raise OrchestrationError("训练计划缺少训练配置")
     training = run_controlled_training(
         config,
         _run_limits(plan, "training"),
