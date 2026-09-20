@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import tempfile
+from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from fractions import Fraction
@@ -14,7 +15,14 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from .game import GAME_ID, GAME_VERSION, structure_counts, validate_player_count
+from .game import (
+    GAME_ID,
+    GAME_VERSION,
+    infoset_by_key,
+    infosets,
+    structure_counts,
+    validate_player_count,
+)
 
 MEASUREMENT_SCHEMA_VERSION = 1
 MEASUREMENT_RECORD_TYPE = "multiplayer-cfr-measurement"
@@ -128,6 +136,101 @@ def load_measurement(path: str | Path) -> MeasurementRecord:
         sha256=sha256(raw_bytes).hexdigest(),
         record_bytes=len(raw_bytes),
     )
+
+
+def audit_infoset_keys(player_count: int) -> tuple[str, ...]:
+    """返回该人数下参与跨 seed 比较的审计信息集键（全部信息集、不抽样）。"""
+
+    player_count = validate_player_count(player_count)
+    return tuple(spec.key for spec in infosets(player_count))
+
+
+def build_stability_payload(
+    *,
+    player_count: int,
+    strategies: Mapping[int, Mapping[str, Mapping[str, int]]],
+    probability_units: int,
+) -> dict[str, object]:
+    """在固定审计信息集集合上计算不同 seed 之间策略概率的最大 L1 距离。
+
+    只做纯计算：不读写文件、不调用任何训练或评估原语。参与比较的 seed 少于两个时拒绝，
+    因为单个 seed 不构成稳定性判定。概率单位由调用方显式给出，本模块不内建该常量，
+    以免与策略产物的单位形成第二事实源。
+    """
+
+    player_count = validate_player_count(player_count)
+    probability_units = _require_int(probability_units, "probability_units", minimum=1)
+    if not isinstance(strategies, Mapping):
+        raise MeasurementRecordError("跨 seed 策略集合必须是映射")
+
+    seeds: list[int] = []
+    for seed in strategies:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise MeasurementRecordError("seed 必须是整数")
+        seeds.append(seed)
+    seeds.sort()
+    if len(seeds) < 2:
+        raise MeasurementRecordError("跨 seed 稳定性至少需要两个 seed")
+
+    audit_keys = audit_infoset_keys(player_count)
+    expected_actions = {
+        key: tuple(action.value for action in spec.actions)
+        for key, spec in infoset_by_key(player_count).items()
+    }
+    units_by_seed = {
+        seed: _parse_strategy_units(
+            strategies[seed], audit_keys, expected_actions, probability_units
+        )
+        for seed in seeds
+    }
+
+    # 逐对 seed、逐个审计信息集取精确 L1 距离，并保留其中的最大值。
+    maximum = Fraction(0)
+    for position, left_seed in enumerate(seeds):
+        for right_seed in seeds[position + 1 :]:
+            for key in audit_keys:
+                left = units_by_seed[left_seed][key]
+                right = units_by_seed[right_seed][key]
+                distance = Fraction(
+                    sum(abs(a - b) for a, b in zip(left, right, strict=True)),
+                    probability_units,
+                )
+                if distance > maximum:
+                    maximum = distance
+
+    return {
+        "status": "measured",
+        "seed_set_sha256": sha256(_canonical_json_bytes({"seeds": seeds})).hexdigest(),
+        "audit_infosets_sha256": sha256(
+            _canonical_json_bytes({"infosets": list(audit_keys)})
+        ).hexdigest(),
+        "max_l1": RationalValue.from_fraction(maximum).as_payload(),
+    }
+
+
+def _parse_strategy_units(
+    strategy: object,
+    audit_keys: tuple[str, ...],
+    expected_actions: Mapping[str, tuple[str, ...]],
+    probability_units: int,
+) -> dict[str, tuple[int, ...]]:
+    """校验一个 seed 的策略恰好覆盖审计集与合法动作，并按动作规范顺序返回单位。"""
+
+    if not isinstance(strategy, Mapping) or set(strategy) != set(audit_keys):
+        raise MeasurementRecordError("策略必须恰好覆盖该人数的审计信息集")
+    parsed: dict[str, tuple[int, ...]] = {}
+    for key in audit_keys:
+        entry = strategy[key]
+        actions = expected_actions[key]
+        if not isinstance(entry, Mapping) or set(entry) != set(actions):
+            raise MeasurementRecordError("策略的动作集合必须与合法动作一致")
+        units = tuple(
+            _require_int(entry[action], "动作概率单位", minimum=0) for action in actions
+        )
+        if sum(units) != probability_units:
+            raise MeasurementRecordError("单个信息集的概率单位和不等于概率单位")
+        parsed[key] = units
+    return parsed
 
 
 def _validate_payload(value: object) -> dict[str, object]:
