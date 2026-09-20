@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "check:layout": "node scripts/check-seat-layout.mjs",
+    "check:layout:browser": "node scripts/run-acceptance.mjs"
   },
   "dependencies": {
     "vue": "^3.5.13"

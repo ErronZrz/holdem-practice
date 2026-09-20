@@ -8,14 +8,15 @@ from app.strategy.registry import UnknownStrategyError, resolve_identifier
 
 
 class CreateGameRequest(BaseModel):
-    """创建对局的请求。num_players 可大于 2（引擎按 N 人设计，界面默认 2）。
+    """创建对局的请求。产品支持 2–9 人（引擎自身按 N 人设计且不设上限，默认 2）。
 
+    人数上限只在这里落实：越界请求直接失败，不静默截断、不回退到默认值。
     大盲必须是偶数，小盲由大盲推导（= 大盲 / 2）；``target_hands`` 省略表示不限手数。
     ``small_blind`` / ``target_hands`` / ``bot_strategy`` 保留以兼容旧客户端，界面已不再提供这三项。
     ``bot_strategy`` 只接受受控注册表内的标识，旧值会被规范化到对应历史版本。
     """
 
-    num_players: int = Field(default=2, ge=2, le=10)
+    num_players: int = Field(default=2, ge=2, le=9)
     big_blind: int = Field(default=10, ge=2)
     starting_stack: int = Field(default=1000, ge=1)
     seed: int | None = None

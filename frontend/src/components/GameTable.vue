@@ -14,6 +14,13 @@ import { api } from '../api.js'
 import { actionText, distributionText, HAND_CATEGORY_CN, STREET_CN } from '../cards.js'
 import { copyText } from '../clipboard.js'
 import { referenceLimitationText, referenceScopeText, referenceText } from '../reviewText.js'
+import {
+  computeSeatLayout,
+  MAX_PLAYERS,
+  MIN_PLAYERS,
+  SEAT_ROW_GAP,
+  SEAT_ROW_HEIGHTS,
+} from '../seatLayout.js'
 import PlayingCard from './PlayingCard.vue'
 
 const emit = defineEmits(['navigate'])
@@ -22,6 +29,11 @@ const emit = defineEmits(['navigate'])
 
 const CONFIG_KEY = 'holdem.table.config'
 const SESSION_KEY = 'holdem.table.session'
+
+// 人数快捷项：单挑、常用人数与产品上限。
+const QUICK_PLAYER_COUNTS = [2, 6, 9]
+// 首次渲染时若无实测宽度，按设置区最大宽度下的牌桌宽度先算一版。
+const FALLBACK_FELT_WIDTH = 928
 
 function readStorage(key) {
   try {
@@ -60,7 +72,10 @@ function loadSavedConfig() {
     const numPlayers = Number(cfg?.num_players)
     const bigBlind = Number(cfg?.big_blind)
     const startingStack = Number(cfg?.starting_stack)
-    if (!Number.isInteger(numPlayers) || numPlayers < 2 || numPlayers > 10) return null
+    // 超过产品人数上限的历史配置不再自动恢复，回落到设置表单让用户重新选择。
+    if (!Number.isInteger(numPlayers) || numPlayers < MIN_PLAYERS || numPlayers > MAX_PLAYERS) {
+      return null
+    }
     if (!isEvenPositiveInt(bigBlind)) return null
     if (!Number.isInteger(startingStack) || startingStack < 1) return null
     return { num_players: numPlayers, big_blind: bigBlind, starting_stack: startingStack }
@@ -71,8 +86,12 @@ function loadSavedConfig() {
 
 // 设置表单校验：与大盲偶数、小盲推导的后端口径保持一致。
 function configErrorText(cfg) {
-  if (!Number.isInteger(cfg.num_players) || cfg.num_players < 2 || cfg.num_players > 10) {
-    return '玩家人数需为 2~10 的整数'
+  if (
+    !Number.isInteger(cfg.num_players)
+    || cfg.num_players < MIN_PLAYERS
+    || cfg.num_players > MAX_PLAYERS
+  ) {
+    return `玩家人数需为 ${MIN_PLAYERS}~${MAX_PLAYERS} 的整数`
   }
   if (!Number.isInteger(cfg.big_blind) || cfg.big_blind < 2) {
     return '大盲需为不小于 2 的整数'
@@ -98,6 +117,9 @@ const review = ref(null)
 const copiedHandId = ref('')
 const amountInput = ref(null)
 const amountError = ref('')
+// 牌桌元素的实测宽度：座位几何完全由它与人数据推导。
+const feltEl = ref(null)
+const feltWidth = ref(0)
 
 const form = reactive({
   num_players: 2,
@@ -112,6 +134,46 @@ const smallBlindPreview = computed(() =>
 
 const players = computed(() => (game.value ? game.value.players : []))
 const legal = computed(() => game.value?.legal_actions)
+
+// 座位几何只来自纯函数模块，组件不自行推算坐标，避免判定与渲染两套口径。
+const seatLayout = computed(() =>
+  computeSeatLayout(players.value.length, feltWidth.value || FALLBACK_FELT_WIDTH),
+)
+// 几何无可行解时显式提示，不静默重叠、也不隐藏座位。
+const layoutWarning = computed(() => players.value.length > 0 && !seatLayout.value.fits)
+
+// 行高只由几何模块给出，样式侧全部引用这些变量，避免判定与渲染出现两套数字。
+const feltStyle = computed(() => ({
+  height: `${seatLayout.value.feltHeight}px`,
+  '--seat-base-width': `${seatLayout.value.baseBox.width}px`,
+  '--seat-base-height': `${seatLayout.value.baseBox.height}px`,
+  '--seat-scale': seatLayout.value.scale,
+  '--seat-row-gap': `${SEAT_ROW_GAP}px`,
+  '--seat-row-markers': `${SEAT_ROW_HEIGHTS.markers}px`,
+  '--seat-row-cards': `${SEAT_ROW_HEIGHTS.cards}px`,
+  '--seat-row-name': `${SEAT_ROW_HEIGHTS.name}px`,
+  '--seat-row-stack': `${SEAT_ROW_HEIGHTS.stack}px`,
+  '--seat-row-status': `${SEAT_ROW_HEIGHTS.status}px`,
+  '--seat-row-showdown': seatLayout.value.inlineShowdown
+    ? `${SEAT_ROW_HEIGHTS.showdownInline}px`
+    : `${SEAT_ROW_HEIGHTS.showdownCompact}px`,
+}))
+
+// 摊牌明细在多人桌折叠为一行，五张明细改在控制面板列出，信息不丢失。
+const showdownLines = computed(() => {
+  const hands = game.value?.showdown_hands
+  if (!hands) return []
+  return Object.keys(hands)
+    .map((seat) => Number(seat))
+    .sort((a, b) => a - b)
+    .map((seat) => ({
+      seat,
+      name: playerNameOf(seat),
+      category: HAND_CATEGORY_CN[hands[seat].category] || hands[seat].category,
+      cards: hands[seat].cards.join(' '),
+      net: netOf(seat),
+    }))
+})
 
 const streetLabel = computed(() => STREET_CN[game.value?.street] || game.value?.street || '')
 
@@ -165,13 +227,11 @@ function resultText() {
   return `本手净 ${humanNet >= 0 ? '+' : ''}${humanNet}`
 }
 
-// 座位环绕牌桌的椭圆定位：座位 0（真人）固定在底部，其余顺时针分布。
+// 座位定位：坐标由纯几何模块给出（座位 0 在底部，其余顺时针分布），此处只转成样式。
 function seatStyle(seat) {
-  const n = game.value.players.length
-  const angle = Math.PI / 2 + seat * ((2 * Math.PI) / n)
-  const x = 50 + 40 * Math.cos(angle)
-  const y = 50 + 34 * Math.sin(angle)
-  return { left: `${x}%`, top: `${y}%` }
+  const placed = seatLayout.value.seats.find((item) => item.seat === seat)
+  if (!placed) return { display: 'none' }
+  return { left: `${placed.left}px`, top: `${placed.top}px` }
 }
 
 // ------------------------------------------------------------------ 轮询推进 Bot
@@ -541,6 +601,39 @@ watch(betAmount, () => {
   amountError.value = ''
 })
 
+// 牌桌宽度变化会改变座位几何，因此以实测宽度为准重算（窗口缩放、窄屏都走同一条路径）。
+let feltObserver = null
+
+function observeFelt() {
+  if (feltObserver) {
+    feltObserver.disconnect()
+    feltObserver = null
+  }
+  if (!feltEl.value || typeof ResizeObserver === 'undefined') return
+  feltObserver = new ResizeObserver((entries) => {
+    const entry = entries[0]
+    if (!entry) return
+    const width = entry.contentRect.width
+    if (Math.abs(width - feltWidth.value) > 0.5) feltWidth.value = width
+  })
+  feltObserver.observe(feltEl.value)
+}
+
+function stopObservingFelt() {
+  if (!feltObserver) return
+  feltObserver.disconnect()
+  feltObserver = null
+}
+
+watch(
+  () => !!game.value,
+  async (hasGame) => {
+    await nextTick()
+    if (hasGame) observeFelt()
+    else stopObservingFelt()
+  },
+)
+
 // 组件被 KeepAlive 缓存，切到其它页时需摘掉键盘监听，避免误触发牌桌动作。
 onMounted(() => {
   window.addEventListener('keydown', onKeydown)
@@ -550,14 +643,17 @@ onMounted(() => {
 onActivated(() => {
   window.addEventListener('keydown', onKeydown)
   maybePoll()
+  observeFelt()
 })
 onDeactivated(() => {
   window.removeEventListener('keydown', onKeydown)
   stopPolling()
+  stopObservingFelt()
 })
 onUnmounted(() => {
   window.removeEventListener('keydown', onKeydown)
   stopPolling()
+  stopObservingFelt()
 })
 </script>
 
@@ -571,23 +667,23 @@ onUnmounted(() => {
       <h2>开始新对局</h2>
       <div class="form-grid">
         <label>
-          玩家人数
+          玩家人数（{{ MIN_PLAYERS }}–{{ MAX_PLAYERS }}）
           <div class="player-count">
             <button
+              v-for="count in QUICK_PLAYER_COUNTS"
+              :key="count"
               type="button"
-              :class="{ active: form.num_players === 2 }"
-              @click="form.num_players = 2"
+              :class="{ active: form.num_players === count }"
+              @click="form.num_players = count"
             >
-              2 人
+              {{ count }} 人
             </button>
-            <button
-              type="button"
-              :class="{ active: form.num_players === 5 }"
-              @click="form.num_players = 5"
-            >
-              5 人
-            </button>
-            <input v-model.number="form.num_players" type="number" min="2" max="10" />
+            <input
+              v-model.number="form.num_players"
+              type="number"
+              :min="MIN_PLAYERS"
+              :max="MAX_PLAYERS"
+            />
           </div>
         </label>
         <label>
@@ -600,7 +696,7 @@ onUnmounted(() => {
         </label>
       </div>
       <p class="hint">
-        小盲自动为大盲的一半（{{ smallBlindPreview }}）；真人固定坐 0 号位，其余座位由 Bot 驱动；不限手数，可一直练习。
+        支持 {{ MIN_PLAYERS }}–{{ MAX_PLAYERS }} 人；小盲自动为大盲的一半（{{ smallBlindPreview }}）；真人固定坐 0 号位，其余座位由 Bot 驱动；不限手数，可一直练习。
       </p>
       <button class="primary" :disabled="busy" @click="createGame">开始对局</button>
     </div>
@@ -619,7 +715,7 @@ onUnmounted(() => {
         <button class="quit" @click="exitGame">退出对局</button>
       </div>
 
-      <div class="felt">
+      <div ref="feltEl" class="felt" :style="feltStyle">
         <div class="board-center">
           <div class="board">
             <PlayingCard v-for="(c, i) in game.board" :key="i" :code="c" />
@@ -632,6 +728,7 @@ onUnmounted(() => {
           v-for="p in players"
           :key="p.seat"
           class="seat"
+          :data-seat="p.seat"
           :class="{ 'is-active': game.current_seat === p.seat && !game.hand_over }"
           :style="seatStyle(p.seat)"
         >
@@ -646,24 +743,32 @@ onUnmounted(() => {
           </div>
           <div class="name">{{ p.name }}{{ p.is_human ? '（你）' : '' }}</div>
           <div class="stack">筹码 {{ p.stack }}</div>
-          <div v-if="p.folded" class="status">已弃牌</div>
-          <div v-else-if="p.all_in" class="status">全下</div>
-          <div v-if="p.street_bet" class="bet-chip">+{{ p.street_bet }}</div>
-          <div v-if="showdownHand(p.seat)" class="showdown-hand">
-            <span class="cat">{{ HAND_CATEGORY_CN[showdownHand(p.seat).category] }}</span>
-            <div class="cards-small">
-              <PlayingCard
-                v-for="(c, i) in showdownHand(p.seat).cards"
-                :key="i"
-                :code="c"
-                small
-              />
-            </div>
+          <!-- 状态与下注标记共用一行：座位盒高度不随座位状态变化，几何判定才有意义。 -->
+          <div class="status-row">
+            <span v-if="p.folded" class="status">已弃牌</span>
+            <span v-else-if="p.all_in" class="status">全下</span>
+            <span v-if="p.street_bet" class="bet-chip">+{{ p.street_bet }}</span>
+          </div>
+          <div class="showdown">
+            <template v-if="showdownHand(p.seat)">
+              <span class="cat">{{ HAND_CATEGORY_CN[showdownHand(p.seat).category] }}</span>
+              <div v-if="seatLayout.inlineShowdown" class="cards-small">
+                <PlayingCard
+                  v-for="(c, i) in showdownHand(p.seat).cards"
+                  :key="i"
+                  :code="c"
+                  small
+                />
+              </div>
+            </template>
           </div>
         </div>
       </div>
 
       <div class="controls panel">
+        <div v-if="layoutWarning" class="layout-warning">
+          当前窗口过窄，无法为 {{ players.length }} 人桌排布不重叠的座位；请放宽窗口宽度或调小页面缩放。
+        </div>
         <div v-if="busy" class="thinking">处理中…</div>
 
         <template v-else-if="game.is_human_turn && !game.hand_over">
@@ -714,6 +819,11 @@ onUnmounted(() => {
               <span v-if="pr.winners.length > 1" class="muted">
                 （{{ pr.winners.map((w) => `${playerNameOf(w)} +${pr.shares[w]}`).join('，') }}）
               </span>
+            </div>
+          </div>
+          <div v-if="!seatLayout.inlineShowdown && showdownLines.length" class="showdown-lines">
+            <div v-for="line in showdownLines" :key="line.seat" class="showdown-line">
+              {{ line.name }} {{ line.category }}：{{ line.cards }}
             </div>
           </div>
           <button v-if="!game.session_finished" class="primary" @click="nextHand">
@@ -901,7 +1011,6 @@ onUnmounted(() => {
   position: relative;
   background: radial-gradient(circle at 50% 40%, var(--felt), var(--felt-dark));
   border-radius: 16px;
-  min-height: 460px;
   color: #e8f5ec;
 }
 
@@ -934,14 +1043,17 @@ onUnmounted(() => {
   font-weight: 600;
 }
 
+/* 座位盒尺寸与整体缩放全部来自几何模块的 CSS 变量：渲染盒必须等于模型盒。 */
 .seat {
   position: absolute;
-  transform: translate(-50%, -50%);
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
-  min-width: 110px;
+  gap: var(--seat-row-gap, 4px);
+  width: var(--seat-base-width, 110px);
+  height: var(--seat-base-height, 178px);
+  transform: scale(var(--seat-scale, 1));
+  transform-origin: center;
 }
 
 .seat.is-active .name {
@@ -951,16 +1063,30 @@ onUnmounted(() => {
 .seat .cards {
   display: flex;
   gap: 4px;
-  min-height: 54px;
+  height: var(--seat-row-cards, 54px);
 }
 
 .name {
+  height: var(--seat-row-name, 22px);
+  font-size: 14px;
   font-weight: 600;
+  line-height: var(--seat-row-name, 22px);
+  white-space: nowrap;
 }
 
 .stack {
+  height: var(--seat-row-stack, 20px);
   font-size: 13px;
+  line-height: var(--seat-row-stack, 20px);
   opacity: 0.9;
+}
+
+/* 状态与下注标记同处一行，保证座位盒高度不随状态变化。 */
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: var(--seat-row-status, 22px);
 }
 
 .status {
@@ -975,29 +1101,30 @@ onUnmounted(() => {
   padding: 2px 8px;
 }
 
-.showdown-hand {
+.showdown {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 2px;
+  height: var(--seat-row-showdown, 62px);
   font-size: 12px;
   background: rgba(0, 0, 0, 0.2);
   border-radius: 8px;
   padding: 4px 8px;
 }
 
-.showdown-hand .cat {
+.showdown .cat {
   font-weight: 700;
   color: #fde68a;
 }
 
-.showdown-hand .cards-small {
+.showdown .cards-small {
   display: flex;
   gap: 3px;
 }
 
 .markers {
-  min-height: 18px;
+  height: var(--seat-row-markers, 18px);
 }
 
 .marker {
@@ -1094,6 +1221,25 @@ onUnmounted(() => {
 
 .pot-result {
   color: #334155;
+}
+
+/* 多人桌折叠的摊牌明细：五张牌改在这里列出，信息不丢失。 */
+.showdown-lines {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: #334155;
+  text-align: left;
+}
+
+.layout-warning {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #fef3c7;
+  color: #b45309;
+  font-size: 13px;
 }
 
 .thinking {
