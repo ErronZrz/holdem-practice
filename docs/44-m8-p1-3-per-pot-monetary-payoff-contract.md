@@ -6,6 +6,8 @@
 >
 > 本文**不实施任何代码**：只完成 `docs/35` §4.2 中 **P1-3** 一项的规格冻结与设计岔路裁定。代码与测试在随后一次提交中落地，回执见 `docs/44a`。
 >
+> **实施期修订（原因与回执见 `docs/44a`）**：§4.5 / §4.6 / §4.7 / §4.9 中「范围来源委托范围假设模块校验」改为「**声明常量 + 测试锁定**」。原因是 P1-2 的冻结回归测试把 `app/` 内任何引用 `range_assumption` 的文件判为「生产调用方」，而 P1-2 自身对 P0-5 采用的正是「声明常量 + 测试锁定」这一做法；本轮沿用同一约定，不改动 P1-2 的既有测试与 `docs/43` / `docs/43a`。
+>
 > **本文件不产生任何策略、质量或资源证据**；未新建冻结 campaign、未追加 seed、未重试任何已消耗 authorization、未做任何云端操作。
 
 ## 1. 授权范围与设计岔路裁定
@@ -198,8 +200,8 @@ POT_EV_DEFAULT_SCENARIO = POT_EV_SCENARIO_CHECK_CALL
 | 2 | `basis` | `str` | 口径基准（`per-layer-eligible-shared-runout`） |
 | 3 | `scenario_identifier` | `str` | 生效的受控情景标识（σ） |
 | 4 | `scenario_description` | `str` | 该情景的显式描述 |
-| 5 | `range_profile_identifier` | `str` | 范围来源：P1-2 的受控 profile 标识（**声明性引用**） |
-| 6 | `range_source` | `str` | 范围来源标注（与 profile 一致） |
+| 5 | `range_profile_identifier` | `str` | 范围来源标识（`name@version` 形式；取值与 P1-2 的受控 profile 标识一致，由测试锁定） |
+| 6 | `range_source` | `str` | 范围来源标注（受控常量：只允许「声明的模型假设」） |
 | 7 | `player_count` | `int` | `N`（2–9，透传自资格投影） |
 | 8 | `caller_seat` | `int` | 当前行动者的**绝对 seat**（透传自资格投影） |
 | 9 | `call_amount` | `int` | 完整差额 `C`：**仅作参照**，不进入任何收益口径 |
@@ -231,13 +233,13 @@ POT_EV_DEFAULT_SCENARIO = POT_EV_SCENARIO_CHECK_CALL
 
 | 异常 | 含义 | 触发条件 |
 |---|---|---|
-| `PotEvContractError` | **契约违规**（结构性非法输入） | `projection` 不是 `CandidateCallProjection`；`call_amount <= 0`；`call_amount < actual_call_amount`；`player_count < 2`；`caller_seat` 越界；`layers` 为空；层序不连续或层金额与投入不一致 |
+| `PotEvContractError` | **契约违规**（结构性非法输入） | `projection` 不是 `CandidateCallProjection`；`call_amount <= 0`；`call_amount < actual_call_amount`；`player_count < 2`；`caller_seat` 越界；`layers` 为空；层序不连续或层金额与投入不一致；`range_profile_identifier` 不是 `name@version` 形式 |
 | `PotEvEncodingError` | **投影不完整或不可编码** | 层内 `eligible_seats ⊄ contributor_seats`；`kind` 不在四值内；`disposition` 与 `kind` 不一致；`certain_recovery` 与 `disposition` 不一致；`caller_seat` 不在任何层 |
 | `UnknownScenarioError` | **情景标识未知或版本不受支持** | `scenario_identifier` 不在受控闭集内（含未知版本与历史版本） |
 
 基类为 `PotEvError(ValueError)`；三个子类**互不继承**。
 
-**范围来源的校验委托 P1-2**：`range_profile_identifier` 交由 `range_assumption.profile_for()` 校验，因此未登记标识抛 P1-2 已定义的 `UnknownRangeProfileError`，**不另造第二套**范围标识语义。
+**范围来源只作声明性引用**：`range_profile_identifier` 只校验 `name@version` **形式**，其取值与 P1-2 的受控 profile 标识一致，由**一条测试锁定**；本模块**不 import** `range_assumption`（避免与其「无生产调用方」的冻结约定冲突，沿用 P1-2 对 P0-5 的同一做法），也**不复制**范围目录。因此本模块**不**对「形式合法但未登记」的标识做运行时拒绝——该一致性由测试锁定，是本轮**被声明的边界**，不是静默回退。
 
 **禁止静默回退**：任何未知、缺失或不可编码的输入都不得被当作「已组合」处理，也不得回落到默认情景、默认层序或补零后仍声称构造成功。
 
@@ -246,7 +248,7 @@ POT_EV_DEFAULT_SCENARIO = POT_EV_SCENARIO_CHECK_CALL
 1. **座位口径沿用绝对 seat**：本模块的输入是 `CandidateCallProjection`，其 `caller_seat` / `participants` / 各层座位均为**引擎绝对 seat**。P1-1 / P1-2 的相对座位口径**不进入**本模块；本模块**不提供**第二套相对化换算，也不与 P1-1 / P1-2 的座位字段混用（避免两处各写一份换算）。
 2. **不得把绝对 seat 当作牌理特征输出**：本契约的产物是**收益口径**，不进入任何 CFR 信息集键；文档与代码都必须如此表述。若后续要与 P1-1 / P1-2 联动，由调用方在两套口径之间自行换算，本模块不承担该职责。
 3. 本模块**不接收** `board` / `pot` / `stack` / `hole_cards` / 任何真实底牌 / 运行中 seed，因此**在结构上**无法读取对手暗牌与未来公共牌。
-4. 本模块**不 import** `app.poker.equity` / `app.poker.engine` / `app.analysis` / `app.storage` / `app.llm` / `heuristic`；只 import `app.poker.pot_projection` 的**模型类型与枚举**（只读引用）与 `app.strategy.range_assumption` 的**受控 profile 入口**。
+4. 本模块**不 import** `app.poker.equity` / `app.poker.engine` / `app.analysis` / `app.storage` / `app.llm` / `heuristic`；只 import `app.poker.pot_projection` 的**模型类型与枚举**（只读引用）。对 P1-2 的范围来源只作**声明性引用**（受控常量 + 测试锁定），**不** import 该模块。
 
 ### 4.8 局限声明（冻结，必须齐备）
 
@@ -277,7 +279,7 @@ POT_EV_DEFAULT_SCENARIO = POT_EV_SCENARIO_CHECK_CALL
 | C10 | 不读运行中 seed | 入口无 `seed` 参数；字段集中不存在 `seed` |
 | C11 | 不写回 `history_json` | 模块不持有引擎引用、不写任何存储；结果为纯值对象，输入不被改写 |
 | C12 | 不改动既有 `call_ev` 与 `equity()` 语义 | `analysis/` 与 `poker/equity.py` 零改动；`heuristic.py` 决策语义零改动 |
-| C13 | 与 P1-2 的版本化对齐 | `range_profile_identifier` 取自 P1-2 的受控目录；未登记标识明确失败 |
+| C13 | 与 P1-2 的版本化对齐 | `range_profile_identifier` 与 P1-2 的受控 profile 标识一致并由测试锁定；`range_source` 只允许声明式假设；非法形式明确失败 |
 | C14 | 无生产调用方 | 模块不 import `heuristic` / `equity` / `analysis` / `storage` / `api` / `frontend`；对外响应与缓存键不变 |
 
 ## 5. 版本影响与兼容性（预期）
