@@ -7,6 +7,7 @@ from multiplayer_cfr.control import RunLimits, run_controlled_training, run_n9_b
 from multiplayer_cfr.experiment_record import (
     EXPERIMENT_RECORD_SCHEMA_VERSION,
     EXPERIMENT_RECORD_TYPE,
+    LEGACY_EXPERIMENT_RECORD_SCHEMA_VERSION,
     MAX_RATIONAL_DIGITS,
     ExperimentRecordError,
     SupervisorIdentity,
@@ -274,6 +275,12 @@ def _synthetic_child_payload(*, numerator: str) -> dict[str, object]:
             "probability_units": PROBABILITY_UNITS,
         },
         "probes": None,
+        "stability": {
+            "status": "not-requested",
+            "seed_set_sha256": None,
+            "audit_infosets_sha256": None,
+            "max_l1": None,
+        },
         "diagnostics": {
             "average_strategy_start_iteration": 1,
             "coverage": [],
@@ -309,3 +316,41 @@ def test_record_rejects_exact_rationals_beyond_the_dedicated_bound() -> None:
 
     with pytest.raises(ExperimentRecordError):
         parse_manifested_measurement_payload(_synthetic_child_payload(numerator=numerator))
+
+
+def test_current_version_declares_unrequested_stability() -> None:
+    payload = _synthetic_child_payload(numerator="1")
+
+    assert payload["schema_version"] == EXPERIMENT_RECORD_SCHEMA_VERSION
+    assert payload["stability"] == {
+        "status": "not-requested",
+        "seed_set_sha256": None,
+        "audit_infosets_sha256": None,
+        "max_l1": None,
+    }
+
+
+def test_legacy_payload_without_stability_section_is_still_accepted() -> None:
+    current = _synthetic_child_payload(numerator="1")
+    legacy = {key: value for key, value in current.items() if key != "stability"}
+    legacy["schema_version"] = LEGACY_EXPERIMENT_RECORD_SCHEMA_VERSION
+
+    record = parse_manifested_measurement_payload(legacy)
+
+    assert "stability" not in record.payload
+
+
+def test_record_rejects_an_incompatible_stability_section() -> None:
+    payload = _synthetic_child_payload(numerator="1")
+    payload["stability"] = {"status": "measured"}
+
+    with pytest.raises(ExperimentRecordError):
+        parse_manifested_measurement_payload(payload)
+
+
+def test_record_rejects_a_stability_section_on_the_legacy_version() -> None:
+    payload = _synthetic_child_payload(numerator="1")
+    payload["schema_version"] = LEGACY_EXPERIMENT_RECORD_SCHEMA_VERSION
+
+    with pytest.raises(ExperimentRecordError):
+        parse_manifested_measurement_payload(payload)

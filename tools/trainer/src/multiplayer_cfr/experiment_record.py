@@ -12,6 +12,7 @@ from typing import Any
 from .control import ControlledTrainingResult, N9BoundaryResult
 from .evaluation import ManifestedEvaluation, ProbeEvaluation, ProfileEvaluation
 from .manifest import EVALUATOR_ID, EVALUATOR_VERSION, ExperimentPlan
+from .measurement import MeasurementRecordError, validate_stability
 from .policy import ARTIFACT_TYPE, QuantizedStrategyArtifact
 from .policy import SCHEMA_VERSION as STRATEGY_SCHEMA_VERSION
 from .safeio import (
@@ -24,8 +25,27 @@ from .safeio import (
 )
 
 EXPERIMENT_RECORD_TYPE = "multiplayer-cfr-manifested-measurement"
-EXPERIMENT_RECORD_SCHEMA_VERSION = 1
+# 当前版本新增 stability 段；读取端仍接受不含该段的历史版本，避免已封存记录失效。
+EXPERIMENT_RECORD_SCHEMA_VERSION = 2
+LEGACY_EXPERIMENT_RECORD_SCHEMA_VERSION = 1
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}")
+
+# 当前版本的顶层字段集合；历史版本在此基础上少一个 stability 段。
+_TOP_LEVEL_FIELDS = {
+    "schema_version",
+    "record_type",
+    "experiment_manifest",
+    "game",
+    "execution",
+    "supervisor",
+    "strategy",
+    "profile",
+    "probes",
+    "stability",
+    "diagnostics",
+    "resources",
+}
+_LEGACY_TOP_LEVEL_FIELDS = _TOP_LEVEL_FIELDS - {"stability"}
 
 # 精确有理数的位数只受规则树深度约束：每个动作的概率分母整除 10^12，单条历史至多
 # 2N-1 个动作，因此 N=9 的分母理论上界也远小于该值。它不适用标识符字段的短上限。
@@ -119,6 +139,7 @@ def build_manifested_measurement_record(
         "strategy": strategy_identity_payload(artifact),
         "profile": _profile_payload(evaluation.profile if evaluation is not None else None),
         "probes": _probes_payload(evaluation.probes if evaluation is not None else None),
+        "stability": _not_requested_stability(),
         "diagnostics": diagnostics,
         "resources": resources,
     }
@@ -395,6 +416,17 @@ def _probes_payload(probes: ProbeEvaluation | None) -> dict[str, object] | None:
     }
 
 
+def _not_requested_stability() -> dict[str, object]:
+    """单条 experiment 只有一个 seed，因此跨 seed 稳定性在此恒为未请求。"""
+
+    return {
+        "status": "not-requested",
+        "seed_set_sha256": None,
+        "audit_infosets_sha256": None,
+        "max_l1": None,
+    }
+
+
 def _rational_payload(value: Fraction) -> dict[str, str]:
     return {"numerator": str(value.numerator), "denominator": str(value.denominator)}
 
@@ -408,24 +440,19 @@ def _milli(value: float) -> int:
 
 
 def _validate_payload(value: object) -> None:
-    expected = {
-        "schema_version",
-        "record_type",
-        "experiment_manifest",
-        "game",
-        "execution",
-        "supervisor",
-        "strategy",
-        "profile",
-        "probes",
-        "diagnostics",
-        "resources",
-    }
+    if not isinstance(value, dict):
+        raise ExperimentRecordError("manifest 驱动测量记录字段不匹配")
+    version = value.get("schema_version")
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise ExperimentRecordError("manifest 驱动测量记录版本不兼容")
+    if version == LEGACY_EXPERIMENT_RECORD_SCHEMA_VERSION:
+        expected = _LEGACY_TOP_LEVEL_FIELDS
+    elif version == EXPERIMENT_RECORD_SCHEMA_VERSION:
+        expected = _TOP_LEVEL_FIELDS
+    else:
+        raise ExperimentRecordError("manifest 驱动测量记录版本不兼容")
     record = _exact_mapping(value, expected, "manifest 驱动测量记录")
-    if (
-        record["schema_version"] != EXPERIMENT_RECORD_SCHEMA_VERSION
-        or record["record_type"] != EXPERIMENT_RECORD_TYPE
-    ):
+    if record["record_type"] != EXPERIMENT_RECORD_TYPE:
         raise ExperimentRecordError("manifest 驱动测量记录版本不兼容")
     player_count = _validate_game_payload(record["game"])
     _validate_identity_payload(record["experiment_manifest"], "experiment manifest")
@@ -437,6 +464,11 @@ def _validate_payload(value: object) -> None:
         record["execution"], record["strategy"], record["profile"], record["probes"]
     )
     _validate_resource_payload(record["resources"], record["supervisor"])
+    if version == EXPERIMENT_RECORD_SCHEMA_VERSION:
+        try:
+            validate_stability(record["stability"])
+        except MeasurementRecordError as error:
+            raise ExperimentRecordError("测量记录的 stability 段不兼容") from error
 
 
 def _exact_mapping(value: object, expected: set[str], label: str) -> dict[str, object]:

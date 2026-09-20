@@ -7,7 +7,7 @@ import os
 import re
 import stat
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from fractions import Fraction
@@ -33,6 +33,9 @@ _MAX_TEXT_LENGTH = 256
 # 精确有理数的位数由规则树深度决定，而非标识符长度：每个动作的概率分母整除 10^12，
 # 单条历史至多 2N-1 个动作，因此理论上界随人数增长，而标识符的短上限并不适用。
 MAX_RATIONAL_DIGITS = 4_096
+
+# stability 段的字段集合；该 schema 的唯一校验入口是本模块的 validate_stability()。
+STABILITY_FIELDS = ("status", "seed_set_sha256", "audit_infosets_sha256", "max_l1")
 
 _TOP_LEVEL_FIELDS = {
     "schema_version",
@@ -145,6 +148,25 @@ def audit_infoset_keys(player_count: int) -> tuple[str, ...]:
     return tuple(spec.key for spec in infosets(player_count))
 
 
+def audit_infosets_sha256(player_count: int) -> str:
+    """审计信息集集合的内容身份，用于跨记录交叉核对。"""
+
+    keys = list(audit_infoset_keys(player_count))
+    return sha256(_canonical_json_bytes({"infosets": keys})).hexdigest()
+
+
+def seed_set_sha256(seeds: Sequence[int]) -> str:
+    """参与比较的 seed 集合的内容身份；升序后取规范 JSON 摘要。"""
+
+    ordered: list[int] = []
+    for seed in seeds:
+        if isinstance(seed, bool) or not isinstance(seed, int):
+            raise MeasurementRecordError("seed 必须是整数")
+        ordered.append(seed)
+    ordered.sort()
+    return sha256(_canonical_json_bytes({"seeds": ordered})).hexdigest()
+
+
 def build_stability_payload(
     *,
     player_count: int,
@@ -200,10 +222,8 @@ def build_stability_payload(
 
     return {
         "status": "measured",
-        "seed_set_sha256": sha256(_canonical_json_bytes({"seeds": seeds})).hexdigest(),
-        "audit_infosets_sha256": sha256(
-            _canonical_json_bytes({"infosets": list(audit_keys)})
-        ).hexdigest(),
+        "seed_set_sha256": seed_set_sha256(seeds),
+        "audit_infosets_sha256": audit_infosets_sha256(player_count),
         "max_l1": RationalValue.from_fraction(maximum).as_payload(),
     }
 
@@ -231,6 +251,12 @@ def _parse_strategy_units(
             raise MeasurementRecordError("单个信息集的概率单位和不等于概率单位")
         parsed[key] = units
     return parsed
+
+
+def validate_stability(value: object) -> dict[str, object]:
+    """校验并规范化 stability 段；该 schema 的唯一校验入口。"""
+
+    return _validate_stability(value)
 
 
 def _validate_payload(value: object) -> dict[str, object]:
@@ -544,7 +570,7 @@ def _validate_importance_weights(value: object, player_count: int) -> list[dict[
 def _validate_stability(value: object) -> dict[str, object]:
     stability = _expect_exact_keys(
         value,
-        {"status", "seed_set_sha256", "audit_infosets_sha256", "max_l1"},
+        set(STABILITY_FIELDS),
         "stability",
     )
     status = stability["status"]
