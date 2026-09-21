@@ -38,7 +38,14 @@ from app.strategy.mixed_context import (
     mixed_state,
     require_mixed_input,
 )
-from app.strategy.mixed_policy import HandMode, MixedStyle
+from app.strategy.mixed_policy import (
+    HAND_MODE_ROLL_BOUNDS,
+    MIXED_DISTRIBUTION_SCHEMA_VERSION,
+    MIXED_DISTRIBUTION_UNITS,
+    STYLE_PARAMETERS,
+    HandMode,
+    MixedStyle,
+)
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER,
     MixedLocalStrategy,
@@ -58,10 +65,12 @@ from .mixed_bot_states import (
     MixedFixtureManifest,
     MixedNodeFixture,
     apply_node,
+    build_frozen_manifest,
+    manifest_json,
 )
 
 MIXED_VALIDATION_SCHEMA_VERSION = "mixed-validation.v1"
-# 验证身份独立于候选 A 的 campaign / evaluator，不是任何既有授权的续用。
+# 验证身份独立于任何既有评测身份，不是任何既有运行许可的续用。
 MIXED_VALIDATION_IDENTITY = "mixed-local-v1-validation"
 # 复用既有主种子数值，但必须重新获得产品验证运行许可。
 MIXED_MAIN_SEEDS: tuple[int, ...] = (1215, 20260918, 3311, 7926)
@@ -74,6 +83,8 @@ MIXED_HAND_MODES: tuple[HandMode, ...] = (
 MIXED_DIRECT_DISTRIBUTION_COUNT = MIXED_APPLICABLE_NODE_COUNT * len(MixedStyle) * len(
     MIXED_HAND_MODES
 )
+# 分布指标的有界冒烟上限：默认只允许少量节点，完整矩阵须经阶段许可开启。
+BEHAVIOR_SMOKE_NODE_LIMIT = 8
 
 # 正式成本矩阵：逐人数 10000 次决策，36 格（街 × 风格 × 深度）按顺序分配。
 COST_DECISIONS_PER_PLAYER_COUNT = 10_000
@@ -126,6 +137,93 @@ MIXED_VALIDATION_LIMITATIONS: tuple[str, ...] = (
 
 class MixedValidationAuthorizationError(RuntimeError):
     """缺少显式阶段许可、清单或前置回执时抛出；不做任何静默运行。"""
+
+
+# ------------------------------------------------------------------ 清单机械明细
+
+MIXED_SCENARIO_ORDER = (
+    "按配方类别顺序 × 适用人数升序；成本矩阵每格在该街的可用节点间顺序轮换"
+)
+MIXED_SEED_DERIVATION = (
+    "牌堆流消息为 (deck, 人数, 轮换号)，不含焦点 arm 或人格；"
+    "焦点流消息为 (focus, 风格, 人数, 轮换号)，旧 arm 不使用该流"
+)
+MIXED_STAGE_PLAN: tuple[str, ...] = (
+    "阶段 A：成本矩阵逐人数 36 格各取首个样本，"
+    f"合计 {STAGE_A_COST_SAMPLES} 次；补充场景首样本 {STAGE_A_SUPPLEMENTARY_SAMPLES} 次；"
+    f"对抗对照 {STAGE_A_ADVERSARIAL_HANDS} 手（单一主种子、单一风格、单一轮换）",
+    f"阶段 B：成本矩阵补足逐人数 {COST_DECISIONS_PER_PLAYER_COUNT} 次、"
+    f"补充场景 {SUPPLEMENTARY_TOTAL_SAMPLES} 次、对抗对照 {ADVERSARIAL_HANDS} 手；"
+    "A 样本不重跑、不替换",
+)
+MIXED_RESOURCE_ENVELOPE: tuple[str, ...] = (
+    f"阶段 A：wall/CPU 各不超过 {STAGE_A_WALL_SECONDS:.0f} 秒，单进程 RSS ≤ {STAGE_RSS_BYTES} 字节",
+    f"阶段 A+B：累计 wall/CPU 各不超过 {STAGE_AB_WALL_SECONDS:.0f} 秒，"
+    f"RSS ≤ {STAGE_RSS_BYTES} 字节，保留文件 ≤ {STAGE_OUTPUT_BYTES} 字节，单 CPU 进程、不并行",
+)
+MIXED_STOP_CONDITIONS: tuple[str, ...] = (
+    "任何合法性、信息边界或摘要一致性错误：立即停止该轮，保留已完成计数与错误，其余记为 not-run",
+    "新 Bot 的 decision_path ≥ 100ms：立即标为性能失败并暂停后续阶段，不删样本、不自动复测",
+    "预算、动作上限、输出大小或 RSS 任一触发：报告 stopped-*，不声称完成、不自行扩容",
+    "达到对手动作上限 256 的手：截断、不补终局、不估算输赢，并按人数/对手/arm 报告",
+)
+MIXED_REPORT_FORMAT = (
+    "mixed-validation.v1：字段闭集，输出目录只创建不覆盖，存在同名文件即拒绝运行"
+)
+
+
+def config_digest() -> str:
+    """策略配置摘要：只覆盖固定的规则参数表与量化口径，不含任何运行时状态。"""
+    payload = {
+        "distribution_schema": MIXED_DISTRIBUTION_SCHEMA_VERSION,
+        "distribution_units": MIXED_DISTRIBUTION_UNITS,
+        "hand_mode_bounds": list(HAND_MODE_ROLL_BOUNDS),
+        "styles": {
+            style.value: {
+                "looseness": STYLE_PARAMETERS[style].looseness,
+                "fold_percent": STYLE_PARAMETERS[style].fold_percent,
+                "call_percent": STYLE_PARAMETERS[style].call_percent,
+                "aggression_percent": STYLE_PARAMETERS[style].aggression_percent,
+                "size_preferences": list(STYLE_PARAMETERS[style].size_preferences),
+            }
+            for style in MixedStyle
+        },
+    }
+    material = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def frozen_manifest(*, code_identity: str, output_dir: str) -> MixedFixtureManifest:
+    """按规格常量装配冻结清单；节点由配方生成，机械明细由本模块注入。"""
+    return build_frozen_manifest(
+        code_identity=code_identity,
+        config_digest=config_digest(),
+        seeds=MIXED_MAIN_SEEDS,
+        output_dir=output_dir,
+        scenario_order=MIXED_SCENARIO_ORDER,
+        seed_derivation=MIXED_SEED_DERIVATION,
+        stage_plan=MIXED_STAGE_PLAN,
+        resource_envelope=MIXED_RESOURCE_ENVELOPE,
+        stop_conditions=MIXED_STOP_CONDITIONS,
+        report_format=MIXED_REPORT_FORMAT,
+    )
+
+
+def required_envelope_fields(manifest: MixedFixtureManifest) -> tuple[str, ...]:
+    """清单中缺失的运行机械明细；非空即表示清单尚未冻结完备。"""
+    return tuple(
+        name
+        for name, value in (
+            ("scenario_order", manifest.scenario_order),
+            ("seed_derivation", manifest.seed_derivation),
+            ("stage_plan", manifest.stage_plan),
+            ("resource_envelope", manifest.resource_envelope),
+            ("stop_conditions", manifest.stop_conditions),
+            ("output_dir", manifest.output_dir),
+            ("report_format", manifest.report_format),
+        )
+        if not value
+    )
 
 
 # ------------------------------------------------------------------ 报告模型
@@ -459,8 +557,16 @@ def collect_behavior(
     manifest: MixedFixtureManifest,
     *,
     mode: HandMode | None = None,
+    allow_full: bool = False,
 ) -> MixedValidationBehavior:
-    """在预冻结节点上计算三种风格 × 三种模式的直接分布指标。"""
+    """在预冻结节点上计算三种风格 × 三种模式的直接分布指标。
+
+    节点数超过有界冒烟上限时属评测实跑，必须由阶段许可显式开启；默认拒绝。
+    """
+    if not allow_full and len(manifest.nodes) > BEHAVIOR_SMOKE_NODE_LIMIT:
+        raise MixedValidationAuthorizationError(
+            "完整分布矩阵属于评测实跑，须经阶段许可后显式开启"
+        )
     buckets = {style.value: _BehaviorBucket() for style in MixedStyle}
     total = 0
     modes = MIXED_HAND_MODES if mode is None else (mode,)
@@ -533,8 +639,19 @@ def cell_quota(index: int) -> int:
     return COST_CELL_QUOTA_FIRST if index < 28 else COST_CELL_QUOTA_REST
 
 
-def _fixture_street(fixture: MixedNodeFixture) -> Street:
-    return fixture.actions[-1].street if fixture.actions else Street.PREFLOP
+def usable_at_depth(fixture: MixedNodeFixture, depth_bb: int) -> bool:
+    """固定短码节点只在自身筹码深度上使用；其余节点可按深度等比缩放。"""
+    return fixture.depth_scalable or depth_bb == MIXED_DEPTHS_BB[1]
+
+
+def fixture_at_depth(fixture: MixedNodeFixture, depth_bb: int) -> MixedNodeFixture:
+    """把节点的逐座位筹码按目标深度等比缩放；固定短码节点原样返回。"""
+    if not fixture.depth_scalable:
+        return fixture
+    target = depth_bb * MIXED_BIG_BLIND
+    ratio_num, ratio_den = target, fixture.starting_stack
+    stacks = tuple(max(1, stack * ratio_num // ratio_den) for stack in fixture.stacks)
+    return fixture.model_copy(update={"starting_stack": target, "stacks": stacks})
 
 
 def run_cost_matrix(
@@ -545,20 +662,20 @@ def run_cost_matrix(
 ) -> tuple[list[float], list[float], list[float], int, int]:
     """按限额逐格计时，返回原始耗时样本与（已执行格数、计划样本数）。"""
     fixtures = manifest.nodes_for(player_count)
-    by_street: dict[Street, list[MixedNodeFixture]] = {}
-    for fixture in fixtures:
-        by_street.setdefault(_fixture_street(fixture), []).append(fixture)
-
+    cursors: dict[Street, int] = {}
     decision: list[float] = []
     apply_ms: list[float] = []
     summary_ms: list[float] = []
-    cursors: dict[Street, int] = {}
     executed_cells = 0
     planned_samples = 0
     for index, (street, style, depth) in enumerate(cost_cells()):
         quota = 1 if stage == "A" else cell_quota(index)
         planned_samples += quota
-        candidates = by_street.get(street)
+        candidates = [
+            node
+            for node in fixtures
+            if node.decision_street is street and usable_at_depth(node, depth)
+        ]
         if not candidates:
             continue
         cursor = cursors.get(street, 0)
@@ -581,8 +698,7 @@ def time_decision(
     seed: int,
 ) -> DecisionTiming:
     """在一个节点上计时一次完整决策；牌面与前置动作全部来自清单。"""
-    stack = depth_bb * MIXED_BIG_BLIND
-    adjusted = fixture.model_copy(update={"starting_stack": stack})
+    adjusted = fixture_at_depth(fixture, depth_bb)
     applied = apply_node(adjusted)
     root = _derive_key(
         validation_root_key(seed), ("focus", style, fixture.node_id, depth_bb)
@@ -755,8 +871,17 @@ def play_adversarial_hand(
     return HandOutcome(net_chips=engine.last_net.get(focus_seat, 0), truncated=False)
 
 
-def run_adversarial_batch(*, stage: Literal["A", "B"]) -> MixedValidationMatches:
-    """执行第一批有界对照；达到动作上限的手截断、不补终局、不估算输赢。"""
+def run_adversarial_batch(
+    *,
+    stage: Literal["A", "B"],
+    allow_matches: bool = False,
+) -> MixedValidationMatches:
+    """执行第一批有界对照；达到动作上限的手截断、不补终局、不估算输赢。
+
+    对抗对照属于评测实跑，必须由阶段许可显式开启；默认拒绝。
+    """
+    if not allow_matches:
+        raise MixedValidationAuthorizationError("对抗对照属于评测实跑，须经阶段许可后显式开启")
     schedule = adversarial_schedule(stage)
     rows: list[MixedMatchFamilyRow] = []
     completed = 0
@@ -812,6 +937,11 @@ def require_stage_permission(
         raise MixedValidationAuthorizationError("必须提供已冻结的逐张牌清单")
     if not manifest.digest():
         raise MixedValidationAuthorizationError("清单摘要必须非空")
+    missing = required_envelope_fields(manifest)
+    if missing:
+        raise MixedValidationAuthorizationError(
+            f"清单缺少运行机械明细，尚未冻结完备：{'、'.join(missing)}"
+        )
     if stage == "B":
         if stage_a_receipt is None:
             raise MixedValidationAuthorizationError("阶段 B 需要阶段 A 的实测回执")
@@ -828,6 +958,17 @@ def prepare_output_dir(output_dir: str | None) -> str | None:
         raise MixedValidationAuthorizationError("输出目录必须为空，不得覆盖已有文件")
     os.makedirs(output_dir, exist_ok=True)
     return output_dir
+
+
+def write_frozen_manifest(manifest: MixedFixtureManifest, directory: str) -> str:
+    """把冻结清单写入指定目录；已存在同名文件时拒绝覆盖。"""
+    os.makedirs(directory, exist_ok=True)
+    target = os.path.join(directory, "frozen-fixture-manifest.json")
+    if os.path.exists(target):
+        raise MixedValidationAuthorizationError("清单文件已存在，不得覆盖")
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(manifest_json(manifest))
+    return target
 
 
 def run_validation(
@@ -875,8 +1016,8 @@ def run_validation(
     # 补充场景与主矩阵分开报告，不并入主路径的分布。
     supplementary_path = summarize_path(supplementary[:supplementary_target])
 
-    matches = run_adversarial_batch(stage=stage)
-    behavior = collect_behavior(frozen)
+    matches = run_adversarial_batch(stage=stage, allow_matches=True)
+    behavior = collect_behavior(frozen, allow_full=True)
 
     wall_seconds = time.perf_counter() - wall_started
     cpu_seconds = time.process_time() - cpu_started
