@@ -15,20 +15,31 @@ import os
 
 import pytest
 
+from app.poker.actions import ActionType
 from app.poker.evaluator import evaluate_fast
 from app.poker.state import Street
-from app.strategy.mixed_policy import MixedStyle
+from app.strategy.mixed_policy import MIXED_DISTRIBUTION_UNITS, MixedStyle
 from app.strategy.mixed_strategy import MixedLocalStrategy
 
+from . import mixed_bot_validation as validation
+from .mixed_bot_recheck import (
+    MixedRecheckError,
+    aggregate_matches,
+    compare_net_chips,
+    recheck,
+)
 from .mixed_bot_states import (
     MIXED_APPLICABLE_NODE_COUNT,
+    MIXED_BIG_BLIND,
     MIXED_CATEGORY_IDS,
     MIXED_CATEGORY_STREET,
+    MIXED_DEPTHS_BB,
     MIXED_PLANNED_SLOT_COUNT,
     MIXED_PLAYER_COUNTS,
     MIXED_STREETS,
     MIXED_STRUCTURAL_HOLE_CATEGORIES,
     MIXED_STRUCTURAL_HOLE_COUNT,
+    MixedFixtureError,
     MixedFixtureManifest,
     MixedNodeFixture,
     MixedPublicAction,
@@ -37,6 +48,7 @@ from .mixed_bot_states import (
     build_frozen_nodes,
     build_node,
     iter_planned_slots,
+    manifest_json,
     planned_slots_by_category,
     structurally_not_applicable,
 )
@@ -50,9 +62,13 @@ from .mixed_bot_validation import (
     COST_DECISIONS_PER_PLAYER_COUNT,
     MIXED_DIRECT_DISTRIBUTION_COUNT,
     MIXED_MAIN_SEEDS,
+    STAGE_A0_COST_SAMPLES,
     STAGE_A_ADVERSARIAL_HANDS,
     STAGE_A_COST_SAMPLES,
+    STAGE_A_SUPPLEMENTARY_SAMPLES,
     SUPPLEMENTARY_TOTAL_SAMPLES,
+    HandOutcome,
+    MixedMatchFamilyRow,
     MixedValidationAuthorizationError,
     adversarial_schedule,
     cell_quota,
@@ -60,10 +76,14 @@ from .mixed_bot_validation import (
     cost_cells,
     fixture_at_depth,
     frozen_manifest,
+    js_distance,
+    matches_from_tally,
+    peak_rss_bytes,
     prepare_output_dir,
     require_stage_permission,
     run_adversarial_batch,
     run_validation,
+    supplementary_plan,
     usable_at_depth,
 )
 
@@ -281,7 +301,95 @@ def test_depth_scaling_rules(frozen: MixedFixtureManifest) -> None:
     }
 
 
+def test_depth_derived_nodes_replay_legally(frozen: MixedFixtureManifest) -> None:
+    """浅深两档的派生节点必须全部可回放：开注额只能落在当时的合法区间内。"""
+    for node in frozen.nodes:
+        for depth in MIXED_DEPTHS_BB:
+            if not usable_at_depth(node, depth):
+                continue
+            derived = fixture_at_depth(node, depth)
+            assert derived.starting_stack == depth * MIXED_BIG_BLIND, (node.node_id, depth)
+            applied = apply_node(derived)
+            assert applied.engine.street is node.decision_street, (node.node_id, depth)
+    # 9 人桌在浅码档曾经出现「清单金额超过剩余筹码」：派生节点必须按当时的上限开注。
+    baseline = next(
+        node for node in frozen.nodes if node.category == "flop-draw" and node.player_count == 9
+    )
+    shallow = fixture_at_depth(baseline, 15)
+    assert shallow.stacks == (15 * MIXED_BIG_BLIND,) * 9
+    assert [action.amount for action in shallow.actions if action.action == "bet"] == [120]
+    # 浅码派生只允许翻后开注额与清单不同，翻前形状必须逐条一致。
+    assert [
+        action.model_dump() for action in shallow.actions if action.street is Street.PREFLOP
+    ] == [
+        action.model_dump() for action in baseline.actions if action.street is Street.PREFLOP
+    ]
+
+
+def test_depth_derivation_refuses_a_non_recipe_node() -> None:
+    """非配方产物不得被静默按深度改写牌面。"""
+    with pytest.raises(MixedValidationAuthorizationError):
+        fixture_at_depth(_hu_fixture(), 15)
+
+
 # ------------------------------------------------------------------ 门禁核对
+
+
+def test_earlier_receipts_without_the_block_keys_still_load() -> None:
+    """更早落盘的回执没有主种子块与轮换号：读回时必须给 None，而不是报错或编造数值。"""
+    payload = {
+        "player_count": 6,
+        "style": "tight",
+        "opponent": "random@1",
+        "arm": "mixed-focus",
+        "hands": 1,
+        "truncated_hands": 0,
+        "net_chips": 0,
+        "bb_per_100": 0.0,
+    }
+    row = MixedMatchFamilyRow.model_validate(payload)
+    assert row.seed_block is None
+    assert row.rotation is None
+
+
+def test_cli_requires_the_stage_a_receipt_for_stage_b(tmp_path, frozen) -> None:
+    """阶段 B 的入口必须载入阶段 A 回执：缺失或不合格都拒绝，且拒绝发生在建目录之前。"""
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(manifest_json(frozen), encoding="utf-8")
+    output_dir = tmp_path / "stage-b"
+    with pytest.raises(MixedValidationAuthorizationError):
+        validation.main([str(manifest_path), "B", str(output_dir), "--allow-stage=B"])
+    assert not output_dir.exists()
+    # 用前哨回执冒充：证明回执确实被载入并参与校验，而不是只有文件名被接受。
+    sentinel = run_validation(manifest=frozen, stage="A0", allow_stage="A0")
+    receipt = tmp_path / "receipt.json"
+    receipt.write_text(sentinel.model_dump_json(), encoding="utf-8")
+    with pytest.raises(MixedValidationAuthorizationError):
+        validation.main(
+            [
+                str(manifest_path),
+                "B",
+                str(output_dir),
+                "--allow-stage=B",
+                f"--stage-a-receipt={receipt}",
+            ]
+        )
+    assert not output_dir.exists()
+
+
+def test_peak_rss_is_measured_where_the_platform_provides_it() -> None:
+    """资源包络的 RSS 一项必须给实测读数，取不到时显式 None，不得填 0 冒充已测。"""
+    pytest.importorskip("resource")
+    measured = peak_rss_bytes()
+    assert measured is not None
+    assert measured > 0
+
+
+def test_supplementary_plan_is_recorded_per_stage() -> None:
+    """补充样本计划数按阶段记账，阶段 B 的总数不得写进阶段 A 的回执。"""
+    assert supplementary_plan("A0") == 0
+    assert supplementary_plan("A") == STAGE_A_SUPPLEMENTARY_SAMPLES == 24
+    assert supplementary_plan("B") == SUPPLEMENTARY_TOTAL_SAMPLES == 240
 
 
 def test_stage_gate_refuses_without_explicit_permission() -> None:
@@ -314,6 +422,27 @@ def test_stage_b_requires_a_completed_stage_a_receipt() -> None:
         )
 
 
+def test_adversarial_rows_carry_the_seed_block_and_rotation(monkeypatch) -> None:
+    """逐手行必须带主种子块与轮换号，按块聚合才不需要额外信息。"""
+    monkeypatch.setattr(
+        validation,
+        "play_adversarial_hand",
+        lambda **kwargs: validation.HandOutcome(net_chips=5, truncated=False),
+    )
+    tally = run_adversarial_batch(stage="A", allow_matches=True)
+    assert len(tally.rows) == STAGE_A_ADVERSARIAL_HANDS
+    assert {row.seed_block for row in tally.rows} == {MIXED_MAIN_SEEDS[0]}
+    assert {row.rotation for row in tally.rows} == {0}
+    matches = matches_from_tally(tally, planned_hands=STAGE_A_ADVERSARIAL_HANDS)
+    assert matches.planned_hands == STAGE_A_ADVERSARIAL_HANDS
+    assert matches.completed_hands == STAGE_A_ADVERSARIAL_HANDS
+    assert matches.truncated_hands == 0
+    blocks = {
+        (row.player_count, row.style, row.opponent, row.seed_block) for row in tally.rows
+    }
+    assert len(blocks) == len(ADVERSARIAL_OPPONENT_FAMILIES) * len(MIXED_PLAYER_COUNTS)
+
+
 def test_eval_runs_are_refused_by_default() -> None:
     with pytest.raises(MixedValidationAuthorizationError):
         run_adversarial_batch(stage="A")
@@ -331,6 +460,82 @@ def test_output_directory_is_never_overwritten(tmp_path) -> None:
     empty.mkdir()
     assert prepare_output_dir(str(empty)) == str(empty)
     assert prepare_output_dir(None) is None
+
+
+def test_a0_sentinel_is_gated_bounded_and_not_a_stage_a_receipt(frozen, tmp_path) -> None:
+    """A0 是阶段 A 的受限子集：需显式许可、用量有界，且不能充当阶段 B 的前置回执。"""
+    with pytest.raises(MixedValidationAuthorizationError):
+        run_validation(manifest=frozen, stage="A0", allow_stage=None)
+    with pytest.raises(MixedValidationAuthorizationError):
+        run_validation(manifest=frozen, stage="A0", allow_stage="A")
+    report = run_validation(
+        manifest=frozen,
+        stage="A0",
+        allow_stage="A0",
+        output_dir=str(tmp_path / "sentinel"),
+    )
+    assert report.stage == "A0"
+    assert report.status == "completed"
+    assert report.coverage.cost_cells_planned == STAGE_A0_COST_SAMPLES
+    assert report.coverage.cost_cells_executed == STAGE_A0_COST_SAMPLES
+    # 格口径与样本口径分列：每格 1 样本时两者相等，配额大于 1 时会相差三个数量级。
+    assert report.coverage.cost_samples_planned == STAGE_A0_COST_SAMPLES
+    assert report.coverage.cost_samples_executed == STAGE_A0_COST_SAMPLES
+    assert report.timing.decision_path is not None
+    assert report.timing.decision_path.samples == STAGE_A0_COST_SAMPLES
+    # 完整单步必须单独成列，且逐样本不小于其中的决策段。
+    assert report.timing.bot_step is not None
+    assert report.timing.bot_step.samples == STAGE_A0_COST_SAMPLES
+    assert report.timing.bot_step.max_ms >= report.timing.decision_path.max_ms
+    # 未运行的三项必须显式标为未运行，而不是填成已完成。
+    assert report.timing.supplementary_decision_path is None
+    assert report.coverage.supplementary_samples_planned == 0
+    assert report.matches.completed_hands == 0
+    assert report.behavior.direct_distributions == 0
+    assert any("A0" in item for item in report.limitations)
+    # 分组读数按单人数 × 四街 × 单风格 × 单深度逐维列出，空分组不伪造。
+    groups = report.timing.decision_path_groups
+    counts = {
+        dimension: sum(1 for group in groups if group.dimension == dimension)
+        for dimension in ("player_count", "street", "style", "depth")
+    }
+    assert counts == {"player_count": 1, "street": 4, "style": 1, "depth": 1}
+    assert next(group for group in groups if group.dimension == "player_count").path.samples == 4
+    assert all(group.path.samples == 1 for group in groups if group.dimension == "street")
+    written = tmp_path / "sentinel" / "mixed-validation-stage-A0.json"
+    assert written.exists()
+    size = written.stat().st_size
+    assert report.resources.output_bytes == size
+    assert json.loads(written.read_text(encoding="utf-8"))["resources"]["output_bytes"] == size
+    with pytest.raises(MixedValidationAuthorizationError):
+        require_stage_permission(
+            stage="B", allow_stage="B", manifest=frozen, stage_a_receipt=report
+        )
+
+
+def test_replay_failure_stops_and_reports_instead_of_raising(monkeypatch) -> None:
+    """一致性错误必须按冻结停止条件转成 stopped-* 报告，并保留已完成计数。"""
+    manifest = _manifest((build_node("unopened-open", 2),))
+    original = validation.time_decision
+    calls = {"count": 0}
+
+    def flaky(*args: object, **kwargs: object) -> object:
+        calls["count"] += 1
+        if calls["count"] > 1:
+            raise MixedFixtureError("模拟回放失败")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(validation, "time_decision", flaky)
+    report = run_validation(manifest=manifest, stage="A", allow_stage="A")
+    assert report.status == "stopped-consistency-error"
+    assert calls["count"] == 2
+    assert report.coverage.cost_cells_executed == 1
+    assert report.timing.decision_path is not None
+    assert report.timing.decision_path.samples == 1
+    # 未跑到的部分记为未运行，不得填成已完成。
+    assert report.matches.completed_hands == 0
+    assert report.behavior.direct_distributions == 0
+    assert [violation.kind for violation in report.violations] == ["replay-error"]
 
 
 def test_node_rejects_structurally_inapplicable_player_count() -> None:
@@ -388,6 +593,125 @@ def test_apply_node_rejects_actions_that_end_the_hand() -> None:
     )
     with pytest.raises(ValueError):
         apply_node(fixture)
+
+
+def test_behavior_reports_style_distances_and_category_rows() -> None:
+    """风格间距离与按类别明细必须在有界冒烟路径上就能读出。"""
+    manifest = _manifest((build_node("shared-board", 2),))
+    behavior = collect_behavior(manifest)
+    assert len(behavior.style_js_distances) == 3
+    assert all(row.nodes == 1 for row in behavior.style_js_distances)
+    assert all(0.0 <= row.mean_js_distance <= 1.0 for row in behavior.style_js_distances)
+    assert {row.category for row in behavior.categories} == {"shared-board"}
+    assert {row.style for row in behavior.categories} == {style.value for style in MixedStyle}
+    shared = next(row for row in behavior.categories if row.style == "tight")
+    total = (
+        shared.mean_fold_units
+        + shared.mean_check_units
+        + shared.mean_call_units
+        + shared.mean_bet_units
+        + shared.mean_raise_units
+    )
+    assert abs(total - MIXED_DISTRIBUTION_UNITS) <= 3
+
+
+def test_js_distance_is_zero_on_identity_and_one_on_disjoint_supports() -> None:
+    left = {(ActionType.CHECK, 0): 500.0, (ActionType.BET, 100): 500.0}
+    right = {(ActionType.FOLD, 0): 1000.0}
+    assert js_distance(left, left) == 0.0
+    assert js_distance(left, right) == pytest.approx(1.0)
+    with pytest.raises(MixedValidationAuthorizationError):
+        js_distance({}, left)
+
+
+def test_aggregate_matches_reports_block_stats_and_rates() -> None:
+    """按块聚合与 VPIP/PFR 必须能从不含对局的结果集合算出。"""
+    schedule = adversarial_schedule("A")
+    outcomes = [
+        HandOutcome(
+            net_chips=1,
+            truncated=False,
+            vpip=True,
+            pfr=False,
+            aggressive_actions=2,
+            total_actions=4,
+        )
+        for _ in schedule
+    ]
+    aggregates, worst = aggregate_matches(schedule, outcomes)
+    assert len(aggregates) == len(ADVERSARIAL_OPPONENT_FAMILIES) * 2 * len(MIXED_PLAYER_COUNTS)
+    row = next(item for item in aggregates if item.arm == "mixed-focus")
+    assert row.hands == 1
+    assert row.vpip == 1.0
+    assert row.pfr == 0.0
+    assert row.aggression_rate == 0.5
+    assert row.block_means == (1.0,)
+    assert row.block_std == 0.0
+    # 冒烟排期只含单一风格，因此最差对手只按两个 arm 各出一行。
+    assert {row.style for row in worst} == {MixedStyle.TIGHT.value}
+    assert len(worst) == 2
+    full = adversarial_schedule("B")
+    rows_full, _ = aggregate_matches(
+        full, [HandOutcome(net_chips=index % 5, truncated=False) for index in range(len(full))]
+    )
+    assert len(rows_full) == len(MIXED_PLAYER_COUNTS) * len(MixedStyle) * 4 * 2
+    two_handed = next(
+        item
+        for item in rows_full
+        if item.player_count == 2 and item.style == "tight" and item.arm == "mixed-focus"
+    )
+    # 完整排期下每格覆盖四个主种子块 × 该人数的全部轮换。
+    assert two_handed.hands == 4 * 2
+    assert len(two_handed.block_means) == 4
+    _, worst_full = aggregate_matches(
+        full, [HandOutcome(net_chips=0, truncated=False) for _ in full]
+    )
+    assert {row.style for row in worst_full} == {style.value for style in MixedStyle}
+    assert len(worst_full) == len(MixedStyle) * 2
+
+
+def test_compare_net_chips_stops_on_any_mismatch() -> None:
+    """逐手比对必须严到任何一位差异都中止，且不返回部分结论。"""
+    schedule = adversarial_schedule("A")
+    rows = [
+        MixedMatchFamilyRow(
+            player_count=entry[4],
+            style=entry[1].value,
+            opponent=entry[2],
+            arm=entry[3],
+            hands=1,
+            truncated_hands=0,
+            net_chips=0,
+            bb_per_100=0.0,
+        )
+        for entry in schedule
+    ]
+    same = [HandOutcome(net_chips=0, truncated=False) for _ in schedule]
+    assert compare_net_chips(rows, schedule, same) == len(schedule)
+    drifted = list(same)
+    drifted[7] = HandOutcome(net_chips=1, truncated=False)
+    with pytest.raises(MixedRecheckError):
+        compare_net_chips(rows, schedule, drifted)
+    with pytest.raises(MixedRecheckError):
+        compare_net_chips(rows, schedule, same[:-1])
+
+
+def test_recheck_is_refused_by_default_and_for_non_stage_receipts() -> None:
+    """补算默认拒绝；对非阶段回执同样拒绝，且拒绝发生在建目录之前。"""
+    manifest = _manifest((build_node("unopened-open", 2),))
+    with pytest.raises(MixedRecheckError):
+        recheck(manifest=manifest, receipt=None, receipt_path=None)
+    with pytest.raises(MixedRecheckError):
+        recheck(manifest=None, receipt=None, receipt_path=None, allow_recheck=True)
+    sentinel = run_validation(manifest=manifest, stage="A0", allow_stage="A0")
+    with pytest.raises(MixedRecheckError):
+        recheck(
+            manifest=manifest,
+            receipt=sentinel,
+            receipt_path=__file__,
+            allow_recheck=True,
+            output_dir=None,
+        )
 
 
 def test_behavior_collection_smoke_is_bounded_and_labelled() -> None:

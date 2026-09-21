@@ -3,7 +3,9 @@
 纪律：
 - 只有被显式调用时才会运行；默认 pytest 不触发任何性能矩阵或对抗对局；
 - 运行前必须显式给出已冻结清单与允许执行的阶段，阶段 B 还必须有阶段 A 的实测回执；
-- 不访问、不修改任何封存 campaign 目录；输出目录只创建、不覆盖已有文件。
+- 不访问、不修改任何封存 campaign 目录；输出目录只创建、不覆盖已有文件；
+- 出现合法性、信息边界或摘要一致性错误时，按冻结的停止条件落 stopped-* 报告并保留
+  已完成计数，不抛穿、不丢样本、不自动重试。
 """
 
 from __future__ import annotations
@@ -23,7 +25,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.poker.actions import Action, ActionType, LegalActions
+from app.poker.actions import Action, ActionType, IllegalActionError, LegalActions
 from app.poker.engine import PokerEngine
 from app.poker.state import GameState, Street
 from app.strategy.heuristic import HeuristicStrategy
@@ -34,6 +36,7 @@ from app.strategy.lookup_budget import (
     percentile_ms,
 )
 from app.strategy.mixed_context import (
+    MixedContextError,
     MixedSummaryTracker,
     mixed_state,
     require_mixed_input,
@@ -62,10 +65,12 @@ from .mixed_bot_states import (
     MIXED_SMALL_BLIND,
     MIXED_STREETS,
     MIXED_STRUCTURAL_HOLE_COUNT,
+    MixedFixtureError,
     MixedFixtureManifest,
     MixedNodeFixture,
     apply_node,
     build_frozen_manifest,
+    build_node,
     manifest_json,
 )
 
@@ -79,6 +84,8 @@ MIXED_HAND_MODES: tuple[HandMode, ...] = (
     HandMode.CAUTIOUS,
     HandMode.PRESSED,
 )
+# 手模式的固定边缘化权重：与 [0,80)/[80,90)/[90,100) 的分区一致，先于读数写死。
+MIXED_HAND_MODE_WEIGHTS: tuple[int, ...] = (80, 10, 10)
 # 直接分布总数：125 个可行动节点 × 3 风格 × 3 模式。
 MIXED_DIRECT_DISTRIBUTION_COUNT = MIXED_APPLICABLE_NODE_COUNT * len(MixedStyle) * len(
     MIXED_HAND_MODES
@@ -125,6 +132,15 @@ STAGE_A_WALL_SECONDS = 120.0
 STAGE_AB_WALL_SECONDS = 1800.0
 STAGE_RSS_BYTES = 1024 * 1024 * 1024
 STAGE_OUTPUT_BYTES = 100 * 1024 * 1024
+
+# A0 前哨：阶段 A 的受限子集，只取单人数、单风格、单深度、四街各一次。
+STAGE_A0_PLAYER_COUNT = 6
+STAGE_A0_STYLE = MixedStyle.TIGHT
+STAGE_A0_DEPTH_BB = 100
+STAGE_A0_COST_SAMPLES = len(MIXED_STREETS)
+STAGE_A0_LIMITATION = (
+    "A0 只是阶段 A 的受限前哨，用于确认运行入口端到端可用，不产生质量或预算证据。"
+)
 
 MIXED_VALIDATION_LIMITATIONS: tuple[str, ...] = (
     "规则评分是启发式分数，不是概率、EV、GTO 或均衡结论。",
@@ -246,6 +262,14 @@ class MixedLatencyPath(_FrozenModel):
     timeout_count: int = Field(ge=0)
 
 
+class MixedLatencyGroup(_FrozenModel):
+    """按单一维度分组的决策路径延迟；维度与分组先于读数固定，不按结果挑选。"""
+
+    dimension: Literal["player_count", "street", "style", "depth"]
+    group: str
+    path: MixedLatencyPath
+
+
 class MixedValidationTiming(_FrozenModel):
     """决策路径、执行路径与摘要更新耗时，分列不合并。"""
 
@@ -253,13 +277,15 @@ class MixedValidationTiming(_FrozenModel):
     p95_guidance_ms: float = P95_GUIDANCE_MS
     p99_guidance_ms: float = P99_GUIDANCE_MS
     decision_path: MixedLatencyPath | None = None
+    # 分组读数与全局读数不能互相替代：全局分布可能掩盖某一档的慢样本。
+    decision_path_groups: tuple[MixedLatencyGroup, ...] = ()
     engine_apply: MixedLatencyPath | None = None
     public_summary_update: MixedLatencyPath | None = None
     supplementary_decision_path: MixedLatencyPath | None = None
     bot_step: MixedLatencyPath | None = None
     timing_note: str = (
-        "decision_path 是完整单次 Bot 决策计算，不含 apply；执行、摘要更新与补充场景另报；"
-        "50/80ms 只是指导值，不是新门槛。"
+        "decision_path 是完整单次 Bot 决策计算，不含 apply；执行、摘要更新、完整单步 bot_step "
+        "与补充场景均另报；分组读数按人数/街/风格/深度分列；50/80ms 只是指导值，不是新门槛。"
     )
 
 
@@ -275,13 +301,45 @@ class MixedStyleBehavior(_FrozenModel):
     no_active_candidate: int = Field(ge=0)
 
 
+class MixedStyleJsDistance(_FrozenModel):
+    """两种风格在预冻结节点上的 JS 距离；按节点比较后再汇总，不抽样估计。"""
+
+    style_a: str
+    style_b: str
+    nodes: int = Field(ge=0)
+    mean_js_distance: float
+    max_js_distance: float
+
+
+class MixedCategoryBehavior(_FrozenModel):
+    """单一节点类别的分布明细；共享公共大牌一类必须能单独读出读数。"""
+
+    category: str
+    style: str
+    distributions: int = Field(ge=0)
+    action_entropy: float | None = None
+    scale_entropy: float | None = None
+    effective_scale_count: int = Field(ge=0)
+    structural_single_size: int = Field(ge=0)
+    no_active_candidate: int = Field(ge=0)
+    # 各动作类型的平均质量（百万单位口径），可直接读出该类别的动作倾向。
+    mean_fold_units: int = Field(ge=0)
+    mean_check_units: int = Field(ge=0)
+    mean_call_units: int = Field(ge=0)
+    mean_bet_units: int = Field(ge=0)
+    mean_raise_units: int = Field(ge=0)
+
+
 class MixedValidationBehavior(_FrozenModel):
     """行为报告：条件动作熵与尺度熵按风格分列，分组先于结果固定。"""
 
     direct_distributions: int = Field(ge=0)
     styles: tuple[MixedStyleBehavior, ...]
+    style_js_distances: tuple[MixedStyleJsDistance, ...] = ()
+    categories: tuple[MixedCategoryBehavior, ...] = ()
     behavior_note: str = (
-        "指标来自预冻结节点的直接分布，不靠抽样估计；手模式由内部接口显式指定。"
+        "指标来自预冻结节点的直接分布，不靠抽样估计；手模式由内部接口显式指定；"
+        "风格间比较先按固定的模式权重边缘化。"
     )
 
 
@@ -292,6 +350,10 @@ class MixedMatchFamilyRow(_FrozenModel):
     style: str
     opponent: str
     arm: str
+    # 主种子块与轮换号随行保存：按块聚合需要它们，缺了就无法事后回补。
+    # 本版起产出时一律写入；更早落盘的回执没有这两项，读回时给 None 而不伪造数值。
+    seed_block: int | None = None
+    rotation: int | None = Field(default=None, ge=0)
     hands: int = Field(ge=0)
     truncated_hands: int = Field(ge=0)
     net_chips: int
@@ -319,6 +381,9 @@ class MixedValidationCoverage(_FrozenModel):
     structurally_not_applicable: int = Field(ge=0)
     cost_cells_planned: int = Field(ge=0)
     cost_cells_executed: int = Field(ge=0)
+    # 格口径与样本口径分列：每格 1 样本时两者相等，配额大于 1 时相差三个数量级。
+    cost_samples_planned: int = Field(default=0, ge=0)
+    cost_samples_executed: int = Field(default=0, ge=0)
     supplementary_samples_planned: int = Field(ge=0)
     supplementary_samples_executed: int = Field(ge=0)
     adversarial_hands_planned: int = Field(ge=0)
@@ -362,7 +427,7 @@ class MixedValidationReport(_FrozenModel):
     code_identity: str
     config_digest: str
     manifest_digest: str
-    stage: Literal["A", "B"]
+    stage: Literal["A0", "A", "B"]
     status: str
     environment: MixedValidationEnvironment
     coverage: MixedValidationCoverage
@@ -463,13 +528,31 @@ def summarize_path(samples_ms: Sequence[float]) -> MixedLatencyPath:
     )
 
 
+def peak_rss_bytes() -> int | None:
+    """进程峰值常驻内存（字节）；平台不提供读数时返回 None，不填 0 冒充已测。"""
+    try:
+        import resource
+    except ImportError:  # pragma: no cover - 仅非 Unix 平台会走到这里
+        return None
+    try:
+        usage = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    except (ValueError, OSError):  # pragma: no cover - 平台读数异常
+        return None
+    if usage <= 0:
+        return None
+    # macOS 的读数单位是字节，其余 Unix 是 KiB。
+    return usage if sys.platform == "darwin" else usage * 1024
+
+
 @dataclass(frozen=True)
 class DecisionTiming:
-    """一次决策的各段耗时，单位毫秒。"""
+    """一次决策的各段耗时，单位毫秒；各段与完整单步分列，不互相替代。"""
 
     decision_path_ms: float
     engine_apply_ms: float
     summary_update_ms: float
+    # 完整单步：从决策开始到摘要更新结束。摘要维护卡顿在这里也会显形。
+    bot_step_ms: float
 
 
 def _require_within_legal(action: Action, legal: LegalActions) -> None:
@@ -495,8 +578,9 @@ def measure_decision(
     tracker: MixedSummaryTracker,
     strategy: MixedLocalStrategy,
 ) -> DecisionTiming:
-    """计时一次完整决策：脱敏/摘要/特征/分布/采样/候选校验，再单独计时执行。"""
-    started = time.perf_counter()
+    """计时一次完整决策：脱敏/摘要/特征/分布/采样/候选校验，再单独计时执行与摘要更新。"""
+    step_started = time.perf_counter()
+    started = step_started
     state = mixed_state(project_for_actor(engine.snapshot()), tracker.context())
     legal = engine.legal_actions()
     action = strategy.choose_action(state, legal)
@@ -510,7 +594,8 @@ def measure_decision(
     started = time.perf_counter()
     tracker.consume_after_action(engine.history)
     summary_ms = (time.perf_counter() - started) * 1000.0
-    return DecisionTiming(decision_ms, apply_ms, summary_ms)
+    bot_step_ms = (time.perf_counter() - step_started) * 1000.0
+    return DecisionTiming(decision_ms, apply_ms, summary_ms, bot_step_ms)
 
 
 # ------------------------------------------------------------------ 分布指标
@@ -543,7 +628,7 @@ def distribution_metrics(
 
 @dataclass
 class _BehaviorBucket:
-    """一种风格的累计指标桶。"""
+    """一种分组（风格或类别 × 风格）的累计指标桶。"""
 
     distributions: int = 0
     action_entropies: list[float] = field(default_factory=list)
@@ -551,6 +636,76 @@ class _BehaviorBucket:
     effective_scales: int = 0
     single_size: int = 0
     no_active: int = 0
+    # 各动作类型累计质量，用于读出分类别的动作倾向。
+    action_units: dict[ActionType, int] = field(default_factory=dict)
+
+
+# 风格比较的固定配对与顺序，先于读数固定。
+_STYLE_PAIRS: tuple[tuple[str, str], ...] = tuple(
+    (left.value, right.value)
+    for index, left in enumerate(MixedStyle)
+    for right in list(MixedStyle)[index + 1 :]
+)
+
+
+def js_distance(
+    left: dict[tuple[ActionType, int], float],
+    right: dict[tuple[ActionType, int], float],
+) -> float:
+    """两个分布的 JS 距离：共同支撑集上求散度再开方，零概率按极限取 0。"""
+    left_total = sum(left.values())
+    right_total = sum(right.values())
+    if left_total <= 0 or right_total <= 0:
+        raise MixedValidationAuthorizationError("参与比较的分布质量为零，无法给出距离")
+    divergence = 0.0
+    for key in set(left) | set(right):
+        p = left.get(key, 0.0) / left_total
+        q = right.get(key, 0.0) / right_total
+        middle = (p + q) / 2.0
+        for value in (p, q):
+            if value > 0:
+                divergence += 0.5 * value * math.log2(value / middle)
+    return math.sqrt(divergence)
+
+
+def _mean(values: list[float]) -> float | None:
+    return statistics.fmean(values) if values else None
+
+
+def _style_row(style: str, bucket: _BehaviorBucket) -> MixedStyleBehavior:
+    return MixedStyleBehavior(
+        style=style,
+        distributions=bucket.distributions,
+        action_entropy=_mean(bucket.action_entropies),
+        scale_entropy=_mean(bucket.scale_entropies),
+        effective_scale_count=bucket.effective_scales,
+        structural_single_size=bucket.single_size,
+        no_active_candidate=bucket.no_active,
+    )
+
+
+def _category_row(category: str, style: str, bucket: _BehaviorBucket) -> MixedCategoryBehavior:
+    """把类别桶写成一行；平均质量按该桶的分布数取整，不代表任何单一局面。"""
+    count = bucket.distributions
+
+    def units_of(action: ActionType) -> int:
+        return round(bucket.action_units.get(action, 0) / count) if count else 0
+
+    return MixedCategoryBehavior(
+        category=category,
+        style=style,
+        distributions=count,
+        action_entropy=_mean(bucket.action_entropies),
+        scale_entropy=_mean(bucket.scale_entropies),
+        effective_scale_count=bucket.effective_scales,
+        structural_single_size=bucket.single_size,
+        no_active_candidate=bucket.no_active,
+        mean_fold_units=units_of(ActionType.FOLD),
+        mean_check_units=units_of(ActionType.CHECK),
+        mean_call_units=units_of(ActionType.CALL),
+        mean_bet_units=units_of(ActionType.BET),
+        mean_raise_units=units_of(ActionType.RAISE),
+    )
 
 
 def collect_behavior(
@@ -567,13 +722,21 @@ def collect_behavior(
         raise MixedValidationAuthorizationError(
             "完整分布矩阵属于评测实跑，须经阶段许可后显式开启"
         )
-    buckets = {style.value: _BehaviorBucket() for style in MixedStyle}
+    style_buckets = {style.value: _BehaviorBucket() for style in MixedStyle}
+    category_buckets: dict[tuple[str, str], _BehaviorBucket] = {}
+    js_samples: dict[tuple[str, str], list[float]] = {pair: [] for pair in _STYLE_PAIRS}
     total = 0
     modes = MIXED_HAND_MODES if mode is None else (mode,)
+    weights = (
+        MIXED_HAND_MODE_WEIGHTS
+        if mode is None
+        else (MIXED_HAND_MODE_WEIGHTS[MIXED_HAND_MODES.index(mode)],)
+    )
     for fixture in manifest.nodes:
         applied = apply_node(fixture)
         verified = require_mixed_input(applied.actor_state())
         legal = applied.legal_actions()
+        marginals: dict[str, dict[tuple[ActionType, int], float]] = {}
         for style in MixedStyle:
             # 离线按风格逐一覆盖，生产分配仍由座位升序循环决定。
             policy = MixedSeatPolicy(
@@ -583,42 +746,58 @@ def collect_behavior(
                     int(manifest.seeds[0]), style.value, fixture.player_count, 0
                 ),
             )
-            bucket = buckets[style.value]
-            for hand_mode in modes:
+            bucket = style_buckets[style.value]
+            category_bucket = category_buckets.setdefault(
+                (fixture.category, style.value), _BehaviorBucket()
+            )
+            marginal: dict[tuple[ActionType, int], float] = {}
+            for weight, hand_mode in zip(weights, modes, strict=True):
                 distribution = policy.distribution_for(verified, legal, hand_mode)
                 action_entropy, scale_entropy, scale_count, single = distribution_metrics(
                     distribution
                 )
-                bucket.distributions += 1
+                for target in (bucket, category_bucket):
+                    target.distributions += 1
+                    if action_entropy is not None:
+                        target.action_entropies.append(action_entropy)
+                    if scale_entropy is not None:
+                        target.scale_entropies.append(scale_entropy)
+                    target.effective_scales += scale_count
+                    target.single_size += single
+                    target.no_active += 0 if scale_count else 1
+                    for item in distribution.candidates:
+                        target.action_units[item.action] = (
+                            target.action_units.get(item.action, 0) + item.units
+                        )
                 total += 1
-                if action_entropy is not None:
-                    bucket.action_entropies.append(action_entropy)
-                if scale_entropy is not None:
-                    bucket.scale_entropies.append(scale_entropy)
-                bucket.effective_scales += scale_count
-                bucket.single_size += single
-                bucket.no_active += 0 if scale_count else 1
-    rows = tuple(
-        MixedStyleBehavior(
-            style=style.value,
-            distributions=buckets[style.value].distributions,
-            action_entropy=(
-                statistics.fmean(buckets[style.value].action_entropies)
-                if buckets[style.value].action_entropies
-                else None
-            ),
-            scale_entropy=(
-                statistics.fmean(buckets[style.value].scale_entropies)
-                if buckets[style.value].scale_entropies
-                else None
-            ),
-            effective_scale_count=buckets[style.value].effective_scales,
-            structural_single_size=buckets[style.value].single_size,
-            no_active_candidate=buckets[style.value].no_active,
-        )
-        for style in MixedStyle
+                for item in distribution.candidates:
+                    key = (item.action, item.amount)
+                    marginal[key] = marginal.get(key, 0.0) + weight * item.units
+            marginals[style.value] = marginal
+        for left, right in _STYLE_PAIRS:
+            js_samples[(left, right)].append(js_distance(marginals[left], marginals[right]))
+    styles = tuple(_style_row(style.value, style_buckets[style.value]) for style in MixedStyle)
+    categories = tuple(
+        _category_row(category, style, bucket)
+        for (category, style), bucket in sorted(category_buckets.items())
+        if bucket.distributions
     )
-    return MixedValidationBehavior(direct_distributions=total, styles=rows)
+    distances = tuple(
+        MixedStyleJsDistance(
+            style_a=left,
+            style_b=right,
+            nodes=len(js_samples[(left, right)]),
+            mean_js_distance=statistics.fmean(js_samples[(left, right)]),
+            max_js_distance=max(js_samples[(left, right)]),
+        )
+        for left, right in _STYLE_PAIRS
+    )
+    return MixedValidationBehavior(
+        direct_distributions=total,
+        styles=styles,
+        style_js_distances=distances,
+        categories=categories,
+    )
 
 
 # ------------------------------------------------------------------ 成本矩阵
@@ -645,32 +824,67 @@ def usable_at_depth(fixture: MixedNodeFixture, depth_bb: int) -> bool:
 
 
 def fixture_at_depth(fixture: MixedNodeFixture, depth_bb: int) -> MixedNodeFixture:
-    """把节点的逐座位筹码按目标深度等比缩放；固定短码节点原样返回。"""
+    """把节点按同一配方在目标深度上重建；固定短码节点原样返回。
+
+    只接受「由配方在其自身筹码深度上生成」的节点：重建不出与清单一致的基线时显式失败，
+    避免静默换掉牌面、筹码或前置动作线。翻后开注额由目标深度下当时的合法区间决定，
+    因此浅深两档的派生节点可能只在该金额上与清单不同。
+    """
     if not fixture.depth_scalable:
         return fixture
     target = depth_bb * MIXED_BIG_BLIND
-    ratio_num, ratio_den = target, fixture.starting_stack
-    stacks = tuple(max(1, stack * ratio_num // ratio_den) for stack in fixture.stacks)
-    return fixture.model_copy(update={"starting_stack": target, "stacks": stacks})
+    if target == fixture.starting_stack:
+        return fixture
+    baseline = build_node(fixture.category, fixture.player_count)
+    if baseline.model_dump() != fixture.model_dump():
+        raise MixedValidationAuthorizationError(
+            f"节点 {fixture.node_id} 与配方基线不一致，不能按深度派生"
+        )
+    return build_node(fixture.category, fixture.player_count, starting_stack=target)
+
+
+@dataclass
+class _CostTally:
+    """成本矩阵累计器：样本与格计数边跑边写，中途失败也保留已完成的部分。"""
+
+    decision: list[float] = field(default_factory=list)
+    apply_ms: list[float] = field(default_factory=list)
+    summary_ms: list[float] = field(default_factory=list)
+    bot_step: list[float] = field(default_factory=list)
+    # 与 decision 一一对应的分组键：(人数, 街, 风格, 深度)。
+    keys: list[tuple[int, str, str, int]] = field(default_factory=list)
+    # 格数按格计数，样本数按配额累计；两者不混用。
+    cells_executed: int = 0
+    cells_planned: int = 0
+    samples_planned: int = 0
 
 
 def run_cost_matrix(
     manifest: MixedFixtureManifest,
     *,
-    stage: Literal["A", "B"],
+    stage: Literal["A0", "A", "B"],
     player_count: int,
-) -> tuple[list[float], list[float], list[float], int, int]:
-    """按限额逐格计时，返回原始耗时样本与（已执行格数、计划样本数）。"""
+    styles: Sequence[str] | None = None,
+    depths: Sequence[int] | None = None,
+    tally: _CostTally | None = None,
+) -> _CostTally:
+    """按限额逐格计时，结果写进累计器并返回。
+
+    ``styles`` / ``depths`` 是受限子集用的筛选：只跳过不匹配的格，不改变格的定义、
+    顺序与配额口径，因此不会产生与完整矩阵不同的格。
+    """
+    if tally is None:
+        tally = _CostTally()
     fixtures = manifest.nodes_for(player_count)
     cursors: dict[Street, int] = {}
-    decision: list[float] = []
-    apply_ms: list[float] = []
-    summary_ms: list[float] = []
-    executed_cells = 0
-    planned_samples = 0
     for index, (street, style, depth) in enumerate(cost_cells()):
-        quota = 1 if stage == "A" else cell_quota(index)
-        planned_samples += quota
+        if styles is not None and style not in styles:
+            continue
+        if depths is not None and depth not in depths:
+            continue
+        quota = cell_quota(index) if stage == "B" else 1
+        tally.cells_planned += 1
+        tally.samples_planned += quota
         candidates = [
             node
             for node in fixtures
@@ -681,13 +895,57 @@ def run_cost_matrix(
         cursor = cursors.get(street, 0)
         cursors[street] = cursor + 1
         fixture = candidates[cursor % len(candidates)]
-        executed_cells += 1
+        # 一个格只有在真正产出样本后才算已执行，避免首个样本就失败的格被记为已完成。
+        produced = False
         for _ in range(quota):
             timing = time_decision(fixture, style, depth, seed=int(manifest.seeds[0]))
-            decision.append(timing.decision_path_ms)
-            apply_ms.append(timing.engine_apply_ms)
-            summary_ms.append(timing.summary_update_ms)
-    return decision, apply_ms, summary_ms, executed_cells, planned_samples
+            tally.decision.append(timing.decision_path_ms)
+            tally.apply_ms.append(timing.engine_apply_ms)
+            tally.summary_ms.append(timing.summary_update_ms)
+            tally.bot_step.append(timing.bot_step_ms)
+            tally.keys.append((player_count, street.name.lower(), style, depth))
+            if not produced:
+                tally.cells_executed += 1
+                produced = True
+    return tally
+
+
+# 分组维度的固定顺序，避免报告顺序随字典遍历或读数变化。
+_LATENCY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("player_count", tuple(str(count) for count in MIXED_PLAYER_COUNTS)),
+    ("street", tuple(street.name.lower() for street in MIXED_STREETS)),
+    ("style", tuple(style.value for style in MixedStyle)),
+    ("depth", tuple(str(depth) for depth in MIXED_DEPTHS_BB)),
+)
+
+
+def latency_groups(cost: _CostTally) -> tuple[MixedLatencyGroup, ...]:
+    """把成本矩阵样本按人数、街、风格、深度分别汇总；空分组不伪造读数。"""
+    buckets: dict[tuple[str, str], list[float]] = {}
+    for (player_count, street, style, depth), value in zip(
+        cost.keys, cost.decision, strict=True
+    ):
+        for dimension, group in (
+            ("player_count", str(player_count)),
+            ("street", street),
+            ("style", style),
+            ("depth", str(depth)),
+        ):
+            buckets.setdefault((dimension, group), []).append(value)
+    groups: list[MixedLatencyGroup] = []
+    for dimension, values in _LATENCY_GROUPS:
+        for group in values:
+            samples = buckets.get((dimension, group))
+            if not samples:
+                continue
+            groups.append(
+                MixedLatencyGroup(
+                    dimension=dimension,  # type: ignore[arg-type]
+                    group=group,
+                    path=summarize_path(samples),
+                )
+            )
+    return tuple(groups)
 
 
 def time_decision(
@@ -713,9 +971,14 @@ def run_supplementary_matrix(
     manifest: MixedFixtureManifest,
     *,
     samples_per_cell: int,
+    samples: list[float] | None = None,
 ) -> tuple[list[float], int]:
-    """补充小型测试：逐人数每类固定样本，与主矩阵分开统计。"""
-    samples: list[float] = []
+    """补充小型测试：逐人数每类固定样本，与主矩阵分开统计。
+
+    样本边跑边写进调用方给定的列表，中途失败也保留已完成的部分。
+    """
+    if samples is None:
+        samples = []
     executed = 0
     for player_count in MIXED_PLAYER_COUNTS:
         fixtures = manifest.nodes_for(player_count)
@@ -760,10 +1023,15 @@ def adversarial_schedule(
 
 @dataclass(frozen=True)
 class HandOutcome:
-    """一手对照的净筹码与是否被截断。"""
+    """一手对照的净筹码、是否被截断，以及焦点座位的行动统计。"""
 
     net_chips: int
     truncated: bool
+    # 焦点座位：翻前是否自愿进池、是否加注，以及全手主动动作与总动作数。
+    vpip: bool = False
+    pfr: bool = False
+    aggressive_actions: int = 0
+    total_actions: int = 0
 
 
 def _focus_mover(
@@ -847,9 +1115,14 @@ def play_adversarial_hand(
     others = _opponent_mover(opponent, seed)
 
     voluntary = 0
+    focus_vpip = False
+    focus_pfr = False
+    focus_aggressive = 0
+    focus_actions = 0
     while not engine.hand_over:
         legal = engine.legal_actions()
         seat = engine.current_seat
+        preflop = engine.street is Street.PREFLOP
         if seat == focus_seat:
             if not tracker.active:
                 raise MixedValidationAuthorizationError("焦点座位缺少公开摘要")
@@ -862,31 +1135,80 @@ def play_adversarial_hand(
         action = mover.choose_action(state, legal)
         if action.type in (ActionType.BET, ActionType.RAISE, ActionType.CALL):
             voluntary += 1
+        if seat == focus_seat:
+            focus_actions += 1
+            if action.type in (ActionType.BET, ActionType.RAISE):
+                focus_aggressive += 1
+            # 盲注不算自愿进池，因此只看焦点座位自己的自愿动作。
+            if preflop and action.type in (ActionType.CALL, ActionType.BET, ActionType.RAISE):
+                focus_vpip = True
+            if preflop and action.type is ActionType.RAISE:
+                focus_pfr = True
         engine.apply_action(action)
         if tracker.active:
             # 摘要覆盖全桌公开事件，与谁行动无关。
             tracker.consume_after_action(engine.history)
         if voluntary >= ADVERSARIAL_MAX_VOLUNTARY_ACTIONS:
-            return HandOutcome(net_chips=0, truncated=True)
-    return HandOutcome(net_chips=engine.last_net.get(focus_seat, 0), truncated=False)
+            return HandOutcome(
+                net_chips=0,
+                truncated=True,
+                vpip=focus_vpip,
+                pfr=focus_pfr,
+                aggressive_actions=focus_aggressive,
+                total_actions=focus_actions,
+            )
+    return HandOutcome(
+        net_chips=engine.last_net.get(focus_seat, 0),
+        truncated=False,
+        vpip=focus_vpip,
+        pfr=focus_pfr,
+        aggressive_actions=focus_aggressive,
+        total_actions=focus_actions,
+    )
+
+
+@dataclass
+class _MatchTally:
+    """对抗对照累计器：逐手写入，中途失败也保留已经跑完的手。"""
+
+    rows: list[MixedMatchFamilyRow] = field(default_factory=list)
+    truncated: int = 0
+
+
+def matches_from_tally(
+    tally: _MatchTally,
+    *,
+    planned_hands: int,
+    note: str | None = None,
+) -> MixedValidationMatches:
+    """把累计器内容汇总成报告用的对照结果；完成手数按实际写入的内容计数。"""
+    payload: dict[str, object] = {
+        "planned_hands": planned_hands,
+        "completed_hands": len(tally.rows),
+        "truncated_hands": tally.truncated,
+        "seed_blocks": MIXED_MAIN_SEEDS,
+        "rows": tuple(tally.rows),
+    }
+    if note is not None:
+        payload["matches_note"] = note
+    return MixedValidationMatches(**payload)  # type: ignore[arg-type]
 
 
 def run_adversarial_batch(
     *,
     stage: Literal["A", "B"],
     allow_matches: bool = False,
-) -> MixedValidationMatches:
+    tally: _MatchTally | None = None,
+) -> _MatchTally:
     """执行第一批有界对照；达到动作上限的手截断、不补终局、不估算输赢。
 
-    对抗对照属于评测实跑，必须由阶段许可显式开启；默认拒绝。
+    对抗对照属于评测实跑，必须由阶段许可显式开启；默认拒绝。结果写进累计器并返回。
     """
     if not allow_matches:
         raise MixedValidationAuthorizationError("对抗对照属于评测实跑，须经阶段许可后显式开启")
-    schedule = adversarial_schedule(stage)
-    rows: list[MixedMatchFamilyRow] = []
-    completed = 0
-    truncated = 0
-    for seed, style, opponent, arm, player_count, rotation in schedule:
+    if tally is None:
+        tally = _MatchTally()
+    for seed, style, opponent, arm, player_count, rotation in adversarial_schedule(stage):
         outcome = play_adversarial_hand(
             seed=seed,
             style=style,
@@ -895,27 +1217,22 @@ def run_adversarial_batch(
             player_count=player_count,
             rotation=rotation,
         )
-        completed += 1
-        truncated += 1 if outcome.truncated else 0
-        rows.append(
+        tally.truncated += 1 if outcome.truncated else 0
+        tally.rows.append(
             MixedMatchFamilyRow(
                 player_count=player_count,
                 style=style.value,
                 opponent=opponent,
                 arm=arm,
+                seed_block=seed,
+                rotation=rotation,
                 hands=1,
                 truncated_hands=1 if outcome.truncated else 0,
                 net_chips=outcome.net_chips,
                 bb_per_100=outcome.net_chips / MIXED_BIG_BLIND * 100.0,
             )
         )
-    return MixedValidationMatches(
-        planned_hands=ADVERSARIAL_HANDS,
-        completed_hands=completed,
-        truncated_hands=truncated,
-        seed_blocks=MIXED_MAIN_SEEDS,
-        rows=tuple(rows),
-    )
+    return tally
 
 
 # ------------------------------------------------------------------ 阶段门禁与运行
@@ -923,7 +1240,7 @@ def run_adversarial_batch(
 
 def require_stage_permission(
     *,
-    stage: Literal["A", "B"],
+    stage: Literal["A0", "A", "B"],
     allow_stage: str | None,
     manifest: MixedFixtureManifest | None,
     stage_a_receipt: MixedValidationReport | None = None,
@@ -971,10 +1288,17 @@ def write_frozen_manifest(manifest: MixedFixtureManifest, directory: str) -> str
     return target
 
 
+def supplementary_plan(stage: Literal["A0", "A", "B"]) -> int:
+    """该阶段的补充样本计划数：前哨不跑，阶段 A 取首样本，阶段 B 取完整矩阵。"""
+    if stage == "A0":
+        return 0
+    return STAGE_A_SUPPLEMENTARY_SAMPLES if stage == "A" else SUPPLEMENTARY_TOTAL_SAMPLES
+
+
 def run_validation(
     *,
     manifest: MixedFixtureManifest | None,
-    stage: Literal["A", "B"],
+    stage: Literal["A0", "A", "B"],
     allow_stage: str | None,
     output_dir: str | None = None,
     stage_a_receipt: MixedValidationReport | None = None,
@@ -990,38 +1314,92 @@ def run_validation(
     wall_started = time.perf_counter()
     cpu_started = time.process_time()
     violations: list[MixedReportViolation] = []
+    # A0 是阶段 A 的受限子集：沿用同一套格定义，只取单人数、单风格、单深度各一次。
+    sentinel = stage == "A0"
+    player_counts = (STAGE_A0_PLAYER_COUNT,) if sentinel else MIXED_PLAYER_COUNTS
+    styles = (STAGE_A0_STYLE.value,) if sentinel else None
+    depths = (STAGE_A0_DEPTH_BB,) if sentinel else None
 
-    decision: list[float] = []
-    apply_ms: list[float] = []
-    summary_ms: list[float] = []
-    cells_executed = 0
-    cells_planned = 0
-    for player_count in MIXED_PLAYER_COUNTS:
-        part_decision, part_apply, part_summary, executed, planned = run_cost_matrix(
-            frozen, stage=stage, player_count=player_count
-        )
-        decision.extend(part_decision)
-        apply_ms.extend(part_apply)
-        summary_ms.extend(part_summary)
-        cells_executed += executed
-        cells_planned += planned
-
-    supplementary_target = (
-        STAGE_A_SUPPLEMENTARY_SAMPLES if stage == "A" else SUPPLEMENTARY_TOTAL_SAMPLES
+    cost = _CostTally()
+    supplementary: list[float] = []
+    match_tally = _MatchTally()
+    supplementary_path: MixedLatencyPath | None = None
+    supplementary_planned = 0
+    matches = MixedValidationMatches(
+        planned_hands=0,
+        completed_hands=0,
+        truncated_hands=0,
+        seed_blocks=MIXED_MAIN_SEEDS,
+        rows=(),
+        matches_note="本轮未执行到对抗对照，因此没有对照读数。",
     )
-    samples_per_cell = 1 if stage == "A" else SUPPLEMENTARY_SAMPLES_PER_CELL
-    supplementary, _supplementary_cells = run_supplementary_matrix(
-        frozen, samples_per_cell=samples_per_cell
+    behavior = MixedValidationBehavior(
+        direct_distributions=0,
+        styles=(),
+        behavior_note="本轮未执行到分布矩阵，因此没有行为读数。",
     )
-    # 补充场景与主矩阵分开报告，不并入主路径的分布。
-    supplementary_path = summarize_path(supplementary[:supplementary_target])
+    full_stage: Literal["A", "B"] = "B" if stage == "B" else "A"
+    failure: str | None = None
+    try:
+        for player_count in player_counts:
+            run_cost_matrix(
+                frozen,
+                stage=stage,
+                player_count=player_count,
+                styles=styles,
+                depths=depths,
+                tally=cost,
+            )
 
-    matches = run_adversarial_batch(stage=stage, allow_matches=True)
-    behavior = collect_behavior(frozen, allow_full=True)
+        if sentinel:
+            # 前哨不做补充场景、不收集分布矩阵、不跑对抗对照，三项在报告里记为未运行。
+            matches = MixedValidationMatches(
+                planned_hands=0,
+                completed_hands=0,
+                truncated_hands=0,
+                seed_blocks=MIXED_MAIN_SEEDS,
+                rows=(),
+                matches_note="A0 前哨不执行对抗对照，因此没有对照读数。",
+            )
+            behavior = MixedValidationBehavior(
+                direct_distributions=0,
+                styles=(),
+                behavior_note="A0 前哨不收集完整分布矩阵，因此没有行为读数。",
+            )
+        else:
+            supplementary_target = supplementary_plan(stage)
+            samples_per_cell = 1 if stage == "A" else SUPPLEMENTARY_SAMPLES_PER_CELL
+            run_supplementary_matrix(
+                frozen, samples_per_cell=samples_per_cell, samples=supplementary
+            )
+            # 补充场景与主矩阵分开报告，不并入主路径的分布。
+            supplementary_path = summarize_path(supplementary[:supplementary_target])
+            supplementary_planned = supplementary_target
+            run_adversarial_batch(stage=full_stage, allow_matches=True, tally=match_tally)
+            matches = matches_from_tally(
+                match_tally, planned_hands=len(adversarial_schedule(full_stage))
+            )
+            behavior = collect_behavior(frozen, allow_full=True)
+    except (
+        MixedFixtureError,
+        MixedContextError,
+        MixedValidationAuthorizationError,
+        IllegalActionError,
+    ) as error:
+        # 冻结的停止条件：出现合法性、信息边界或摘要一致性错误立即停止该轮，
+        # 保留已完成计数与错误，其余记为未运行；不自动重试、不删样本。
+        failure = f"{type(error).__name__}: {error}"
+        if not sentinel:
+            matches = matches_from_tally(
+                match_tally,
+                planned_hands=len(adversarial_schedule(full_stage)),
+                note="本轮在跑完对抗对照前停止，计数只覆盖已经完成的手。",
+            )
 
     wall_seconds = time.perf_counter() - wall_started
     cpu_seconds = time.process_time() - cpu_started
-    limit = STAGE_A_WALL_SECONDS if stage == "A" else STAGE_AB_WALL_SECONDS
+    # A0 沿用阶段 A 的包络：它只是 A 的受限子集。
+    limit = STAGE_AB_WALL_SECONDS if stage == "B" else STAGE_A_WALL_SECONDS
     status = "completed"
     if wall_seconds > limit:
         status = "stopped-wall-budget"
@@ -1032,7 +1410,7 @@ def run_validation(
                 detail=f"对抗对照有 {matches.truncated_hands} 手达到动作上限被截断",
             )
         )
-    decision_path = summarize_path(decision)
+    decision_path = summarize_path(cost.decision)
     if decision_path.timeout_count:
         # 出现超预算样本立即标为性能失败，不删除、不自动复测。
         status = "stopped-decision-over-budget"
@@ -1042,6 +1420,10 @@ def run_validation(
                 detail=f"出现 {decision_path.timeout_count} 次 >=100ms 的单次决策",
             )
         )
+    if failure is not None:
+        # 一致性类失败优先于预算类状态：它解释了本轮为何提前结束。
+        status = "stopped-consistency-error"
+        violations.append(MixedReportViolation(kind="replay-error", detail=failure))
 
     report = MixedValidationReport(
         strategy_id=MIXED_STRATEGY_IDENTIFIER,
@@ -1063,17 +1445,23 @@ def run_validation(
                 MIXED_APPLICABLE_NODE_COUNT - len(frozen.nodes),
             ),
             structurally_not_applicable=MIXED_STRUCTURAL_HOLE_COUNT,
-            cost_cells_planned=cells_planned,
-            cost_cells_executed=cells_executed,
-            supplementary_samples_planned=SUPPLEMENTARY_TOTAL_SAMPLES,
-            supplementary_samples_executed=supplementary_path.samples,
+            cost_cells_planned=cost.cells_planned,
+            cost_cells_executed=cost.cells_executed,
+            cost_samples_planned=cost.samples_planned,
+            cost_samples_executed=len(cost.decision),
+            supplementary_samples_planned=supplementary_planned,
+            supplementary_samples_executed=(
+                0 if supplementary_path is None else supplementary_path.samples
+            ),
             adversarial_hands_planned=matches.planned_hands,
             adversarial_hands_executed=matches.completed_hands,
         ),
         timing=MixedValidationTiming(
             decision_path=decision_path,
-            engine_apply=summarize_path(apply_ms),
-            public_summary_update=summarize_path(summary_ms),
+            decision_path_groups=latency_groups(cost),
+            engine_apply=summarize_path(cost.apply_ms),
+            public_summary_update=summarize_path(cost.summary_ms),
+            bot_step=summarize_path(cost.bot_step),
             supplementary_decision_path=supplementary_path,
         ),
         behavior=behavior,
@@ -1081,44 +1469,74 @@ def run_validation(
         resources=MixedValidationResources(
             wall_seconds=wall_seconds,
             cpu_seconds=cpu_seconds,
-            peak_rss_bytes=None,
+            peak_rss_bytes=peak_rss_bytes(),
             output_bytes=0,
             single_process=True,
             parallel=False,
         ),
         violations=tuple(violations),
+        limitations=(
+            (MIXED_VALIDATION_LIMITATIONS + (STAGE_A0_LIMITATION,))
+            if sentinel
+            else MIXED_VALIDATION_LIMITATIONS
+        ),
     )
     if directory is not None:
         target = os.path.join(directory, f"mixed-validation-stage-{stage}.json")
         if os.path.exists(target):
             raise MixedValidationAuthorizationError("报告目标文件已存在，不得覆盖")
+        # 让落盘字节数与文件自洽：写进文件的数就是这份文件自身的大小。
+        payload = report.model_dump_json(indent=2)
+        for _ in range(3):
+            report = report.model_copy(
+                update={
+                    "resources": report.resources.model_copy(
+                        update={"output_bytes": len(payload.encode("utf-8"))}
+                    )
+                }
+            )
+            revised = report.model_dump_json(indent=2)
+            if revised == payload:
+                break
+            payload = revised
         with open(target, "w", encoding="utf-8") as handle:
-            handle.write(report.model_dump_json(indent=2))
+            handle.write(payload)
     return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """命令行入口：必须显式给出清单路径、阶段、输出目录与允许阶段。"""
+    """命令行入口：必须显式给出清单路径、阶段、输出目录与允许阶段。
+
+    阶段 B 还必须给出阶段 A 的实测回执文件；缺失或不合格一律由门禁拒绝，入口不兜底放行。
+    """
     args = list(sys.argv[1:] if argv is None else argv)
     if len(args) < 4:
         print(
-            "用法：python -m tests.mixed_bot_validation <清单路径> <A|B> <输出目录> "
-            "--allow-stage=<A|B>",
+            "用法：python -m tests.mixed_bot_validation <清单路径> <A0|A|B> <输出目录> "
+            "--allow-stage=<A0|A|B> [--stage-a-receipt=<阶段 A 回执路径>]",
             file=sys.stderr,
         )
         return 2
     manifest_path, stage, output_dir = args[0], args[1], args[2]
     allow_stage = None
+    receipt_path = None
     for token in args[3:]:
         if token.startswith("--allow-stage="):
             allow_stage = token.split("=", 1)[1]
+        elif token.startswith("--stage-a-receipt="):
+            receipt_path = token.split("=", 1)[1]
     with open(manifest_path, encoding="utf-8") as handle:
         manifest = MixedFixtureManifest.model_validate(json.load(handle))
+    receipt = None
+    if receipt_path is not None:
+        with open(receipt_path, encoding="utf-8") as handle:
+            receipt = MixedValidationReport.model_validate(json.load(handle))
     report = run_validation(
         manifest=manifest,
         stage=stage,  # type: ignore[arg-type]
         allow_stage=allow_stage,
         output_dir=output_dir,
+        stage_a_receipt=receipt,
     )
     print(report.model_dump_json(indent=2))
     return 0

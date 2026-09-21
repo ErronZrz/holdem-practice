@@ -646,9 +646,10 @@ def _stacks_for(
     recipe: FixtureRecipe,
     player_count: int,
     run: _ScriptedRun,
+    starting_stack: int,
 ) -> list[int]:
-    """按短码角色写出逐座位筹码；其余座位保持基准筹码。"""
-    stacks = [MIXED_DEFAULT_STACK] * player_count
+    """按短码角色写出逐座位筹码；其余座位保持该深度的常量筹码。"""
+    stacks = [starting_stack] * player_count
     _, big_blind = run.blind_seats
     if recipe.short_role == _ROLE_ACTOR:
         stacks[run.actor_seat] = _SHORT_CALLER_STACK
@@ -663,13 +664,14 @@ def _settle_stacks(
     recipe: FixtureRecipe,
     player_count: int,
     placeholder: Sequence[Sequence[str]],
+    starting_stack: int,
 ) -> _ScriptedRun:
     """先把短码角色落位再执行前缀。
 
     盲位与首位行动者开局即可读出，因此大盲短码与先行者全下都能在第一遍就正确设置；
     只有「决策者本人是短码」需要先跑一遍前缀才知道是谁，第二遍再落位。
     """
-    uniform = [MIXED_DEFAULT_STACK] * player_count
+    uniform = [starting_stack] * player_count
     opened = _open_engine(recipe, player_count, uniform, placeholder)
     _, big_blind = opened.blind_seats
     stacks = list(uniform)
@@ -679,7 +681,7 @@ def _settle_stacks(
         stacks[opened.first_actor] = _JAMMER_STACK
     run = _execute_recipe(recipe, player_count, stacks, placeholder)
     if recipe.short_role == _ROLE_ACTOR:
-        candidate = _stacks_for(recipe, player_count, run)
+        candidate = _stacks_for(recipe, player_count, run, starting_stack)
         if candidate != stacks:
             stacks = candidate
             run = _execute_recipe(recipe, player_count, stacks, placeholder)
@@ -707,19 +709,27 @@ def _require_short_role_landed(
         raise MixedFixtureError("短码跟注的角色未落在决策者身上")
 
 
-def build_node(category: str, player_count: int) -> MixedNodeFixture:
+def build_node(
+    category: str,
+    player_count: int,
+    *,
+    starting_stack: int = MIXED_DEFAULT_STACK,
+) -> MixedNodeFixture:
     """按冻结配方生成一个可行动节点。
 
     先用占位底牌把短码角色迭代稳定并确定决策座位，再把主题牌面放到该座位重跑一次；
     两次的决策座位与决策街必须完全一致，否则显式失败，不做静默修补。
+
+    ``starting_stack`` 用于把同一配方放到别的筹码深度上重跑：牌面与形状不变，翻后开注额
+    由该深度下当时的合法区间决定。带短码角色的配方筹码额与深度无关，因此只在默认深度使用。
     """
     recipe = MIXED_RECIPE_BY_CATEGORY[category]
     if player_count not in applicable_player_counts(category):
         raise MixedFixtureError(f"{category} 在 {player_count} 人桌是结构性不适用槽")
 
     placeholder = _placeholder_holes(player_count, recipe.board)
-    settled = _settle_stacks(recipe, player_count, placeholder)
-    stacks = _stacks_for(recipe, player_count, settled)
+    settled = _settle_stacks(recipe, player_count, placeholder, starting_stack)
+    stacks = _stacks_for(recipe, player_count, settled, starting_stack)
     focus = settled.actor_seat
 
     # 焦点座位拿主题牌面，其余座位按固定顺序填牌，保证与已用牌不重复。
@@ -746,7 +756,7 @@ def build_node(category: str, player_count: int) -> MixedNodeFixture:
         category=category,
         player_count=player_count,
         button=MIXED_NODE_BUTTON,
-        starting_stack=MIXED_DEFAULT_STACK,
+        starting_stack=starting_stack,
         hole_cards=tuple(holes),
         board=recipe.board,
         actions=tuple(final.actions),
