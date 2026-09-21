@@ -8,6 +8,7 @@ from app.main import app
 from app.storage import repository
 from app.storage.db import get_db, init_db
 from app.strategy.heuristic import HeuristicStrategy
+from app.strategy.mixed_strategy import MixedLocalStrategy
 from app.strategy.random_strategy import RandomStrategy
 from app.strategy.registry import (
     StrategySpec,
@@ -38,7 +39,21 @@ def test_legacy_values_normalize_to_frozen_versions() -> None:
 def test_canonical_identifiers_resolve_unchanged() -> None:
     assert resolve_identifier("heuristic@1") == "heuristic@1"
     assert resolve_identifier("random@1") == "random@1"
-    assert {"heuristic@1", "random@1"} <= set(known_identifiers())
+    assert {"heuristic@1", "random@1", "mixed-local@1"} <= set(known_identifiers())
+
+
+def test_mixed_identity_has_no_unversioned_alias() -> None:
+    assert resolve_identifier("mixed-local@1") == "mixed-local@1"
+    assert spec_for("mixed-local@1").name == "mixed-local"
+    assert spec_for("mixed-local@1").version == 1
+    with pytest.raises(UnknownStrategyError):
+        resolve_identifier("mixed-local")
+    with pytest.raises(UnknownStrategyError):
+        resolve_identifier("mixed-local@2")
+
+
+def test_mixed_strategy_factory_is_registered() -> None:
+    assert isinstance(create_strategy("mixed-local@1", 3), MixedLocalStrategy)
 
 
 def test_spec_exposes_version() -> None:
@@ -141,9 +156,27 @@ def test_create_game_accepts_versioned_identifier() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["cfr", "heuristic@2", "app.strategy.HeuristicStrategy", "os.system"],
+    [
+        "cfr",
+        "heuristic@2",
+        "mixed-local",
+        "mixed-local@2",
+        "app.strategy.HeuristicStrategy",
+        "os.system",
+    ],
 )
 def test_create_game_rejects_unknown_identifier(value: str) -> None:
     client = TestClient(app)
     resp = client.post("/games", json={"num_players": 2, "bot_strategy": value})
     assert resp.status_code == 422
+
+
+def test_create_game_accepts_mixed_identifier() -> None:
+    client = TestClient(app)
+    resp = client.post(
+        "/games", json={"num_players": 3, "seed": 5, "bot_strategy": "mixed-local@1"}
+    )
+    assert resp.status_code == 201
+    session_id = resp.json()["session_id"]
+    assert _stored_strategy(session_id) == "mixed-local@1"
+    assert isinstance(games._registry[session_id].bot, MixedLocalStrategy)

@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from .heuristic import HeuristicStrategy
 from .interface import Strategy
+from .mixed_strategy import MixedLocalStrategy
 from .random_strategy import RandomStrategy
 
 
@@ -91,4 +92,14 @@ register_strategy(
         description="从合法动作中均匀随机选择的基线策略",
     ),
     aliases=("random",),
+)
+# 新身份不设无版本别名：调用方必须显式提交版本化标识，旧名称不会被悄悄换掉。
+register_strategy(
+    StrategySpec(
+        identifier="mixed-local@1",
+        name="mixed-local",
+        version=1,
+        factory=lambda seed: MixedLocalStrategy(seed=seed),
+        description="本地规则型混合对手：座位分派多风格、动作与尺度联合混合、随机源域分离",
+    ),
 )

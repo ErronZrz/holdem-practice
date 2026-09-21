@@ -19,12 +19,25 @@ from sqlalchemy.orm import Session
 from app.poker.actions import Action, ActionType, IllegalActionError
 from app.poker.engine import PokerEngine
 from app.poker.evaluator import evaluate
-from app.poker.state import Street
+from app.poker.state import GameState, Street
 from app.storage import repository
 from app.storage.db import get_db
 from app.storage.hand_history import build_hand_history
 from app.storage.models import utcnow
-from app.strategy import Strategy, create_strategy, project_for_actor
+from app.strategy import (
+    MIXED_STRATEGY_IDENTIFIER,
+    MixedContextError,
+    MixedLocalStrategy,
+    MixedPolicyError,
+    MixedStrategyError,
+    MixedSummaryTracker,
+    Strategy,
+    create_strategy,
+    derive_deck_seed,
+    derive_root_key,
+    mixed_state,
+    project_for_actor,
+)
 
 from . import schemas
 
@@ -34,6 +47,12 @@ _registry: dict[str, "GameRuntime"] = {}
 
 # Bot 相邻两次行动之间的最小间隔（秒），由前端轮询推进逐个播放。
 BOT_DELAY = 1.0
+
+# 新策略输入不自洽时的固定对外措辞：不暴露快照或内部异常内容。
+_MIXED_FAILURE_DETAIL = "对局内部状态不一致，已停止推进本局"
+
+# 新策略分支可能抛出的明确失败，统一转成固定错误，不静默回退到其他策略。
+_MIXED_ERRORS = (MixedContextError, MixedPolicyError, MixedStrategyError)
 
 
 @dataclass
@@ -50,11 +69,57 @@ class GameRuntime:
     # 本局使用的规范策略标识，随每手历史落库以便追溯。
     bot_strategy: str
     last_hand_id: str | None = None
+    # 仅新策略使用：本手公开摘要跟踪器，旧策略路径保持为 None。
+    summary: MixedSummaryTracker | None = None
 
 
-def _make_bot(strategy_name: str, seed: int | None) -> Strategy:
-    """经受控注册表构造 Bot，未知标识在此前已由请求校验拦下。"""
+def _make_bot(
+    strategy_name: str,
+    seed: int | None,
+    root_key: bytes | None = None,
+) -> Strategy:
+    """经受控注册表构造 Bot；新策略复用已派生的主键，避免重复取系统熵。"""
+    if root_key is not None and strategy_name == MIXED_STRATEGY_IDENTIFIER:
+        return MixedLocalStrategy(root_key=root_key)
     return create_strategy(strategy_name, seed)
+
+
+def _bot_state(runtime: GameRuntime) -> GameState:
+    """Bot 视角状态：先脱敏投影，再附加公开摘要；顺序不可颠倒。"""
+    projection = project_for_actor(runtime.engine.snapshot())
+    if runtime.summary is None or not runtime.summary.active:
+        return projection
+    return mixed_state(projection, runtime.summary.context())
+
+
+def _begin_hand_summary(runtime: GameRuntime, db: Session) -> None:
+    """开局收尾：因盲注直接终局就照旧落库，否则初始化本手公开摘要。"""
+    if runtime.summary is not None:
+        runtime.summary.reset()
+    if runtime.engine.hand_over:
+        _finalize_hand(runtime, db)
+        return
+    if runtime.summary is None:
+        return
+    engine = runtime.engine
+    try:
+        runtime.summary.begin_hand(
+            hand_number=runtime.hand_number,
+            num_players=engine.num_players,
+            small_blind=engine.small_blind,
+            big_blind=engine.big_blind,
+            bot_seats=runtime.bot_seats,
+            history=engine.history,
+        )
+    except MixedContextError as exc:
+        raise HTTPException(status_code=500, detail=_MIXED_FAILURE_DETAIL) from exc
+
+
+def _consume_summary(runtime: GameRuntime) -> None:
+    """成功行动之后增量消费新公开事件；旧策略路径不做任何事。"""
+    if runtime.summary is None or not runtime.summary.active:
+        return
+    runtime.summary.consume_after_action(runtime.engine.history)
 
 
 def _blind_seats(button: int, num_players: int) -> tuple[int, int]:
@@ -71,10 +136,15 @@ def _advance_if_bot_turn(runtime: GameRuntime) -> bool:
         return False
     if time.monotonic() - runtime.last_bot_ts < BOT_DELAY:
         return False
-    # 传入受控投影，保证 Bot 视角拿不到其他座位的暗牌。
-    state = project_for_actor(engine.snapshot())
-    action = runtime.bot.choose_action(state, engine.legal_actions())
-    engine.apply_action(action)
+    # 传入受控投影，保证 Bot 视角拿不到其他座位的暗牌；新策略再附加公开摘要。
+    try:
+        state = _bot_state(runtime)
+        action = runtime.bot.choose_action(state, engine.legal_actions())
+        # 校验、求值与采样都在 apply 之前完成，出错不提交任何候选动作。
+        engine.apply_action(action)
+        _consume_summary(runtime)
+    except _MIXED_ERRORS as exc:
+        raise HTTPException(status_code=500, detail=_MIXED_FAILURE_DETAIL) from exc
     runtime.last_bot_ts = time.monotonic()
     return True
 
@@ -243,26 +313,35 @@ def create_game(
     )
     db.commit()
 
+    # 只有新策略分支分流随机源：牌堆与 Bot 派生流从同一主键分离，旧路径保持原语义。
+    root_key: bytes | None = None
+    summary: MixedSummaryTracker | None = None
+    engine_seed = req.seed
+    if req.bot_strategy == MIXED_STRATEGY_IDENTIFIER:
+        root_key = derive_root_key(req.seed)
+        engine_seed = derive_deck_seed(root_key)
+        summary = MixedSummaryTracker()
+
     engine = PokerEngine(
         req.num_players,
         small_blind,
         req.big_blind,
         req.starting_stack,
-        seed=req.seed,
+        seed=engine_seed,
     )
     runtime = GameRuntime(
         session_id=session.id,
         engine=engine,
-        bot=_make_bot(req.bot_strategy, req.seed),
+        bot=_make_bot(req.bot_strategy, req.seed, root_key),
         human_seat=0,
         bot_seats=[seat for seat in range(req.num_players) if seat != 0],
         hand_number=1,
         last_bot_ts=time.monotonic(),
         bot_strategy=req.bot_strategy,
+        summary=summary,
     )
     engine.start_hand()
-    if engine.hand_over:
-        _finalize_hand(runtime, db)
+    _begin_hand_summary(runtime, db)
     _registry[runtime.session_id] = runtime
     return build_game_view(runtime, db)
 
@@ -316,7 +395,12 @@ def submit_action(
     try:
         engine.apply_action(action)
     except IllegalActionError as exc:
+        # 非法真人动作不更新摘要计数，也不会污染本手公开信息。
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        _consume_summary(runtime)
+    except MixedContextError as exc:
+        raise HTTPException(status_code=500, detail=_MIXED_FAILURE_DETAIL) from exc
 
     # 真人刚行动完，重置 Bot 计时，让下一个 Bot 动作间隔一个 BOT_DELAY 再播放。
     runtime.last_bot_ts = time.monotonic()
@@ -343,6 +427,5 @@ def next_hand(
     runtime.hand_number += 1
     engine.start_hand()
     runtime.last_bot_ts = time.monotonic()
-    if engine.hand_over:
-        _finalize_hand(runtime, db)
+    _begin_hand_summary(runtime, db)
     return build_game_view(runtime, db)
