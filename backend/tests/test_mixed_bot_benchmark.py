@@ -28,6 +28,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER,
     MIXED_STRATEGY_IDENTIFIER_V2,
     MIXED_STRATEGY_IDENTIFIER_V3,
+    MIXED_STRATEGY_IDENTIFIER_V4,
     MIXED_STRATEGY_IDENTIFIERS,
     MixedLocalStrategy,
     MixedStrategyError,
@@ -340,6 +341,17 @@ def test_third_version_config_digest_is_pinned() -> None:
     )
 
 
+def test_fourth_version_config_digest_is_pinned() -> None:
+    """第四版取摘要同样钉死：它将来会被自己的标定回执引用。"""
+    assert (
+        config_digest(MIXED_STRATEGY_IDENTIFIER_V4)
+        == "52b03d5db65d92e3d0ee7a987a7f45169ff868e4273af4dd2ac8538772fb481d"
+    )
+    assert config_digest(MIXED_STRATEGY_IDENTIFIER_V4) != config_digest(
+        MIXED_STRATEGY_IDENTIFIER_V3
+    )
+
+
 def test_digest_fields_are_registered_per_identity() -> None:
     """每个身份的摘要字段都按身份登记，且字段名必须是该身份规则对象里的真实字段。"""
     assert set(DIGEST_RULE_FIELDS) <= set(MIXED_STRATEGY_IDENTIFIERS)
@@ -350,6 +362,14 @@ def test_digest_fields_are_registered_per_identity() -> None:
         assert set(fields) <= set(rules), identifier
     # 第二版只引入分池口径，翻前门槛字段不属于它的口径。
     assert DIGEST_RULE_FIELDS[MIXED_STRATEGY_IDENTIFIER_V2] == ("shared_board_chop_caliber",)
+
+
+def test_every_non_first_identity_has_registered_digest_fields() -> None:
+    """新注册身份若漏登摘要字段，必须在测试阶段就失败，而不是等到运行期。"""
+    for identifier in MIXED_STRATEGY_IDENTIFIERS:
+        if identifier == MIXED_STRATEGY_IDENTIFIER:
+            continue
+        assert identifier in DIGEST_RULE_FIELDS, identifier
 
 
 def test_extra_rule_fields_do_not_move_earlier_digests(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -372,7 +392,7 @@ def test_extra_rule_fields_do_not_move_earlier_digests(monkeypatch: pytest.Monke
 
 def test_config_digest_refuses_an_unregistered_identity() -> None:
     with pytest.raises(MixedStrategyError):
-        config_digest("mixed-local@4")
+        config_digest("mixed-local@5")
 
 
 def test_config_digest_refuses_an_identity_without_registered_fields(
@@ -409,7 +429,7 @@ def test_frozen_manifest_refuses_an_unregistered_identity() -> None:
         frozen_manifest(
             code_identity="test-code-identity",
             output_dir="/tmp/test-output",
-            strategy_id="mixed-local@4",
+            strategy_id="mixed-local@5",
         )
 
 
@@ -419,7 +439,7 @@ def test_strategy_rules_follow_the_manifest_identity() -> None:
     second = _manifest((fixture,), strategy_id=MIXED_STRATEGY_IDENTIFIER_V2)
     assert strategy_rules(second).shared_board_chop_caliber is True
     with pytest.raises(MixedStrategyError):
-        strategy_rules(_manifest((fixture,), strategy_id="mixed-local@4"))
+        strategy_rules(_manifest((fixture,), strategy_id="mixed-local@5"))
 
 
 def test_behavior_collection_follows_the_manifest_identity() -> None:
@@ -438,7 +458,7 @@ def test_behavior_collection_follows_the_manifest_identity() -> None:
 
 def test_adversarial_batch_refuses_an_unregistered_identity() -> None:
     with pytest.raises(MixedStrategyError):
-        run_adversarial_batch(stage="A", allow_matches=True, identifier="mixed-local@4")
+        run_adversarial_batch(stage="A", allow_matches=True, identifier="mixed-local@5")
 
 
 def test_recheck_replays_with_the_receipt_caliber(monkeypatch) -> None:

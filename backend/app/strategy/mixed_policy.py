@@ -89,6 +89,13 @@ MIXED_LOCAL_V3_RULES = MixedPolicyRules(
     preflop_contender_penalty=30,
     preflop_call_bonus=PreflopCallBonus(tight=0, aggressive=35, calling=110),
 )
+# 第四版口径：只把紧密型的翻前跟注偏移提高，其余取值与第三版逐字一致。
+MIXED_LOCAL_V4_RULES = MixedPolicyRules(
+    shared_board_chop_caliber=True,
+    preflop_price_weight=150,
+    preflop_contender_penalty=30,
+    preflop_call_bonus=PreflopCallBonus(tight=30, aggressive=35, calling=110),
+)
 
 
 class MixedStyle(StrEnum):

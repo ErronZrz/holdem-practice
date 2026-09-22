@@ -14,6 +14,7 @@ from .interface import Strategy
 from .mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V2,
     MIXED_STRATEGY_IDENTIFIER_V3,
+    MIXED_STRATEGY_IDENTIFIER_V4,
     MixedLocalStrategy,
 )
 from .random_strategy import RandomStrategy
@@ -129,5 +130,17 @@ register_strategy(
             seed=seed, identifier=MIXED_STRATEGY_IDENTIFIER_V3
         ),
         description="本地规则型混合对手第三版：翻前跟注门槛与风格偏移，累积第二版的分池口径",
+    ),
+)
+# 第四版为累积版：只把紧密型的翻前跟注偏移提高，其余口径与第三版一致。
+register_strategy(
+    StrategySpec(
+        identifier="mixed-local@4",
+        name="mixed-local",
+        version=4,
+        factory=lambda seed: MixedLocalStrategy(
+            seed=seed, identifier=MIXED_STRATEGY_IDENTIFIER_V4
+        ),
+        description="本地规则型混合对手第四版：提高紧密型翻前跟注偏移，累积第三版口径",
     ),
 )

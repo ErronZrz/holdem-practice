@@ -200,7 +200,8 @@ def test_old_identities_keep_the_original_preflop_caliber() -> None:
 
 
 def test_third_identity_is_registered_and_cumulative() -> None:
-    assert MIXED_STRATEGY_IDENTIFIERS == (
+    # 后续版本会追加在末尾，因此这里只锁定前三版的顺序与并存关系。
+    assert MIXED_STRATEGY_IDENTIFIERS[:3] == (
         MIXED_STRATEGY_IDENTIFIER,
         MIXED_STRATEGY_IDENTIFIER_V2,
         MIXED_STRATEGY_IDENTIFIER_V3,
