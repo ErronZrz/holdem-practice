@@ -25,6 +25,7 @@ from app.poker.cards import card_from_str
 from app.poker.engine import PokerEngine
 from app.poker.state import GameState, Street
 from app.strategy.mixed_context import MixedSummaryTracker, mixed_state
+from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER
 from app.strategy.projection import project_for_actor
 
 # 清单与逐张牌 fixture 的版本；与运行产物、离线训练工件均无关。
@@ -788,10 +789,11 @@ def build_frozen_manifest(
     resource_envelope: Sequence[str],
     stop_conditions: Sequence[str],
     report_format: str,
+    strategy_id: str = MIXED_STRATEGY_IDENTIFIER,
 ) -> MixedFixtureManifest:
     """装配冻结清单：节点由配方生成，其余机械明细由调用方按规格注入。"""
     return MixedFixtureManifest(
-        strategy_id="mixed-local@1",
+        strategy_id=strategy_id,
         code_identity=code_identity,
         config_digest=config_digest,
         seeds=tuple(seeds),

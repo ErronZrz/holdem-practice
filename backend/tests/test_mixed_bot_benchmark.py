@@ -19,7 +19,12 @@ from app.poker.actions import ActionType
 from app.poker.evaluator import evaluate_fast
 from app.poker.state import Street
 from app.strategy.mixed_policy import MIXED_DISTRIBUTION_UNITS, MixedStyle
-from app.strategy.mixed_strategy import MixedLocalStrategy
+from app.strategy.mixed_strategy import (
+    MIXED_STRATEGY_IDENTIFIER,
+    MIXED_STRATEGY_IDENTIFIER_V2,
+    MixedLocalStrategy,
+    MixedStrategyError,
+)
 
 from . import mixed_bot_validation as validation
 from .mixed_bot_recheck import (
@@ -73,6 +78,7 @@ from .mixed_bot_validation import (
     adversarial_schedule,
     cell_quota,
     collect_behavior,
+    config_digest,
     cost_cells,
     fixture_at_depth,
     frozen_manifest,
@@ -83,6 +89,7 @@ from .mixed_bot_validation import (
     require_stage_permission,
     run_adversarial_batch,
     run_validation,
+    strategy_rules,
     supplementary_plan,
     usable_at_depth,
 )
@@ -107,9 +114,13 @@ def _hu_fixture(**overrides: object) -> MixedNodeFixture:
     return MixedNodeFixture(**payload)  # type: ignore[arg-type]
 
 
-def _manifest(nodes: tuple[MixedNodeFixture, ...]) -> MixedFixtureManifest:
+def _manifest(
+    nodes: tuple[MixedNodeFixture, ...],
+    *,
+    strategy_id: str = MIXED_STRATEGY_IDENTIFIER,
+) -> MixedFixtureManifest:
     return MixedFixtureManifest(
-        strategy_id="mixed-local@1",
+        strategy_id=strategy_id,
         code_identity="test-code-identity",
         config_digest="test-config-digest",
         seeds=MIXED_MAIN_SEEDS,
@@ -282,6 +293,84 @@ def test_frozen_manifest_digest_is_stable(frozen: MixedFixtureManifest) -> None:
     assert frozen.seeds == MIXED_MAIN_SEEDS
     assert frozen.stage_plan and frozen.resource_envelope and frozen.stop_conditions
     assert frozen.output_dir and frozen.report_format
+
+
+# ------------------------------------------------------------------ 身份驱动
+
+
+def test_first_version_config_digest_is_pinned() -> None:
+    """首版配置摘要与已签收清单逐字绑定，任何改写都会在这里失败。"""
+    assert (
+        config_digest()
+        == "bfe231419ecc31e54e9b73aaa16421026cc2392a21516ddb44e6a629936d1484"
+    )
+    assert config_digest(MIXED_STRATEGY_IDENTIFIER) == config_digest()
+
+
+def test_second_version_gets_its_own_config_digest() -> None:
+    assert config_digest(MIXED_STRATEGY_IDENTIFIER_V2) != config_digest()
+
+
+def test_config_digest_refuses_an_unregistered_identity() -> None:
+    with pytest.raises(MixedStrategyError):
+        config_digest("mixed-local@3")
+
+
+def test_frozen_manifest_carries_the_requested_identity() -> None:
+    first = frozen_manifest(
+        code_identity="test-code-identity",
+        output_dir="/tmp/test-output",
+        strategy_id=MIXED_STRATEGY_IDENTIFIER,
+    )
+    second = frozen_manifest(
+        code_identity="test-code-identity",
+        output_dir="/tmp/test-output",
+        strategy_id=MIXED_STRATEGY_IDENTIFIER_V2,
+    )
+    assert first.strategy_id == MIXED_STRATEGY_IDENTIFIER
+    assert second.strategy_id == MIXED_STRATEGY_IDENTIFIER_V2
+    assert second.config_digest == config_digest(MIXED_STRATEGY_IDENTIFIER_V2)
+    assert second.digest() != first.digest()
+    assert [node.model_dump() for node in second.nodes] == [
+        node.model_dump() for node in first.nodes
+    ]
+
+
+def test_frozen_manifest_refuses_an_unregistered_identity() -> None:
+    with pytest.raises(MixedStrategyError):
+        frozen_manifest(
+            code_identity="test-code-identity",
+            output_dir="/tmp/test-output",
+            strategy_id="mixed-local@3",
+        )
+
+
+def test_strategy_rules_follow_the_manifest_identity() -> None:
+    fixture = build_node("shared-board", 2)
+    assert strategy_rules(_manifest((fixture,))).shared_board_chop_caliber is False
+    second = _manifest((fixture,), strategy_id=MIXED_STRATEGY_IDENTIFIER_V2)
+    assert strategy_rules(second).shared_board_chop_caliber is True
+    with pytest.raises(MixedStrategyError):
+        strategy_rules(_manifest((fixture,), strategy_id="mixed-local@3"))
+
+
+def test_behavior_collection_follows_the_manifest_identity() -> None:
+    """行为矩阵必须按清单身份计算：第二版在共享牌面上的跟注质量高于首版。"""
+    fixture = build_node("shared-board", 2)
+    first = collect_behavior(_manifest((fixture,)))
+    second = collect_behavior(
+        _manifest((fixture,), strategy_id=MIXED_STRATEGY_IDENTIFIER_V2)
+    )
+    first_rows = {row.style: row for row in first.categories}
+    second_rows = {row.style: row for row in second.categories}
+    assert set(first_rows) == set(second_rows)
+    for style, row in first_rows.items():
+        assert second_rows[style].mean_call_units > row.mean_call_units
+
+
+def test_adversarial_batch_refuses_an_unregistered_identity() -> None:
+    with pytest.raises(MixedStrategyError):
+        run_adversarial_batch(stage="A", allow_matches=True, identifier="mixed-local@3")
 
 
 def test_depth_scaling_rules(frozen: MixedFixtureManifest) -> None:

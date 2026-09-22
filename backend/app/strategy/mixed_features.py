@@ -39,6 +39,10 @@ _FLOP_OUTS_WEIGHT = 12
 _TURN_OUTS_WEIGHT = 8
 # 河牌共享牌面（自身最佳牌型与公共五张完全相同）的安全上限。
 _SHARED_BOARD_CAP = 450
+# 同花至少需要公共牌提供的同花张数；不足则该花色不可能成同花。
+_BOARD_FLUSH_SUIT_FLOOR = 3
+# 任意两张底牌最多能补上的点数缺口。
+_HOLE_CARD_BUDGET = 2
 
 # 摘要中 bet / raise 的列索引：用于统计本街对手主动动作。
 _BET_INDEX = 3
@@ -77,6 +81,8 @@ class MixedFeatures:
     street_bet: int
     preflop_unraised: bool
     hole_ranks: tuple[int, int]
+    # 河牌时自身最佳牌型等同于公共五张，且该牌型已不可能被任何两张底牌超越。
+    shared_board_locked: bool = False
 
     @property
     def spr_denominator(self) -> int:
@@ -131,12 +137,19 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         base = _preflop_base(holes)
         draw = 0
         texture = 0
+        shared_locked = False
     else:
         hero_rank = evaluate_fast([*holes, *board])
         base = _postflop_base(hero_rank, holes, board)
-        if len(board) == 5 and hero_rank == evaluate_fast(board):
+        board_rank = evaluate_fast(board) if len(board) == 5 else None
+        if board_rank is not None and hero_rank == board_rank:
             # 与公共五张完全同型：保守封顶，不据此判定可弃或该跟。
             base = min(base, _SHARED_BOARD_CAP)
+        shared_locked = (
+            board_rank is not None
+            and hero_rank == board_rank
+            and _board_hand_is_untouchable(board, board_rank)
+        )
         draw = _draw_score(holes, board, hero_rank.category)
         texture = _texture(hero_rank.category, board)
 
@@ -165,6 +178,7 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         # 翻前尚无自愿加注时，开池尺寸按人头的名义目标给出。
         preflop_unraised=(street is Street.PREFLOP and context.streets[0].last_aggressor is None),
         hole_ranks=(ranks[0], ranks[1]),
+        shared_board_locked=shared_locked,
     )
 
 
@@ -274,6 +288,55 @@ def _kicker_increment(
             return 0
         return -40
     return 0
+
+
+# ------------------------------------------------------------------ 共享牌面锁定
+
+
+def _highest_straight_window(ranks: set[int], hole_budget: int) -> int:
+    """点数集合能用至多 ``hole_budget`` 张外部牌补齐的最高五连窗口高度。
+
+    轮子顺子按 5 计（与评估器的顺子决胜牌口径一致）；一个也补不出时返回 0。
+    """
+    best = 0
+    for high in range(Rank.ACE.value, Rank.FIVE.value - 1, -1):
+        window = (
+            {Rank.ACE.value, 2, 3, 4, 5}
+            if high == Rank.FIVE.value
+            else set(range(high - 4, high + 1))
+        )
+        if len(window - ranks) <= hole_budget:
+            best = max(best, high)
+    return best
+
+
+def _board_hand_is_untouchable(board: Sequence[Card], board_rank: HandRank) -> bool:
+    """公共五张自身的牌型是否已不可能被任何两张底牌超越。
+
+    只在能够证明时返回真：此时用公共牌打到底至少不输，与「公共牌本身很弱、只是恰好同型」
+    是两回事。判定只读公共五张，不枚举对手底牌，也不改变既有的保守封顶。
+    """
+    rank_counts = Counter(card.rank.value for card in board)
+    suit_counts = Counter(card.suit for card in board)
+    if board_rank.category is HandCategory.STRAIGHT_FLUSH:
+        # 同花顺面上所有公共牌同花色，只有更高的同花顺能超越。
+        suited = {card.rank.value for card in board}
+        return _highest_straight_window(suited, _HOLE_CARD_BUDGET) <= board_rank.tiebreak[0]
+    if max(suit_counts.values()) >= _BOARD_FLUSH_SUIT_FLOOR:
+        # 公共至少三张同花：两张同花底牌即可成同花或抬高已有同花。
+        return False
+    if board_rank.category is HandCategory.FOUR_OF_A_KIND:
+        # 公共四条已用掉四张同点数牌，底牌既凑不出更高四条，也凑不出葫芦。
+        return True
+    if max(rank_counts.values()) >= 3:
+        # 公共三条：任一底牌配上即成四条。
+        return False
+    if board_rank.category is not HandCategory.STRAIGHT:
+        return False
+    if max(rank_counts.values()) >= 2:
+        # 顺子面理论上不可能有对子；保留判定以免依赖「恰好五张」的隐含前提。
+        return False
+    return _highest_straight_window(set(rank_counts), _HOLE_CARD_BUDGET) <= board_rank.tiebreak[0]
 
 
 # ------------------------------------------------------------------ 听牌潜力

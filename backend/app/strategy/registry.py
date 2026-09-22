@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from .heuristic import HeuristicStrategy
 from .interface import Strategy
-from .mixed_strategy import MixedLocalStrategy
+from .mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V2, MixedLocalStrategy
 from .random_strategy import RandomStrategy
 
 
@@ -101,5 +101,17 @@ register_strategy(
         version=1,
         factory=lambda seed: MixedLocalStrategy(seed=seed),
         description="本地规则型混合对手：座位分派多风格、动作与尺度联合混合、随机源域分离",
+    ),
+)
+# 第二版与首版并存：首版的身份含义、分布与证据保持不变，不覆盖也不迁移。
+register_strategy(
+    StrategySpec(
+        identifier="mixed-local@2",
+        name="mixed-local",
+        version=2,
+        factory=lambda seed: MixedLocalStrategy(
+            seed=seed, identifier=MIXED_STRATEGY_IDENTIFIER_V2
+        ),
+        description="本地规则型混合对手第二版：锁定平分局面按分池价格处理，其余规则与首版一致",
     ),
 )

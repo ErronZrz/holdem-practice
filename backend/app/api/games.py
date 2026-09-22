@@ -25,7 +25,7 @@ from app.storage.db import get_db
 from app.storage.hand_history import build_hand_history
 from app.storage.models import utcnow
 from app.strategy import (
-    MIXED_STRATEGY_IDENTIFIER,
+    MIXED_STRATEGY_IDENTIFIERS,
     MixedContextError,
     MixedLocalStrategy,
     MixedPolicyError,
@@ -79,8 +79,8 @@ def _make_bot(
     root_key: bytes | None = None,
 ) -> Strategy:
     """经受控注册表构造 Bot；新策略复用已派生的主键，避免重复取系统熵。"""
-    if root_key is not None and strategy_name == MIXED_STRATEGY_IDENTIFIER:
-        return MixedLocalStrategy(root_key=root_key)
+    if root_key is not None and strategy_name in MIXED_STRATEGY_IDENTIFIERS:
+        return MixedLocalStrategy(root_key=root_key, identifier=strategy_name)
     return create_strategy(strategy_name, seed)
 
 
@@ -317,9 +317,9 @@ def create_game(
     root_key: bytes | None = None
     summary: MixedSummaryTracker | None = None
     engine_seed = req.seed
-    if req.bot_strategy == MIXED_STRATEGY_IDENTIFIER:
+    if req.bot_strategy in MIXED_STRATEGY_IDENTIFIERS:
         root_key = derive_root_key(req.seed)
-        engine_seed = derive_deck_seed(root_key)
+        engine_seed = derive_deck_seed(root_key, req.bot_strategy)
         summary = MixedSummaryTracker()
 
     engine = PokerEngine(

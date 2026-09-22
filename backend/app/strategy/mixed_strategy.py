@@ -22,9 +22,12 @@ from app.poker.state import GameState
 from .mixed_context import MixedContextError, VerifiedMixedInput, require_mixed_input
 from .mixed_features import MixedFeatures, features_for
 from .mixed_policy import (
+    MIXED_LOCAL_V1_RULES,
+    MIXED_LOCAL_V2_RULES,
     MIXED_STYLE_ORDER,
     HandMode,
     MixedDistribution,
+    MixedPolicyRules,
     MixedStyle,
     build_distribution,
     hand_mode_for,
@@ -32,12 +35,35 @@ from .mixed_policy import (
 
 # 受控新身份：指本地规则、风格分配、尺寸表、概率量化与随机分流的整个配置集合。
 MIXED_STRATEGY_IDENTIFIER = "mixed-local@1"
+# 第二版身份：只改共享牌面的跟注价格口径，其余规则与首版逐项一致。
+MIXED_STRATEGY_IDENTIFIER_V2 = "mixed-local@2"
+MIXED_STRATEGY_IDENTIFIERS: tuple[str, ...] = (
+    MIXED_STRATEGY_IDENTIFIER,
+    MIXED_STRATEGY_IDENTIFIER_V2,
+)
+# 身份到规则口径的映射；旧身份的含义与分布不随新身份改变。
+MIXED_STRATEGY_RULES: dict[str, MixedPolicyRules] = {
+    MIXED_STRATEGY_IDENTIFIER: MIXED_LOCAL_V1_RULES,
+    MIXED_STRATEGY_IDENTIFIER_V2: MIXED_LOCAL_V2_RULES,
+}
 # 手模式取值的均匀整数上界。
 _HAND_MODE_ROLL_RANGE = 100
 
 
 class MixedStrategyError(ValueError):
-    """座位集合不一致、行动者不属于 Bot 座位或未知座位时抛出。"""
+    """座位集合不一致、行动者不属于 Bot 座位或身份未注册时抛出。"""
+
+
+def _require_identifier(identifier: str) -> str:
+    """未注册的身份直接失败，避免为不存在的版本派生随机流。"""
+    if identifier not in MIXED_STRATEGY_RULES:
+        raise MixedStrategyError(f"未注册的新策略身份：{identifier}")
+    return identifier
+
+
+def rules_for_identifier(identifier: str) -> MixedPolicyRules:
+    """取身份对应的规则口径。"""
+    return MIXED_STRATEGY_RULES[_require_identifier(identifier)]
 
 
 def derive_root_key(seed: int | None) -> bytes:
@@ -58,14 +84,14 @@ def _derived_int(digest: bytes) -> int:
     return int.from_bytes(digest, "big")
 
 
-def derive_deck_seed(root_key: bytes) -> int:
+def derive_deck_seed(root_key: bytes, identifier: str = MIXED_STRATEGY_IDENTIFIER) -> int:
     """牌堆派生种子：与 Bot 派生流分离，可传给既有引擎 seed 参数。"""
-    return _derived_int(_derive(root_key, (MIXED_STRATEGY_IDENTIFIER, "deck")))
+    return _derived_int(_derive(root_key, (_require_identifier(identifier), "deck")))
 
 
-def derive_bots_key(root_key: bytes) -> bytes:
+def derive_bots_key(root_key: bytes, identifier: str = MIXED_STRATEGY_IDENTIFIER) -> bytes:
     """Bot 分支的父级键：分派器与子策略只拿到它，拿不到主键。"""
-    return _derive(root_key, (MIXED_STRATEGY_IDENTIFIER, "bots"))
+    return _derive(root_key, (_require_identifier(identifier), "bots"))
 
 
 def seat_style_map(bot_seats: Iterable[int]) -> dict[int, MixedStyle]:
@@ -80,10 +106,18 @@ def seat_style_map(bot_seats: Iterable[int]) -> dict[int, MixedStyle]:
 class MixedSeatPolicy:
     """单个 Bot 座位的私有子策略：无状态、只持有本座位的派生键与固定风格。"""
 
-    def __init__(self, *, seat: int, style: MixedStyle, seat_key: bytes) -> None:
+    def __init__(
+        self,
+        *,
+        seat: int,
+        style: MixedStyle,
+        seat_key: bytes,
+        rules: MixedPolicyRules = MIXED_LOCAL_V1_RULES,
+    ) -> None:
         self._seat = seat
         self._style = style
         self._seat_key = seat_key
+        self._rules = rules
 
     @property
     def seat(self) -> int:
@@ -103,7 +137,9 @@ class MixedSeatPolicy:
     ) -> MixedDistribution:
         """给出本次决策的分布；显式指定模式只供离线验证与测试使用。"""
         features = features_for(verified, legal)
-        return build_distribution(features, legal, self._style, mode or self.hand_mode(verified))
+        return build_distribution(
+            features, legal, self._style, mode or self.hand_mode(verified), self._rules
+        )
 
     def features_for(self, verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeatures:
         """暴露特征供离线验证与报告使用，不改变抽样路径。"""
@@ -112,7 +148,9 @@ class MixedSeatPolicy:
     def choose_action(self, verified: VerifiedMixedInput, legal: LegalActions) -> Action:
         """按本座位派生流采样一个动作；不读取其他座位或主键。"""
         mode = self.hand_mode(verified)
-        distribution = build_distribution(features_for(verified, legal), legal, self._style, mode)
+        distribution = build_distribution(
+            features_for(verified, legal), legal, self._style, mode, self._rules
+        )
         return distribution.sample(self._action_rng(verified))
 
     def hand_mode(self, verified: VerifiedMixedInput) -> HandMode:
@@ -139,9 +177,12 @@ class MixedLocalStrategy:
         *,
         root_key: bytes | None = None,
         bot_seats: Sequence[int] | None = None,
+        identifier: str = MIXED_STRATEGY_IDENTIFIER,
     ) -> None:
+        self._identifier = _require_identifier(identifier)
+        self._rules = MIXED_STRATEGY_RULES[self._identifier]
         self._root_key = derive_root_key(seed) if root_key is None else root_key
-        self._bots_key = derive_bots_key(self._root_key)
+        self._bots_key = derive_bots_key(self._root_key, self._identifier)
         self._policies: dict[int, MixedSeatPolicy] = {}
         self._bot_seats: tuple[int, ...] = ()
         if bot_seats is not None:
@@ -151,6 +192,11 @@ class MixedLocalStrategy:
     def bot_seats(self) -> tuple[int, ...]:
         """已绑定的 Bot 座位集合；未绑定时为空元组。"""
         return self._bot_seats
+
+    @property
+    def identifier(self) -> str:
+        """本实例的版本身份。"""
+        return self._identifier
 
     def style_for(self, seat: int) -> MixedStyle:
         """查询某座位的固定风格，供离线报告与测试使用。"""
@@ -202,6 +248,7 @@ class MixedLocalStrategy:
                 style=styles[seat],
                 # 座位键由分派器派生后单向交给子策略，子策略拿不到父级键。
                 seat_key=_derive(self._bots_key, ("seat", seat)),
+                rules=self._rules,
             )
             for seat in candidate
         }

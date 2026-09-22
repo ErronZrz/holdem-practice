@@ -20,7 +20,7 @@ import statistics
 import sys
 import time
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -47,12 +47,14 @@ from app.strategy.mixed_policy import (
     MIXED_DISTRIBUTION_UNITS,
     STYLE_PARAMETERS,
     HandMode,
+    MixedPolicyRules,
     MixedStyle,
 )
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER,
     MixedLocalStrategy,
     MixedSeatPolicy,
+    rules_for_identifier,
 )
 from app.strategy.projection import project_for_actor
 
@@ -188,9 +190,13 @@ MIXED_REPORT_FORMAT = (
 )
 
 
-def config_digest() -> str:
-    """策略配置摘要：只覆盖固定的规则参数表与量化口径，不含任何运行时状态。"""
-    payload = {
+def config_digest(identifier: str = MIXED_STRATEGY_IDENTIFIER) -> str:
+    """策略配置摘要：只覆盖固定的规则参数表与量化口径，不含任何运行时状态。
+
+    首版身份的载荷已被外部冻结清单逐字引用，因此不追加任何字段；其余身份额外写入
+    自身的规则口径，避免两套不同的分布共用同一个配置摘要。未注册身份在此显式失败。
+    """
+    payload: dict[str, object] = {
         "distribution_schema": MIXED_DISTRIBUTION_SCHEMA_VERSION,
         "distribution_units": MIXED_DISTRIBUTION_UNITS,
         "hand_mode_bounds": list(HAND_MODE_ROLL_BOUNDS),
@@ -205,15 +211,29 @@ def config_digest() -> str:
             for style in MixedStyle
         },
     }
+    if identifier != MIXED_STRATEGY_IDENTIFIER:
+        rules = rules_for_identifier(identifier)
+        payload["rules"] = asdict(rules)
     material = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def frozen_manifest(*, code_identity: str, output_dir: str) -> MixedFixtureManifest:
+def strategy_rules(manifest: MixedFixtureManifest) -> MixedPolicyRules:
+    """清单声明的策略身份对应的规则口径；未注册身份在此显式失败。"""
+    return rules_for_identifier(manifest.strategy_id)
+
+
+def frozen_manifest(
+    *,
+    code_identity: str,
+    output_dir: str,
+    strategy_id: str = MIXED_STRATEGY_IDENTIFIER,
+) -> MixedFixtureManifest:
     """按规格常量装配冻结清单；节点由配方生成，机械明细由本模块注入。"""
     return build_frozen_manifest(
+        strategy_id=strategy_id,
         code_identity=code_identity,
-        config_digest=config_digest(),
+        config_digest=config_digest(strategy_id),
         seeds=MIXED_MAIN_SEEDS,
         output_dir=output_dir,
         scenario_order=MIXED_SCENARIO_ORDER,
@@ -745,6 +765,7 @@ def collect_behavior(
                 seat_key=focus_seat_key(
                     int(manifest.seeds[0]), style.value, fixture.player_count, 0
                 ),
+                rules=strategy_rules(manifest),
             )
             bucket = style_buckets[style.value]
             category_bucket = category_buckets.setdefault(
@@ -898,7 +919,13 @@ def run_cost_matrix(
         # 一个格只有在真正产出样本后才算已执行，避免首个样本就失败的格被记为已完成。
         produced = False
         for _ in range(quota):
-            timing = time_decision(fixture, style, depth, seed=int(manifest.seeds[0]))
+            timing = time_decision(
+                fixture,
+                style,
+                depth,
+                seed=int(manifest.seeds[0]),
+                identifier=manifest.strategy_id,
+            )
             tally.decision.append(timing.decision_path_ms)
             tally.apply_ms.append(timing.engine_apply_ms)
             tally.summary_ms.append(timing.summary_update_ms)
@@ -954,6 +981,7 @@ def time_decision(
     depth_bb: int,
     *,
     seed: int,
+    identifier: str = MIXED_STRATEGY_IDENTIFIER,
 ) -> DecisionTiming:
     """在一个节点上计时一次完整决策；牌面与前置动作全部来自清单。"""
     adjusted = fixture_at_depth(fixture, depth_bb)
@@ -962,7 +990,9 @@ def time_decision(
         validation_root_key(seed), ("focus", style, fixture.node_id, depth_bb)
     )
     strategy = MixedLocalStrategy(
-        root_key=root, bot_seats=tuple(range(adjusted.player_count))
+        root_key=root,
+        bot_seats=tuple(range(adjusted.player_count)),
+        identifier=identifier,
     )
     return measure_decision(applied.engine, applied.tracker, strategy)
 
@@ -988,7 +1018,13 @@ def run_supplementary_matrix(
             fixture = fixtures[executed % len(fixtures)]
             executed += 1
             for _ in range(samples_per_cell):
-                timing = time_decision(fixture, MixedStyle.TIGHT.value, 100, seed=manifest.seeds[0])
+                timing = time_decision(
+                    fixture,
+                    MixedStyle.TIGHT.value,
+                    100,
+                    seed=manifest.seeds[0],
+                    identifier=manifest.strategy_id,
+                )
                 samples.append(timing.decision_path_ms)
     return samples, executed
 
@@ -1042,6 +1078,7 @@ def _focus_mover(
     player_count: int,
     rotation: int,
     seat: int,
+    rules: MixedPolicyRules,
 ) -> object:
     if arm == "legacy-focus":
         return HeuristicStrategy(seed=seed)
@@ -1049,6 +1086,7 @@ def _focus_mover(
         seat=seat,
         style=style,
         seat_key=focus_seat_key(seed, style.value, player_count, rotation),
+        rules=rules,
     )
     return _PolicyMover(policy)
 
@@ -1083,6 +1121,7 @@ def play_adversarial_hand(
     arm: str,
     player_count: int,
     rotation: int,
+    rules: MixedPolicyRules,
 ) -> HandOutcome:
     """一手有界对照：每手重置到 100BB、盲注 5/10、不设抽水。"""
     engine = PokerEngine(
@@ -1111,6 +1150,7 @@ def play_adversarial_hand(
         player_count=player_count,
         rotation=rotation,
         seat=focus_seat,
+        rules=rules,
     )
     others = _opponent_mover(opponent, seed)
 
@@ -1199,6 +1239,7 @@ def run_adversarial_batch(
     stage: Literal["A", "B"],
     allow_matches: bool = False,
     tally: _MatchTally | None = None,
+    identifier: str = MIXED_STRATEGY_IDENTIFIER,
 ) -> _MatchTally:
     """执行第一批有界对照；达到动作上限的手截断、不补终局、不估算输赢。
 
@@ -1208,6 +1249,7 @@ def run_adversarial_batch(
         raise MixedValidationAuthorizationError("对抗对照属于评测实跑，须经阶段许可后显式开启")
     if tally is None:
         tally = _MatchTally()
+    rules = rules_for_identifier(identifier)
     for seed, style, opponent, arm, player_count, rotation in adversarial_schedule(stage):
         outcome = play_adversarial_hand(
             seed=seed,
@@ -1216,6 +1258,7 @@ def run_adversarial_batch(
             arm=arm,
             player_count=player_count,
             rotation=rotation,
+            rules=rules,
         )
         tally.truncated += 1 if outcome.truncated else 0
         tally.rows.append(
@@ -1310,6 +1353,8 @@ def run_validation(
         manifest=manifest,
         stage_a_receipt=stage_a_receipt,
     )
+    # 未注册身份在任何计算之前显式失败，避免报告身份与实际驱动口径不一致。
+    strategy_rules(frozen)
     directory = prepare_output_dir(output_dir)
     wall_started = time.perf_counter()
     cpu_started = time.process_time()
@@ -1375,7 +1420,12 @@ def run_validation(
             # 补充场景与主矩阵分开报告，不并入主路径的分布。
             supplementary_path = summarize_path(supplementary[:supplementary_target])
             supplementary_planned = supplementary_target
-            run_adversarial_batch(stage=full_stage, allow_matches=True, tally=match_tally)
+            run_adversarial_batch(
+                stage=full_stage,
+                allow_matches=True,
+                tally=match_tally,
+                identifier=frozen.strategy_id,
+            )
             matches = matches_from_tally(
                 match_tally, planned_hands=len(adversarial_schedule(full_stage))
             )
@@ -1426,7 +1476,7 @@ def run_validation(
         violations.append(MixedReportViolation(kind="replay-error", detail=failure))
 
     report = MixedValidationReport(
-        strategy_id=MIXED_STRATEGY_IDENTIFIER,
+        strategy_id=frozen.strategy_id,
         code_identity=frozen.code_identity,
         config_digest=frozen.config_digest,
         manifest_digest=frozen.digest(),

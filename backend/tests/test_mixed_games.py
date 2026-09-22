@@ -13,6 +13,7 @@ from app.storage.db import get_db, init_db
 from app.strategy.heuristic import HeuristicStrategy
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER,
+    MIXED_STRATEGY_IDENTIFIER_V2,
     MixedLocalStrategy,
     derive_deck_seed,
     derive_root_key,
@@ -110,6 +111,26 @@ def test_explicit_mixed_strategy_is_selectable() -> None:
     # 主键与派生种子不外发、不落库。
     assert "seed" not in data
     assert data["players"][1]["hole_cards"] == []
+
+
+def test_second_mixed_version_is_selectable_and_plays_a_hand() -> None:
+    """第二版身份可显式选择、能打完一手，且与首版使用不同的牌堆派生流。"""
+    client = TestClient(app)
+    data = client.post(
+        "/games",
+        json={"num_players": 3, "seed": 11, "bot_strategy": MIXED_STRATEGY_IDENTIFIER_V2},
+    ).json()
+    session_id = data["session_id"]
+    assert _stored_strategy(session_id) == MIXED_STRATEGY_IDENTIFIER_V2
+    runtime = games._registry[session_id]
+    assert isinstance(runtime.bot, MixedLocalStrategy)
+    assert runtime.bot.identifier == MIXED_STRATEGY_IDENTIFIER_V2
+    assert runtime.summary is not None
+    root = derive_root_key(11)
+    assert derive_deck_seed(root, MIXED_STRATEGY_IDENTIFIER_V2) != derive_deck_seed(
+        root, MIXED_STRATEGY_IDENTIFIER
+    )
+    assert _play_one_hand(client, session_id, data)["hand_over"] is True
 
 
 def test_unversioned_mixed_alias_is_rejected() -> None:

@@ -45,6 +45,20 @@ class MixedPolicyError(ValueError):
     """合法动作自相矛盾、参数越界或分布退化时抛出。"""
 
 
+@dataclass(frozen=True)
+class MixedPolicyRules:
+    """一版规则口径的开关集合：新旧身份共用实现，但分布互不影响。"""
+
+    # 锁定平分局面按分池口径处理：免除人数惩罚，并按共同分割底池的人数折减跟注价格。
+    shared_board_chop_caliber: bool = False
+
+
+# 首版口径：共享牌面封顶后仍按普通跟注处理。
+MIXED_LOCAL_V1_RULES = MixedPolicyRules()
+# 第二版口径：锁定平分局面改用分池口径。
+MIXED_LOCAL_V2_RULES = MixedPolicyRules(shared_board_chop_caliber=True)
+
+
 class MixedStyle(StrEnum):
     """首期三种基础风格；名称不是强度认证。"""
 
@@ -168,11 +182,12 @@ def build_distribution(
     legal: LegalActions,
     style: MixedStyle,
     mode: HandMode,
+    rules: MixedPolicyRules = MIXED_LOCAL_V1_RULES,
 ) -> MixedDistribution:
     """按固定规则计算当前局面的联合动作/尺度分布。"""
     _require_coherent_legal(legal)
     parameters = STYLE_PARAMETERS[style]
-    score = _score(features, parameters, mode)
+    score = _score(features, parameters, mode, rules)
 
     depth = 0
     if features.spr_at_most(1):
@@ -180,8 +195,12 @@ def build_distribution(
     elif features.spr_at_least(6):
         depth = 25
     aggression_penalty = 25 * features.recent_aggression
+    call_price = features.price
+    if rules.shared_board_chop_caliber and features.shared_board_locked:
+        # 锁定平分局面上底池要与在场者共同分割，跟注价格按人数折减。
+        call_price = features.price // (features.contenders + 1)
     call_threshold = (310 if features.street is Street.PREFLOP else 350) + (
-        450 * features.price
+        450 * call_price
     ) // 1000 + aggression_penalty + depth
     value_threshold = _VALUE_THRESHOLDS[features.street] + aggression_penalty + depth
 
@@ -224,15 +243,24 @@ def build_distribution(
 # ------------------------------------------------------------------ 规则评分
 
 
-def _score(features: MixedFeatures, parameters: StyleParameters, mode: HandMode) -> int:
+def _score(
+    features: MixedFeatures,
+    parameters: StyleParameters,
+    mode: HandMode,
+    rules: MixedPolicyRules = MIXED_LOCAL_V1_RULES,
+) -> int:
     """人格与每手模式变换后的规则评分 S，最终夹在 0–1000。"""
+    contender_penalty = _CONTENDER_PENALTY * (features.contenders - 1)
+    if rules.shared_board_chop_caliber and features.shared_board_locked:
+        # 锁定平分局面上英雄不会输，人数不再降低其权益，故不施加人数惩罚。
+        contender_penalty = 0
     return clip(
         features.base
         + features.draw
         + features.position
         + parameters.looseness
         + _MODE_SCORE_OFFSET[mode]
-        - _CONTENDER_PENALTY * (features.contenders - 1)
+        - contender_penalty
         - features.texture,
         0,
         1000,
