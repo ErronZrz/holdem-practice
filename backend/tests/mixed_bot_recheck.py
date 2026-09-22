@@ -37,6 +37,7 @@ from .mixed_bot_validation import (
     peak_rss_bytes,
     play_adversarial_hand,
     prepare_output_dir,
+    strategy_rules,
 )
 
 RECHECK_SCHEMA_VERSION = "mixed-recheck.v1"
@@ -287,6 +288,10 @@ def recheck(
         raise MixedRecheckError(f"不支持的阶段：{receipt.stage}")
     if receipt_path is None:
         raise MixedRecheckError("必须给出回执文件路径，用于记录来源与校验摘要")
+    # 回执与清单必须是同一个身份，否则重算出来的不是同一套分布。
+    if receipt.strategy_id != manifest.strategy_id:
+        raise MixedRecheckError("回执身份与清单身份不一致，停止补算且不写报告")
+    rules = strategy_rules(manifest)
     directory = prepare_output_dir(output_dir)
     started = time.perf_counter()
     cpu_started = time.process_time()
@@ -304,6 +309,7 @@ def recheck(
             arm=arm,
             player_count=player_count,
             rotation=rotation,
+            rules=rules,
         )
         for seed, style, opponent, arm, player_count, rotation in schedule
     ]

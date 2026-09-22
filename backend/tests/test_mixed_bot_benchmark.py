@@ -18,7 +18,11 @@ import pytest
 from app.poker.actions import ActionType
 from app.poker.evaluator import evaluate_fast
 from app.poker.state import Street
-from app.strategy.mixed_policy import MIXED_DISTRIBUTION_UNITS, MixedStyle
+from app.strategy.mixed_policy import (
+    MIXED_DISTRIBUTION_UNITS,
+    MIXED_LOCAL_V2_RULES,
+    MixedStyle,
+)
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER,
     MIXED_STRATEGY_IDENTIFIER_V2,
@@ -26,6 +30,7 @@ from app.strategy.mixed_strategy import (
     MixedStrategyError,
 )
 
+from . import mixed_bot_recheck
 from . import mixed_bot_validation as validation
 from .mixed_bot_recheck import (
     MixedRecheckError,
@@ -371,6 +376,38 @@ def test_behavior_collection_follows_the_manifest_identity() -> None:
 def test_adversarial_batch_refuses_an_unregistered_identity() -> None:
     with pytest.raises(MixedStrategyError):
         run_adversarial_batch(stage="A", allow_matches=True, identifier="mixed-local@3")
+
+
+def test_recheck_replays_with_the_receipt_caliber(monkeypatch) -> None:
+    """补算的对照回放必须收到回执身份对应的口径，且不得与清单身份不一致。"""
+    manifest = _manifest(
+        (build_node("shared-board", 2),), strategy_id=MIXED_STRATEGY_IDENTIFIER_V2
+    )
+    receipt = run_validation(manifest=manifest, stage="A", allow_stage="A")
+    seen: list[object] = []
+    original = mixed_bot_recheck.play_adversarial_hand
+
+    def _record(**kwargs: object) -> HandOutcome:
+        seen.append(kwargs.get("rules"))
+        return original(**kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(mixed_bot_recheck, "play_adversarial_hand", _record)
+    report = recheck(
+        manifest=manifest,
+        receipt=receipt,
+        receipt_path=__file__,
+        allow_recheck=True,
+    )
+    assert report.status == "completed"
+    assert seen and all(item is MIXED_LOCAL_V2_RULES for item in seen)
+    mismatched = receipt.model_copy(update={"strategy_id": MIXED_STRATEGY_IDENTIFIER})
+    with pytest.raises(MixedRecheckError):
+        recheck(
+            manifest=manifest,
+            receipt=mismatched,
+            receipt_path=__file__,
+            allow_recheck=True,
+        )
 
 
 def test_depth_scaling_rules(frozen: MixedFixtureManifest) -> None:
