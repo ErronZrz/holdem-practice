@@ -231,7 +231,7 @@ def test_second_identity_is_registered_alongside_the_first() -> None:
     )
 
 
-@pytest.mark.parametrize("value", ["mixed-local", "mixed-local@5", "mixed-local@1 "])
+@pytest.mark.parametrize("value", ["mixed-local", "mixed-local@6", "mixed-local@1 "])
 def test_unregistered_mixed_identifiers_still_fail(value: str) -> None:
     with pytest.raises(UnknownStrategyError):
         resolve_identifier(value)
@@ -250,14 +250,14 @@ def test_factory_keeps_each_version_on_its_own_caliber() -> None:
 def test_unregistered_identity_never_falls_back_to_the_first_version() -> None:
     """未注册身份必须显式失败，不得静默沿用首版口径或随机流。"""
     with pytest.raises(MixedStrategyError):
-        rules_for_identifier("mixed-local@5")
+        rules_for_identifier("mixed-local@6")
     with pytest.raises(MixedStrategyError):
-        MixedLocalStrategy(seed=1, identifier="mixed-local@5")
+        MixedLocalStrategy(seed=1, identifier="mixed-local@6")
     root = derive_root_key(11)
     with pytest.raises(MixedStrategyError):
-        derive_deck_seed(root, "mixed-local@5")
+        derive_deck_seed(root, "mixed-local@6")
     with pytest.raises(MixedStrategyError):
-        derive_bots_key(root, "mixed-local@5")
+        derive_bots_key(root, "mixed-local@6")
 
 
 def test_omitted_identifier_stays_on_the_first_version() -> None:

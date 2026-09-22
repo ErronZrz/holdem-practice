@@ -49,10 +49,11 @@ class MixedPolicyError(ValueError):
 
 
 @dataclass(frozen=True)
-class PreflopCallBonus:
-    """仅作用于翻前跟注分支的风格偏移；价值主动分支不受它影响。
+class StyleCallBonus:
+    """按风格取值的跟注偏移；价值主动分支不受它影响。
 
-    字段名与风格取值一一对应，因此可直接按风格取值取出对应偏移。
+    字段名与风格取值一一对应，因此可直接按风格取值取出对应偏移；至于它作用于
+    哪条街，由承载它的口径字段决定。
     """
 
     tight: int = 0
@@ -60,11 +61,15 @@ class PreflopCallBonus:
     calling: int = 0
 
 
+# 旧名保留为别名：既有身份与既有测试都按这个名字引用同一种结构。
+PreflopCallBonus = StyleCallBonus
+
+
 @dataclass(frozen=True)
 class MixedPolicyRules:
     """一版规则口径的开关集合：新旧身份共用实现，但分布互不影响。
 
-    翻前三项取值都写进口径对象，使配置摘要能覆盖它们；首版与第二版取默认值，
+    各版取值都写进口径对象，使配置摘要能覆盖它们；首版与第二版取默认值，
     因此分布逐位不变。
     """
 
@@ -75,7 +80,9 @@ class MixedPolicyRules:
     # 翻前每多一名未弃牌对手的评分惩罚。
     preflop_contender_penalty: int = _CONTENDER_PENALTY
     # 翻前仅作用于跟注分支的风格偏移。
-    preflop_call_bonus: PreflopCallBonus = PreflopCallBonus()
+    preflop_call_bonus: StyleCallBonus = StyleCallBonus()
+    # 翻后仅作用于跟注分支的风格偏移，用于拉开被动分支上的风格差异。
+    postflop_call_bonus: StyleCallBonus = StyleCallBonus()
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -95,6 +102,14 @@ MIXED_LOCAL_V4_RULES = MixedPolicyRules(
     preflop_price_weight=150,
     preflop_contender_penalty=30,
     preflop_call_bonus=PreflopCallBonus(tight=30, aggressive=35, calling=110),
+)
+# 第五版口径：翻前与第四版逐字一致，只给跟注型加一个翻后被动的跟注偏移。
+MIXED_LOCAL_V5_RULES = MixedPolicyRules(
+    shared_board_chop_caliber=True,
+    preflop_price_weight=150,
+    preflop_contender_penalty=30,
+    preflop_call_bonus=PreflopCallBonus(tight=30, aggressive=35, calling=110),
+    postflop_call_bonus=StyleCallBonus(tight=0, aggressive=0, calling=100),
 )
 
 
@@ -245,8 +260,10 @@ def build_distribution(
     ) // 1000 + aggression_penalty + depth
     value_threshold = _VALUE_THRESHOLDS[features.street] + aggression_penalty + depth
 
-    # 翻前风格偏移只作用于被动分支：价值主动质量仍按未偏移的评分计算。
-    passive_score = score + (_preflop_call_bonus(rules, style) if is_preflop else 0)
+    # 跟注偏移只作用于被动分支：价值主动质量仍按未偏移的评分计算。
+    passive_score = score + (
+        _preflop_call_bonus(rules, style) if is_preflop else _postflop_call_bonus(rules, style)
+    )
     fold_weight = max(0, call_threshold - passive_score + 160) * parameters.fold_percent
     call_weight = max(0, passive_score - call_threshold + 160) * parameters.call_percent
     value_quality = max(0, score - value_threshold + 120)
@@ -316,6 +333,11 @@ def _score(
 def _preflop_call_bonus(rules: MixedPolicyRules, style: MixedStyle) -> int:
     """取该风格在翻前跟注分支上的偏移；字段名与风格取值一一对应。"""
     return int(getattr(rules.preflop_call_bonus, style.value))
+
+
+def _postflop_call_bonus(rules: MixedPolicyRules, style: MixedStyle) -> int:
+    """取该风格在翻后跟注分支上的偏移；字段名与风格取值一一对应。"""
+    return int(getattr(rules.postflop_call_bonus, style.value))
 
 
 def _non_value_quality(features: MixedFeatures) -> int:
