@@ -162,6 +162,23 @@ class _CellTally:
     truncated: int = 0
 
 
+def receipt_schedule(
+    stage: str,
+    seed_blocks: Sequence[int],
+    rows: Sequence[MixedMatchFamilyRow],
+) -> list[tuple[int, MixedStyle, str, str, int, int]]:
+    """按回执自身内容重建对照排期。
+
+    种子块取回执记录的主种子，对手族序取逐手行的首次出现顺序；这样换过主种子
+    或族集的回执也能补算，不退回任何一套硬编码口径，也不新增命令行开关。
+    """
+    return adversarial_schedule(
+        stage,  # type: ignore[arg-type]
+        seeds=tuple(seed_blocks),
+        families=tuple(dict.fromkeys(row.opponent for row in rows)),
+    )
+
+
 def aggregate_matches(
     schedule: Sequence[tuple[int, MixedStyle, str, str, int, int]],
     outcomes: Sequence[HandOutcome],
@@ -314,7 +331,9 @@ def recheck(
     if not behavior_matches_receipt(receipt, rebuilt_behavior):
         raise MixedRecheckError("重算的行为指标与既有回执不一致，停止补算且不写报告")
 
-    schedule = adversarial_schedule(receipt.stage)
+    schedule = receipt_schedule(
+        receipt.stage, receipt.matches.seed_blocks, receipt.matches.rows
+    )
     outcomes = [
         play_adversarial_hand(
             seed=seed,

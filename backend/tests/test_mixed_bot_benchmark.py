@@ -1092,6 +1092,48 @@ def test_limit_wording_follows_the_seed_block_count() -> None:
         mixed_bot_recheck.recheck_limitations(5)
 
 
+def test_iqv_nodes_can_be_rebuilt_at_another_depth() -> None:
+    """第二套节点必须按自己的配方派生深度；拿首套基线比对会误判为不一致。"""
+    node = next(
+        item
+        for item in build_frozen_iqv_nodes()
+        if item.category == "hu-blind-position" and item.player_count == 2
+    )
+    assert node.depth_scalable is True
+    shallow = MIXED_DEPTHS_BB[0]
+    derived = fixture_at_depth(node, shallow)
+    assert derived.node_id == node.node_id
+    assert derived.starting_stack == shallow * MIXED_BIG_BLIND
+    assert derived.board == node.board
+    assert derived.hole_cards == node.hole_cards
+    # 标识形状决定归属的配方集；未知形状必须显式失败，不得拿别的配方继续跑。
+    with pytest.raises(MixedValidationAuthorizationError):
+        fixture_at_depth(_hu_fixture(node_id="unopened-open-n2-unknown"), shallow)
+
+
+def test_recheck_schedule_follows_the_receipt_content() -> None:
+    """补算排期必须按回执自身的种子块与对手族重建，不能退回首套口径。"""
+    schedule = adversarial_schedule("A", seeds=MIXED_IQV_MAIN_SEEDS, family_set="iqv")
+    rows = [
+        MixedMatchFamilyRow(
+            player_count=player_count,
+            style=style.value,
+            opponent=opponent,
+            arm=arm,
+            seed_block=seed,
+            rotation=rotation,
+            hands=1,
+            truncated_hands=0,
+            net_chips=0,
+            bb_per_100=0.0,
+        )
+        for seed, style, opponent, arm, player_count, rotation in schedule
+    ]
+    rebuilt = mixed_bot_recheck.receipt_schedule("A", MIXED_IQV_MAIN_SEEDS, rows)
+    assert rebuilt == schedule
+    assert {entry[2] for entry in rebuilt} == set(ADVERSARIAL_OPPONENT_FAMILIES_IQV)
+
+
 def test_aggregate_matches_uses_the_schedule_seed_blocks() -> None:
     """汇总必须按排期自身的种子块统计，换过主种子的排期不能丢掉块统计。"""
     schedule = [

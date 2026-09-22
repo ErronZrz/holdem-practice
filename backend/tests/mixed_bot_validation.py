@@ -67,6 +67,7 @@ from .mixed_bot_states import (
     MIXED_APPLICABLE_NODE_COUNT,
     MIXED_BIG_BLIND,
     MIXED_DEPTHS_BB,
+    MIXED_IQV_NODE_ID_SUFFIX,
     MIXED_PLANNED_SLOT_COUNT,
     MIXED_PLAYER_COUNTS,
     MIXED_SMALL_BLIND,
@@ -78,6 +79,7 @@ from .mixed_bot_states import (
     apply_node,
     build_frozen_iqv_nodes,
     build_frozen_manifest,
+    build_iqv_node,
     build_node,
     manifest_json,
 )
@@ -1146,8 +1148,32 @@ def usable_at_depth(fixture: MixedNodeFixture, depth_bb: int) -> bool:
     return fixture.depth_scalable or depth_bb == MIXED_DEPTHS_BB[1]
 
 
+def _rebuild_fixture(
+    fixture: MixedNodeFixture,
+    *,
+    starting_stack: int | None = None,
+) -> MixedNodeFixture:
+    """按节点标识回到它所属的那一套配方重建节点。
+
+    标识形状是节点归属配方的唯一标记：两种已知形状之外一律显式失败，
+    避免拿错配方的牌面继续跑。
+    """
+    base = f"{fixture.category}-n{fixture.player_count}"
+    if fixture.node_id == base:
+        builder = build_node
+    elif fixture.node_id == base + MIXED_IQV_NODE_ID_SUFFIX:
+        builder = build_iqv_node
+    else:
+        raise MixedValidationAuthorizationError(
+            f"节点标识 {fixture.node_id} 不属于任何已注册的配方集"
+        )
+    if starting_stack is None:
+        return builder(fixture.category, fixture.player_count)
+    return builder(fixture.category, fixture.player_count, starting_stack=starting_stack)
+
+
 def fixture_at_depth(fixture: MixedNodeFixture, depth_bb: int) -> MixedNodeFixture:
-    """把节点按同一配方在目标深度上重建；固定短码节点原样返回。
+    """把节点按它自己的配方在目标深度上重建；固定短码节点原样返回。
 
     只接受「由配方在其自身筹码深度上生成」的节点：重建不出与清单一致的基线时显式失败，
     避免静默换掉牌面、筹码或前置动作线。翻后开注额由目标深度下当时的合法区间决定，
@@ -1158,12 +1184,12 @@ def fixture_at_depth(fixture: MixedNodeFixture, depth_bb: int) -> MixedNodeFixtu
     target = depth_bb * MIXED_BIG_BLIND
     if target == fixture.starting_stack:
         return fixture
-    baseline = build_node(fixture.category, fixture.player_count)
+    baseline = _rebuild_fixture(fixture)
     if baseline.model_dump() != fixture.model_dump():
         raise MixedValidationAuthorizationError(
             f"节点 {fixture.node_id} 与配方基线不一致，不能按深度派生"
         )
-    return build_node(fixture.category, fixture.player_count, starting_stack=target)
+    return _rebuild_fixture(fixture, starting_stack=target)
 
 
 @dataclass
@@ -1338,16 +1364,20 @@ def adversarial_schedule(
     stage: Literal["A", "B"],
     *,
     seeds: Sequence[int] | None = None,
+    families: Sequence[str] | None = None,
     family_set: str = DEFAULT_ADVERSARIAL_FAMILY_SET,
 ) -> list[tuple[int, MixedStyle, str, str, int, int]]:
     """对照排期：阶段 A 只取首轮换的一个子集，阶段 B 为完整轮换。
 
-    主种子与对手族集可显式给出；省略时沿用既有常量，使既有调用逐字不变。
+    主种子、对手族序列与族集名称都可显式给出：显式族序列优先于族集名称；
+    全部省略时沿用既有常量，使既有调用逐字不变。
     """
     seed_blocks = MIXED_MAIN_SEEDS if seeds is None else tuple(seeds)
     if not seed_blocks:
         raise MixedValidationAuthorizationError("对照排期至少需要一个主种子块")
-    opponents = adversarial_families(family_set)
+    opponents = tuple(families) if families is not None else adversarial_families(family_set)
+    if not opponents:
+        raise MixedValidationAuthorizationError("对照排期至少需要一个对手族")
     schedule: list[tuple[int, MixedStyle, str, str, int, int]] = []
     if stage == "A":
         seed = seed_blocks[0]
