@@ -224,13 +224,14 @@ def test_second_identity_is_registered_alongside_the_first() -> None:
         MIXED_STRATEGY_IDENTIFIER,
         MIXED_STRATEGY_IDENTIFIER_V2,
     } <= set(known_identifiers())
-    assert MIXED_STRATEGY_IDENTIFIERS == (
+    # 后续版本会追加在末尾，因此这里只锁定前两版的顺序与并存关系。
+    assert MIXED_STRATEGY_IDENTIFIERS[:2] == (
         MIXED_STRATEGY_IDENTIFIER,
         MIXED_STRATEGY_IDENTIFIER_V2,
     )
 
 
-@pytest.mark.parametrize("value", ["mixed-local", "mixed-local@3", "mixed-local@1 "])
+@pytest.mark.parametrize("value", ["mixed-local", "mixed-local@4", "mixed-local@1 "])
 def test_unregistered_mixed_identifiers_still_fail(value: str) -> None:
     with pytest.raises(UnknownStrategyError):
         resolve_identifier(value)
@@ -249,14 +250,14 @@ def test_factory_keeps_each_version_on_its_own_caliber() -> None:
 def test_unregistered_identity_never_falls_back_to_the_first_version() -> None:
     """未注册身份必须显式失败，不得静默沿用首版口径或随机流。"""
     with pytest.raises(MixedStrategyError):
-        rules_for_identifier("mixed-local@3")
+        rules_for_identifier("mixed-local@4")
     with pytest.raises(MixedStrategyError):
-        MixedLocalStrategy(seed=1, identifier="mixed-local@3")
+        MixedLocalStrategy(seed=1, identifier="mixed-local@4")
     root = derive_root_key(11)
     with pytest.raises(MixedStrategyError):
-        derive_deck_seed(root, "mixed-local@3")
+        derive_deck_seed(root, "mixed-local@4")
     with pytest.raises(MixedStrategyError):
-        derive_bots_key(root, "mixed-local@3")
+        derive_bots_key(root, "mixed-local@4")
 
 
 def test_omitted_identifier_stays_on_the_first_version() -> None:

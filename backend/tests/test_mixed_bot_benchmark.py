@@ -318,7 +318,7 @@ def test_second_version_gets_its_own_config_digest() -> None:
 
 def test_config_digest_refuses_an_unregistered_identity() -> None:
     with pytest.raises(MixedStrategyError):
-        config_digest("mixed-local@3")
+        config_digest("mixed-local@4")
 
 
 def test_frozen_manifest_carries_the_requested_identity() -> None:
@@ -346,7 +346,7 @@ def test_frozen_manifest_refuses_an_unregistered_identity() -> None:
         frozen_manifest(
             code_identity="test-code-identity",
             output_dir="/tmp/test-output",
-            strategy_id="mixed-local@3",
+            strategy_id="mixed-local@4",
         )
 
 
@@ -356,7 +356,7 @@ def test_strategy_rules_follow_the_manifest_identity() -> None:
     second = _manifest((fixture,), strategy_id=MIXED_STRATEGY_IDENTIFIER_V2)
     assert strategy_rules(second).shared_board_chop_caliber is True
     with pytest.raises(MixedStrategyError):
-        strategy_rules(_manifest((fixture,), strategy_id="mixed-local@3"))
+        strategy_rules(_manifest((fixture,), strategy_id="mixed-local@4"))
 
 
 def test_behavior_collection_follows_the_manifest_identity() -> None:
@@ -375,7 +375,7 @@ def test_behavior_collection_follows_the_manifest_identity() -> None:
 
 def test_adversarial_batch_refuses_an_unregistered_identity() -> None:
     with pytest.raises(MixedStrategyError):
-        run_adversarial_batch(stage="A", allow_matches=True, identifier="mixed-local@3")
+        run_adversarial_batch(stage="A", allow_matches=True, identifier="mixed-local@4")
 
 
 def test_recheck_replays_with_the_receipt_caliber(monkeypatch) -> None:

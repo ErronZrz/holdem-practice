@@ -24,6 +24,7 @@ from .mixed_features import MixedFeatures, features_for
 from .mixed_policy import (
     MIXED_LOCAL_V1_RULES,
     MIXED_LOCAL_V2_RULES,
+    MIXED_LOCAL_V3_RULES,
     MIXED_STYLE_ORDER,
     HandMode,
     MixedDistribution,
@@ -37,14 +38,18 @@ from .mixed_policy import (
 MIXED_STRATEGY_IDENTIFIER = "mixed-local@1"
 # 第二版身份：只改共享牌面的跟注价格口径，其余规则与首版逐项一致。
 MIXED_STRATEGY_IDENTIFIER_V2 = "mixed-local@2"
+# 第三版身份：在第二版基础上放宽翻前跟注门槛，并让三档风格在翻前分开。
+MIXED_STRATEGY_IDENTIFIER_V3 = "mixed-local@3"
 MIXED_STRATEGY_IDENTIFIERS: tuple[str, ...] = (
     MIXED_STRATEGY_IDENTIFIER,
     MIXED_STRATEGY_IDENTIFIER_V2,
+    MIXED_STRATEGY_IDENTIFIER_V3,
 )
 # 身份到规则口径的映射；旧身份的含义与分布不随新身份改变。
 MIXED_STRATEGY_RULES: dict[str, MixedPolicyRules] = {
     MIXED_STRATEGY_IDENTIFIER: MIXED_LOCAL_V1_RULES,
     MIXED_STRATEGY_IDENTIFIER_V2: MIXED_LOCAL_V2_RULES,
+    MIXED_STRATEGY_IDENTIFIER_V3: MIXED_LOCAL_V3_RULES,
 }
 # 手模式取值的均匀整数上界。
 _HAND_MODE_ROLL_RANGE = 100

@@ -36,6 +36,9 @@ _DANGEROUS_SCORE_STRONG = 850
 _DANGEROUS_SCORE_SHORT = 550
 # 人数风险惩罚：每多一名未弃牌对手。
 _CONTENDER_PENALTY = 35
+# 跟注阈值的价格项权重：后翻后固定，翻前由规则口径给出。
+_PREFLOP_PRICE_WEIGHT = 450
+_POSTFLOP_PRICE_WEIGHT = 450
 # 连续进攻的封顶计数。
 _AGGRESSION_CAP = 3
 _SEAT_COUNT_FOR_U = {1: 12, 2: 6, 3: 3}
@@ -46,17 +49,46 @@ class MixedPolicyError(ValueError):
 
 
 @dataclass(frozen=True)
+class PreflopCallBonus:
+    """仅作用于翻前跟注分支的风格偏移；价值主动分支不受它影响。
+
+    字段名与风格取值一一对应，因此可直接按风格取值取出对应偏移。
+    """
+
+    tight: int = 0
+    aggressive: int = 0
+    calling: int = 0
+
+
+@dataclass(frozen=True)
 class MixedPolicyRules:
-    """一版规则口径的开关集合：新旧身份共用实现，但分布互不影响。"""
+    """一版规则口径的开关集合：新旧身份共用实现，但分布互不影响。
+
+    翻前三项取值都写进口径对象，使配置摘要能覆盖它们；首版与第二版取默认值，
+    因此分布逐位不变。
+    """
 
     # 锁定平分局面按分池口径处理：免除人数惩罚，并按共同分割底池的人数折减跟注价格。
     shared_board_chop_caliber: bool = False
+    # 翻前跟注阈值的价格项权重；后翻后另用固定权重。
+    preflop_price_weight: int = _PREFLOP_PRICE_WEIGHT
+    # 翻前每多一名未弃牌对手的评分惩罚。
+    preflop_contender_penalty: int = _CONTENDER_PENALTY
+    # 翻前仅作用于跟注分支的风格偏移。
+    preflop_call_bonus: PreflopCallBonus = PreflopCallBonus()
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
 MIXED_LOCAL_V1_RULES = MixedPolicyRules()
 # 第二版口径：锁定平分局面改用分池口径。
 MIXED_LOCAL_V2_RULES = MixedPolicyRules(shared_board_chop_caliber=True)
+# 第三版口径：在第二版基础上放宽翻前跟注门槛，并让三档风格在翻前分开。
+MIXED_LOCAL_V3_RULES = MixedPolicyRules(
+    shared_board_chop_caliber=True,
+    preflop_price_weight=150,
+    preflop_contender_penalty=30,
+    preflop_call_bonus=PreflopCallBonus(tight=0, aggressive=35, calling=110),
+)
 
 
 class MixedStyle(StrEnum):
@@ -195,17 +227,21 @@ def build_distribution(
     elif features.spr_at_least(6):
         depth = 25
     aggression_penalty = 25 * features.recent_aggression
+    is_preflop = features.street is Street.PREFLOP
+    price_weight = rules.preflop_price_weight if is_preflop else _POSTFLOP_PRICE_WEIGHT
     call_price = features.price
     if rules.shared_board_chop_caliber and features.shared_board_locked:
         # 锁定平分局面上底池要与在场者共同分割，跟注价格按人数折减。
         call_price = features.price // (features.contenders + 1)
-    call_threshold = (310 if features.street is Street.PREFLOP else 350) + (
-        450 * call_price
+    call_threshold = (310 if is_preflop else 350) + (
+        price_weight * call_price
     ) // 1000 + aggression_penalty + depth
     value_threshold = _VALUE_THRESHOLDS[features.street] + aggression_penalty + depth
 
-    fold_weight = max(0, call_threshold - score + 160) * parameters.fold_percent
-    call_weight = max(0, score - call_threshold + 160) * parameters.call_percent
+    # 翻前风格偏移只作用于被动分支：价值主动质量仍按未偏移的评分计算。
+    passive_score = score + (_preflop_call_bonus(rules, style) if is_preflop else 0)
+    fold_weight = max(0, call_threshold - passive_score + 160) * parameters.fold_percent
+    call_weight = max(0, passive_score - call_threshold + 160) * parameters.call_percent
     value_quality = max(0, score - value_threshold + 120)
     bluff_quality = _non_value_quality(features)
     aggression_scale = Fraction(
@@ -250,7 +286,10 @@ def _score(
     rules: MixedPolicyRules = MIXED_LOCAL_V1_RULES,
 ) -> int:
     """人格与每手模式变换后的规则评分 S，最终夹在 0–1000。"""
-    contender_penalty = _CONTENDER_PENALTY * (features.contenders - 1)
+    per_opponent = _CONTENDER_PENALTY
+    if features.street is Street.PREFLOP:
+        per_opponent = rules.preflop_contender_penalty
+    contender_penalty = per_opponent * (features.contenders - 1)
     if rules.shared_board_chop_caliber and features.shared_board_locked:
         # 锁定平分局面上英雄不会输，人数不再降低其权益，故不施加人数惩罚。
         contender_penalty = 0
@@ -265,6 +304,11 @@ def _score(
         0,
         1000,
     )
+
+
+def _preflop_call_bonus(rules: MixedPolicyRules, style: MixedStyle) -> int:
+    """取该风格在翻前跟注分支上的偏移；字段名与风格取值一一对应。"""
+    return int(getattr(rules.preflop_call_bonus, style.value))
 
 
 def _non_value_quality(features: MixedFeatures) -> int:
