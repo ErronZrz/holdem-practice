@@ -56,6 +56,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V3,
     MIXED_STRATEGY_IDENTIFIER_V4,
     MIXED_STRATEGY_IDENTIFIER_V5,
+    MixedDistribution,
     MixedLocalStrategy,
     MixedSeatPolicy,
     MixedStrategyError,
@@ -67,6 +68,7 @@ from .mixed_bot_states import (
     MIXED_APPLICABLE_NODE_COUNT,
     MIXED_BIG_BLIND,
     MIXED_DEPTHS_BB,
+    MIXED_IQV2_NODE_ID_SUFFIX,
     MIXED_IQV_NODE_ID_SUFFIX,
     MIXED_PLANNED_SLOT_COUNT,
     MIXED_PLAYER_COUNTS,
@@ -77,14 +79,18 @@ from .mixed_bot_states import (
     MixedFixtureManifest,
     MixedNodeFixture,
     apply_node,
+    build_frozen_iqv2_nodes,
     build_frozen_iqv_nodes,
     build_frozen_manifest,
+    build_iqv2_node,
     build_iqv_node,
     build_node,
     manifest_json,
 )
 
 MIXED_VALIDATION_SCHEMA_VERSION = "mixed-validation.v1"
+# 逐节点明细引入后的报告版本；上一版的字段与语义保持不变，历史回执继续可读。
+MIXED_VALIDATION_SCHEMA_VERSION_V2 = "mixed-validation.v2"
 # 验证身份独立于任何既有评测身份，不是任何既有运行许可的续用。
 MIXED_VALIDATION_IDENTITY = "mixed-local-v1-validation"
 # 复用既有主种子数值，但必须重新获得产品验证运行许可。
@@ -117,6 +123,43 @@ MIXED_IQV_MAIN_SEEDS: tuple[int, ...] = (
     1141464625,
     2667074870,
     4248100349,
+)
+
+# 第三套主种子：换独立派生前缀以区别于第二套；数目加倍只为增加块数，不改任何门槛。
+MIXED_IQV2_SEED_PREFIX = "mixed-local-iqv-v2:seed:"
+MIXED_IQV2_MAIN_SEED_COUNT = 16
+
+
+def derive_iqv2_main_seeds(count: int = MIXED_IQV2_MAIN_SEED_COUNT) -> tuple[int, ...]:
+    """按冻结规则复算第三套主种子：派生串的 SHA-256 前 4 字节按大端解释为无符号整数。"""
+    if count < 1:
+        raise MixedValidationAuthorizationError("主种子个数必须为正")
+    return tuple(
+        int.from_bytes(
+            hashlib.sha256(f"{MIXED_IQV2_SEED_PREFIX}{index}".encode()).digest()[:4],
+            "big",
+        )
+        for index in range(1, count + 1)
+    )
+
+
+MIXED_IQV2_MAIN_SEEDS: tuple[int, ...] = (
+    2518403890,
+    3304231143,
+    279877713,
+    626104627,
+    299830952,
+    2327033474,
+    2624733157,
+    849177851,
+    1676376096,
+    3564845513,
+    2849348124,
+    542008929,
+    2910136284,
+    2975201120,
+    3882415196,
+    4160511683,
 )
 MIXED_HAND_MODES: tuple[HandMode, ...] = (
     HandMode.NORMAL,
@@ -184,6 +227,19 @@ STAGE_A_ADVERSARIAL_HANDS_IQV = (
 )
 ADVERSARIAL_HANDS_IQV = (
     len(MIXED_IQV_MAIN_SEEDS)
+    * len(MixedStyle)
+    * len(ADVERSARIAL_OPPONENT_FAMILIES_IQV)
+    * len(ADVERSARIAL_ARMS)
+    * sum(MIXED_PLAYER_COUNTS)
+)
+# 第三套排期的机械手数：只作算式，不构成任何耗时承诺。
+STAGE_A_ADVERSARIAL_HANDS_IQV2 = (
+    len(ADVERSARIAL_OPPONENT_FAMILIES_IQV)
+    * len(ADVERSARIAL_ARMS)
+    * len(MIXED_PLAYER_COUNTS)
+)
+ADVERSARIAL_HANDS_IQV2 = (
+    len(MIXED_IQV2_MAIN_SEEDS)
     * len(MixedStyle)
     * len(ADVERSARIAL_OPPONENT_FAMILIES_IQV)
     * len(ADVERSARIAL_ARMS)
@@ -285,6 +341,15 @@ MIXED_STOP_CONDITIONS: tuple[str, ...] = (
 MIXED_REPORT_FORMAT = (
     "mixed-validation.v1：字段闭集，输出目录只创建不覆盖，存在同名文件即拒绝运行"
 )
+# 含逐节点明细的报告版本声明：清单声明哪一版，报告就产出哪一版。
+MIXED_REPORT_FORMAT_V2 = (
+    "mixed-validation.v2：字段闭集，输出目录只创建不覆盖，存在同名文件即拒绝运行"
+)
+
+
+def _nodes_are_reported(manifest: MixedFixtureManifest) -> bool:
+    """清单声明逐节点明细时才产出该字段，避免旧清单的报告多出字段。"""
+    return manifest.report_format.startswith(MIXED_VALIDATION_SCHEMA_VERSION_V2)
 
 # 第二套清单的机械明细文本：节点与种子都换过，因此场景顺序与手数说明必须重写。
 MIXED_IQV_SCENARIO_ORDER = (
@@ -296,6 +361,19 @@ MIXED_IQV_STAGE_PLAN: tuple[str, ...] = (
     f"对抗对照 {STAGE_A_ADVERSARIAL_HANDS_IQV} 手（单一主种子、单一风格、单一轮换）",
     f"阶段 B：成本矩阵补足逐人数 {COST_DECISIONS_PER_PLAYER_COUNT} 次、"
     f"补充场景 {SUPPLEMENTARY_TOTAL_SAMPLES} 次、对抗对照 {ADVERSARIAL_HANDS_IQV} 手；"
+    "A 样本不重跑、不替换",
+)
+
+# 第三套清单的机械明细文本：节点与种子再次更换，因此场景顺序与手数说明同步重写。
+MIXED_IQV2_SCENARIO_ORDER = (
+    "按第三套配方类别顺序 × 适用人数升序；成本矩阵每格在该街的可用节点间顺序轮换"
+)
+MIXED_IQV2_STAGE_PLAN: tuple[str, ...] = (
+    "阶段 A：成本矩阵逐人数 36 格各取首个样本，"
+    f"合计 {STAGE_A_COST_SAMPLES} 次；补充场景首样本 {STAGE_A_SUPPLEMENTARY_SAMPLES} 次；"
+    f"对抗对照 {STAGE_A_ADVERSARIAL_HANDS_IQV2} 手（单一主种子、单一风格、单一轮换）",
+    f"阶段 B：成本矩阵补足逐人数 {COST_DECISIONS_PER_PLAYER_COUNT} 次、"
+    f"补充场景 {SUPPLEMENTARY_TOTAL_SAMPLES} 次、对抗对照 {ADVERSARIAL_HANDS_IQV2} 手；"
     "A 样本不重跑、不替换",
 )
 
@@ -412,6 +490,32 @@ def frozen_iqv_manifest(
     )
 
 
+def frozen_iqv2_manifest(
+    *,
+    code_identity: str,
+    output_dir: str,
+    strategy_id: str,
+) -> MixedFixtureManifest:
+    """装配第三套冻结清单：新节点集 + 新主种子 + 逐节点明细的报告版本。
+
+    只返回清单对象，不写任何文件、不创建目录；落盘属于单独授权的动作。
+    """
+    return build_frozen_manifest(
+        strategy_id=strategy_id,
+        code_identity=code_identity,
+        config_digest=config_digest(strategy_id),
+        seeds=MIXED_IQV2_MAIN_SEEDS,
+        nodes=build_frozen_iqv2_nodes(),
+        output_dir=output_dir,
+        scenario_order=MIXED_IQV2_SCENARIO_ORDER,
+        seed_derivation=MIXED_SEED_DERIVATION,
+        stage_plan=MIXED_IQV2_STAGE_PLAN,
+        resource_envelope=MIXED_RESOURCE_ENVELOPE,
+        stop_conditions=MIXED_STOP_CONDITIONS,
+        report_format=MIXED_REPORT_FORMAT_V2,
+    )
+
+
 def required_envelope_fields(manifest: MixedFixtureManifest) -> tuple[str, ...]:
     """清单中缺失的运行机械明细；非空即表示清单尚未冻结完备。"""
     return tuple(
@@ -517,6 +621,30 @@ class MixedCategoryBehavior(_FrozenModel):
     mean_raise_units: int = Field(ge=0)
 
 
+class MixedNodeBehavior(_FrozenModel):
+    """单个预冻结节点在单一手模式与单一主种子块上的直接分布摘要。
+
+    只记录分布本身的机械读数：不含任何底牌、公共牌或牌堆内容，
+    也不含派生种子细节，避免把私有信息带出记录层。
+    """
+
+    node_id: str
+    category: str
+    player_count: int
+    style: str
+    hand_mode: str
+    seed_block: int
+    # 动作类型到份额的映射；键为动作类型名，值为该动作在分布内的份额。
+    action_units: dict[str, int] = Field(default_factory=dict)
+    # 同额度合并后的额度到份额映射；键为额度字符串，便于逐字复算与比较。
+    scale_units: dict[str, int] = Field(default_factory=dict)
+    action_entropy: float | None = None
+    scale_entropy: float | None = None
+    effective_scale_count: int = Field(ge=0)
+    structural_single_size: int = Field(ge=0)
+    has_active_candidate: bool
+
+
 class MixedValidationBehavior(_FrozenModel):
     """行为报告：条件动作熵与尺度熵按风格分列，分组先于结果固定。"""
 
@@ -524,6 +652,8 @@ class MixedValidationBehavior(_FrozenModel):
     styles: tuple[MixedStyleBehavior, ...]
     style_js_distances: tuple[MixedStyleJsDistance, ...] = ()
     categories: tuple[MixedCategoryBehavior, ...] = ()
+    # 逐节点明细：按种子块分列，用于按节点判定与按块比较倾向。
+    nodes: tuple[MixedNodeBehavior, ...] = ()
     behavior_note: str = (
         "指标来自预冻结节点的直接分布，不靠抽样估计；手模式由内部接口显式指定；"
         "风格间比较先按固定的模式权重边缘化。"
@@ -609,7 +739,9 @@ class MixedReportViolation(_FrozenModel):
 class MixedValidationReport(_FrozenModel):
     """新 Bot 的离线验证报告；字段闭集，不夹带底牌、种子或任意元数据。"""
 
-    schema_version: Literal["mixed-validation.v1"] = MIXED_VALIDATION_SCHEMA_VERSION
+    schema_version: Literal["mixed-validation.v1", "mixed-validation.v2"] = (
+        MIXED_VALIDATION_SCHEMA_VERSION
+    )
     strategy_id: str
     code_identity: str
     config_digest: str
@@ -996,6 +1128,72 @@ def _mean(values: list[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
+def _node_row(
+    fixture: MixedNodeFixture,
+    style: str,
+    hand_mode: str,
+    seed_block: int,
+    distribution: MixedDistribution,
+) -> MixedNodeBehavior:
+    """把单个分布写成一行逐节点明细；额度按同额度合并后记录。"""
+    action_entropy, scale_entropy, scale_count, single = distribution_metrics(distribution)
+    action_units: dict[str, int] = {}
+    scale_units: dict[str, int] = {}
+    for item in distribution.candidates:
+        action_units[item.action.value] = action_units.get(item.action.value, 0) + item.units
+        if item.units > 0 and item.action in (ActionType.BET, ActionType.RAISE):
+            scale_units[str(item.amount)] = scale_units.get(str(item.amount), 0) + item.units
+    return MixedNodeBehavior(
+        node_id=fixture.node_id,
+        category=fixture.category,
+        player_count=fixture.player_count,
+        style=style,
+        hand_mode=hand_mode,
+        seed_block=seed_block,
+        # 键排序后再落盘，使同一清单的序列化字节可逐字比较。
+        action_units={key: action_units[key] for key in sorted(action_units)},
+        scale_units={key: scale_units[key] for key in sorted(scale_units, key=int)},
+        action_entropy=action_entropy,
+        scale_entropy=scale_entropy,
+        effective_scale_count=scale_count,
+        structural_single_size=single,
+        has_active_candidate=scale_count > 0,
+    )
+
+
+def _node_rows(manifest: MixedFixtureManifest) -> tuple[MixedNodeBehavior, ...]:
+    """按节点 × 风格 × 手模式 × 主种子块重算逐节点明细。
+
+    每个种子块各算一次：只算首个种子块时，倾向随种子是否稳定这件事无从比较。
+    """
+    rows: list[MixedNodeBehavior] = []
+    for fixture in manifest.nodes:
+        applied = apply_node(fixture)
+        verified = require_mixed_input(applied.actor_state())
+        legal = applied.legal_actions()
+        for seed_block in manifest.seeds:
+            for style in MixedStyle:
+                policy = MixedSeatPolicy(
+                    seat=verified.actor_seat,
+                    style=style,
+                    seat_key=focus_seat_key(
+                        int(seed_block), style.value, fixture.player_count, 0
+                    ),
+                    rules=strategy_rules(manifest),
+                )
+                for hand_mode in MIXED_HAND_MODES:
+                    rows.append(
+                        _node_row(
+                            fixture,
+                            style.value,
+                            hand_mode.value,
+                            int(seed_block),
+                            policy.distribution_for(verified, legal, hand_mode),
+                        )
+                    )
+    return tuple(rows)
+
+
 def _style_row(style: str, bucket: _BehaviorBucket) -> MixedStyleBehavior:
     return MixedStyleBehavior(
         style=style,
@@ -1122,6 +1320,7 @@ def collect_behavior(
         styles=styles,
         style_js_distances=distances,
         categories=categories,
+        nodes=_node_rows(manifest) if _nodes_are_reported(manifest) else (),
     )
 
 
@@ -1163,6 +1362,8 @@ def _rebuild_fixture(
         builder = build_node
     elif fixture.node_id == base + MIXED_IQV_NODE_ID_SUFFIX:
         builder = build_iqv_node
+    elif fixture.node_id == base + MIXED_IQV2_NODE_ID_SUFFIX:
+        builder = build_iqv2_node
     else:
         raise MixedValidationAuthorizationError(
             f"节点标识 {fixture.node_id} 不属于任何已注册的配方集"
@@ -1846,6 +2047,11 @@ def run_validation(
         violations.append(MixedReportViolation(kind="replay-error", detail=failure))
 
     report = MixedValidationReport(
+        schema_version=(
+            MIXED_VALIDATION_SCHEMA_VERSION_V2
+            if _nodes_are_reported(frozen)
+            else MIXED_VALIDATION_SCHEMA_VERSION
+        ),
         strategy_id=frozen.strategy_id,
         code_identity=frozen.code_identity,
         config_digest=frozen.config_digest,

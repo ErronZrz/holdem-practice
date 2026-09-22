@@ -270,6 +270,37 @@ def compare_net_chips(
     return len(rows)
 
 
+def node_rows_match_receipt(
+    receipt: MixedValidationReport,
+    rebuilt: object,
+) -> bool:
+    """回执含逐节点明细时逐行核对；回执不含该字段时本项不参与比对。"""
+    received = receipt.behavior.nodes
+    if not received:
+        return True
+    expected = {
+        (row.node_id, row.style, row.hand_mode, row.seed_block): row for row in received
+    }
+    if len(expected) != len(received) or len(expected) != len(rebuilt.nodes):
+        return False
+    for row in rebuilt.nodes:
+        key = (row.node_id, row.style, row.hand_mode, row.seed_block)
+        other = expected.get(key)
+        if other is None:
+            return False
+        if (
+            other.action_units != row.action_units
+            or other.scale_units != row.scale_units
+            or other.action_entropy != row.action_entropy
+            or other.scale_entropy != row.scale_entropy
+            or other.effective_scale_count != row.effective_scale_count
+            or other.structural_single_size != row.structural_single_size
+            or other.has_active_candidate != row.has_active_candidate
+        ):
+            return False
+    return True
+
+
 def behavior_matches_receipt(
     receipt: MixedValidationReport,
     rebuilt: object,
@@ -289,7 +320,9 @@ def behavior_matches_receipt(
             or expected.no_active_candidate != row.no_active_candidate
         ):
             return False
-    return receipt.behavior.direct_distributions == rebuilt.direct_distributions
+    if receipt.behavior.direct_distributions != rebuilt.direct_distributions:
+        return False
+    return node_rows_match_receipt(receipt, rebuilt)
 
 
 def _sha256_of(path: str) -> str:

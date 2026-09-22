@@ -75,6 +75,7 @@ from .mixed_bot_validation import (
     ADVERSARIAL_ARMS,
     ADVERSARIAL_HANDS,
     ADVERSARIAL_HANDS_IQV,
+    ADVERSARIAL_HANDS_IQV2,
     ADVERSARIAL_MAX_VOLUNTARY_ACTIONS,
     ADVERSARIAL_OPPONENT_FAMILIES,
     ADVERSARIAL_OPPONENT_FAMILIES_IQV,
@@ -83,10 +84,12 @@ from .mixed_bot_validation import (
     COST_DECISIONS_PER_PLAYER_COUNT,
     DIGEST_RULE_FIELDS,
     MIXED_DIRECT_DISTRIBUTION_COUNT,
+    MIXED_IQV2_MAIN_SEEDS,
     MIXED_IQV_MAIN_SEEDS,
     MIXED_IQV_VALIDATION_LIMITATIONS,
     MIXED_MAIN_SEEDS,
     MIXED_VALIDATION_LIMITATIONS,
+    MIXED_VALIDATION_SCHEMA_VERSION_V2,
     STAGE_A0_COST_SAMPLES,
     STAGE_A_ADVERSARIAL_HANDS,
     STAGE_A_ADVERSARIAL_HANDS_IQV,
@@ -96,14 +99,17 @@ from .mixed_bot_validation import (
     HandOutcome,
     MixedMatchFamilyRow,
     MixedValidationAuthorizationError,
+    MixedValidationReport,
     adversarial_families,
     adversarial_schedule,
     cell_quota,
     collect_behavior,
     config_digest,
     cost_cells,
+    derive_iqv2_main_seeds,
     derive_iqv_main_seeds,
     fixture_at_depth,
+    frozen_iqv2_manifest,
     frozen_iqv_manifest,
     frozen_manifest,
     js_distance,
@@ -1172,3 +1178,83 @@ def test_run_validation_stage_opt_in() -> None:
     )
     print(report.model_dump_json(indent=2))
     assert report.status.startswith(("completed", "stopped-"))
+
+
+def test_iqv2_nodes_are_reported_per_seed_block_and_stay_rebuildable() -> None:
+    """逐节点明细按每个主种子块各产一行，且深度派生仍能按节点自身配方重建。"""
+    manifest = frozen_iqv2_manifest(
+        code_identity="0" * 40,
+        output_dir="/tmp/unused/runs",
+        strategy_id=MIXED_STRATEGY_IDENTIFIER_V5,
+    )
+    assert manifest.report_format.startswith(MIXED_VALIDATION_SCHEMA_VERSION_V2)
+    assert manifest.seeds == MIXED_IQV2_MAIN_SEEDS
+    assert len(manifest.seeds) == 16
+    assert len(set(manifest.seeds)) == 16
+    assert (
+        len(manifest.seeds)
+        * len(MixedStyle)
+        * len(ADVERSARIAL_OPPONENT_FAMILIES_IQV)
+        * len(ADVERSARIAL_ARMS)
+        * sum(range(2, 10))
+    ) == ADVERSARIAL_HANDS_IQV2
+
+    behavior = collect_behavior(manifest, allow_full=True)
+    assert len(behavior.nodes) == (
+        len(manifest.nodes) * len(MixedStyle) * 3 * len(manifest.seeds)
+    )
+    assert {row.node_id for row in behavior.nodes} == {
+        node.node_id for node in manifest.nodes
+    }
+    assert all(row.node_id.endswith("-iqv2") for row in behavior.nodes)
+    # 每个种子块都必须出现：只算首个种子块时块间倾向无从比较。
+    assert {row.seed_block for row in behavior.nodes} == set(manifest.seeds)
+    keys = {
+        (row.node_id, row.style, row.hand_mode, row.seed_block) for row in behavior.nodes
+    }
+    assert len(keys) == len(behavior.nodes)
+
+    scalable = next(node for node in manifest.nodes if node.depth_scalable)
+    assert fixture_at_depth(scalable, 15).node_id == scalable.node_id
+    assert fixture_at_depth(scalable, 1000).starting_stack != scalable.starting_stack
+
+    # 逐节点明细有一行不同就必须判为不一致，不能只看风格级汇总。
+    assert (
+        mixed_bot_recheck.node_rows_match_receipt(
+            MixedValidationReport.model_construct(behavior=behavior), behavior
+        )
+        is True
+    )
+    altered = behavior.model_copy(
+        update={
+            "nodes": (
+                behavior.nodes[0].model_copy(update={"action_units": {"fold": 1}}),
+                *behavior.nodes[1:],
+            )
+        }
+    )
+    assert (
+        mixed_bot_recheck.node_rows_match_receipt(
+            MixedValidationReport.model_construct(behavior=altered), behavior
+        )
+        is False
+    )
+
+
+def test_manifests_without_the_node_declaration_report_no_node_rows() -> None:
+    """未声明逐节点明细的清单不得凭空多出该字段，历史回执的可比性靠这一点维持。"""
+    second = frozen_iqv_manifest(
+        code_identity="0" * 40,
+        output_dir="/tmp/unused/runs",
+        strategy_id=MIXED_STRATEGY_IDENTIFIER_V5,
+    )
+    baseline = frozen_manifest(code_identity="0" * 40, output_dir="/tmp/unused/runs")
+    for manifest in (baseline, second):
+        assert not manifest.report_format.startswith(MIXED_VALIDATION_SCHEMA_VERSION_V2)
+        assert collect_behavior(manifest, allow_full=True).nodes == ()
+
+
+def test_iqv2_seed_rule_reproduces_the_frozen_values() -> None:
+    """第三套主种子由固定派生规则给出，且与第二套取值完全不重合。"""
+    assert derive_iqv2_main_seeds() == MIXED_IQV2_MAIN_SEEDS
+    assert not set(MIXED_IQV2_MAIN_SEEDS) & set(MIXED_IQV_MAIN_SEEDS)
