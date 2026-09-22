@@ -52,8 +52,11 @@ from app.strategy.mixed_policy import (
 )
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER,
+    MIXED_STRATEGY_IDENTIFIER_V2,
+    MIXED_STRATEGY_IDENTIFIER_V3,
     MixedLocalStrategy,
     MixedSeatPolicy,
+    MixedStrategyError,
     rules_for_identifier,
 )
 from app.strategy.projection import project_for_actor
@@ -190,11 +193,26 @@ MIXED_REPORT_FORMAT = (
 )
 
 
+# 每个身份参与配置摘要的规则字段：只登记该身份自身引入的口径，
+# 使后续身份新增规则字段时，旧身份的摘要仍可逐字复算。
+DIGEST_RULE_FIELDS: dict[str, tuple[str, ...]] = {
+    MIXED_STRATEGY_IDENTIFIER_V2: ("shared_board_chop_caliber",),
+    MIXED_STRATEGY_IDENTIFIER_V3: (
+        "shared_board_chop_caliber",
+        "preflop_price_weight",
+        "preflop_contender_penalty",
+        "preflop_call_bonus",
+    ),
+}
+
+
 def config_digest(identifier: str = MIXED_STRATEGY_IDENTIFIER) -> str:
     """策略配置摘要：只覆盖固定的规则参数表与量化口径，不含任何运行时状态。
 
     首版身份的载荷已被外部冻结清单逐字引用，因此不追加任何字段；其余身份额外写入
-    自身的规则口径，避免两套不同的分布共用同一个配置摘要。未注册身份在此显式失败。
+    自身的规则口径，避免两套不同的分布共用同一个配置摘要。写入的字段取自该身份
+    登记的清单，而不是整份规则对象，这样别的身份新增字段不会改动这里的取值。
+    未注册身份、以及已注册但未登记字段的身份，都在此显式失败，不静默回退。
     """
     payload: dict[str, object] = {
         "distribution_schema": MIXED_DISTRIBUTION_SCHEMA_VERSION,
@@ -212,8 +230,11 @@ def config_digest(identifier: str = MIXED_STRATEGY_IDENTIFIER) -> str:
         },
     }
     if identifier != MIXED_STRATEGY_IDENTIFIER:
-        rules = rules_for_identifier(identifier)
-        payload["rules"] = asdict(rules)
+        rules = asdict(rules_for_identifier(identifier))
+        fields = DIGEST_RULE_FIELDS.get(identifier)
+        if fields is None:
+            raise MixedStrategyError(f"身份 {identifier} 未登记配置摘要字段，拒绝出具摘要")
+        payload["rules"] = {name: rules[name] for name in fields}
     material = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 

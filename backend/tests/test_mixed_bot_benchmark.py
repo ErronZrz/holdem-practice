@@ -12,6 +12,7 @@
 
 import json
 import os
+from dataclasses import asdict
 
 import pytest
 
@@ -26,8 +27,11 @@ from app.strategy.mixed_policy import (
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER,
     MIXED_STRATEGY_IDENTIFIER_V2,
+    MIXED_STRATEGY_IDENTIFIER_V3,
+    MIXED_STRATEGY_IDENTIFIERS,
     MixedLocalStrategy,
     MixedStrategyError,
+    rules_for_identifier,
 )
 
 from . import mixed_bot_recheck
@@ -70,6 +74,7 @@ from .mixed_bot_validation import (
     BEHAVIOR_SMOKE_NODE_LIMIT,
     COST_CELLS_PER_PLAYER_COUNT,
     COST_DECISIONS_PER_PLAYER_COUNT,
+    DIGEST_RULE_FIELDS,
     MIXED_DIRECT_DISTRIBUTION_COUNT,
     MIXED_MAIN_SEEDS,
     STAGE_A0_COST_SAMPLES,
@@ -316,9 +321,67 @@ def test_second_version_gets_its_own_config_digest() -> None:
     assert config_digest(MIXED_STRATEGY_IDENTIFIER_V2) != config_digest()
 
 
+def test_second_version_config_digest_is_pinned() -> None:
+    """第二版取摘要必须逐字等于已签收清单里的取值。"""
+    assert (
+        config_digest(MIXED_STRATEGY_IDENTIFIER_V2)
+        == "338a4863a68ca10eda44dcfdfdf26e510a4560cf8f7bbd1f97f048bc6ff6e794"
+    )
+
+
+def test_third_version_config_digest_is_pinned() -> None:
+    """第三版取摘要同样钉死，它将来会被自己的标定回执引用。"""
+    assert (
+        config_digest(MIXED_STRATEGY_IDENTIFIER_V3)
+        == "5ed7992b36de67cc97b4035f075d2c563f989300b448c5878f31847eb001643f"
+    )
+    assert config_digest(MIXED_STRATEGY_IDENTIFIER_V3) != config_digest(
+        MIXED_STRATEGY_IDENTIFIER_V2
+    )
+
+
+def test_digest_fields_are_registered_per_identity() -> None:
+    """每个身份的摘要字段都按身份登记，且字段名必须是该身份规则对象里的真实字段。"""
+    assert set(DIGEST_RULE_FIELDS) <= set(MIXED_STRATEGY_IDENTIFIERS)
+    assert MIXED_STRATEGY_IDENTIFIER not in DIGEST_RULE_FIELDS
+    for identifier, fields in DIGEST_RULE_FIELDS.items():
+        rules = asdict(rules_for_identifier(identifier))
+        assert fields, identifier
+        assert set(fields) <= set(rules), identifier
+    # 第二版只引入分池口径，翻前门槛字段不属于它的口径。
+    assert DIGEST_RULE_FIELDS[MIXED_STRATEGY_IDENTIFIER_V2] == ("shared_board_chop_caliber",)
+
+
+def test_extra_rule_fields_do_not_move_earlier_digests(monkeypatch: pytest.MonkeyPatch) -> None:
+    """规则对象将来多出字段时，已登记身份的摘要必须逐字不变。"""
+    real_asdict = asdict
+    monkeypatch.setattr(
+        validation,
+        "asdict",
+        lambda rules: {**real_asdict(rules), "future_caliber_flag": True},
+    )
+    assert (
+        config_digest(MIXED_STRATEGY_IDENTIFIER_V2)
+        == "338a4863a68ca10eda44dcfdfdf26e510a4560cf8f7bbd1f97f048bc6ff6e794"
+    )
+    assert (
+        config_digest(MIXED_STRATEGY_IDENTIFIER_V3)
+        == "5ed7992b36de67cc97b4035f075d2c563f989300b448c5878f31847eb001643f"
+    )
+
+
 def test_config_digest_refuses_an_unregistered_identity() -> None:
     with pytest.raises(MixedStrategyError):
         config_digest("mixed-local@4")
+
+
+def test_config_digest_refuses_an_identity_without_registered_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """已注册身份若漏登摘要字段，取摘要必须显式失败，不静默改用整份规则对象。"""
+    monkeypatch.delitem(DIGEST_RULE_FIELDS, MIXED_STRATEGY_IDENTIFIER_V3)
+    with pytest.raises(MixedStrategyError):
+        config_digest(MIXED_STRATEGY_IDENTIFIER_V3)
 
 
 def test_frozen_manifest_carries_the_requested_identity() -> None:
