@@ -326,6 +326,93 @@ MIXED_RECIPE_BY_CATEGORY: dict[str, FixtureRecipe] = {
 }
 _RECIPE_CATEGORY_ORDER: tuple[str, ...] = tuple(recipe.category for recipe in MIXED_RECIPES)
 
+# ------------------------------------------------------------------ 第二套构造配方
+#
+# 独立质量验证使用的第二套配方：类别与形状语义沿用既有定义，但逐项换成不同构造，
+# 使新节点与既有 125 个可行动节点在内容上正交。既有配方常量不得改动，
+# 否则已落盘清单的可复现性会被破坏。
+
+MIXED_IQV_NODE_ID_SUFFIX = "-iqv1"
+
+MIXED_IQV_RECIPES: tuple[FixtureRecipe, ...] = (
+    FixtureRecipe("hu-blind-position", _SHAPE_OPEN, ("Kc", "Jc"), (), _ROLE_NONE, False),
+    FixtureRecipe("unopened-open", _SHAPE_OPEN, ("As", "Ts"), (), _ROLE_NONE, False),
+    FixtureRecipe("open-after-limp", _SHAPE_LIMP, ("Qh", "Jh"), (), _ROLE_NONE, False),
+    FixtureRecipe("facing-first-raise", _SHAPE_RAISE, ("Ks", "Qc"), (), _ROLE_NONE, False),
+    FixtureRecipe("facing-reraise", _SHAPE_RERAISE, ("Jd", "Jc"), (), _ROLE_NONE, False),
+    FixtureRecipe(
+        "short-stack-call", _SHAPE_SHORT_CALL, ("7h", "7s"), (), _ROLE_ACTOR, False
+    ),
+    FixtureRecipe(
+        "incomplete-raise", _SHAPE_INCOMPLETE_RAISE, ("Ad", "Kd"), (), _ROLE_BIG_BLIND, False
+    ),
+    FixtureRecipe("free-check", _SHAPE_OPEN, ("Qh", "Th"), ("Jd", "6s", "2c"), _ROLE_NONE, False),
+    FixtureRecipe("flop-draw", _SHAPE_RAISE, ("Th", "9h"), ("8h", "7h", "2c"), _ROLE_NONE, True),
+    FixtureRecipe(
+        "top-pair-weak-kicker",
+        _SHAPE_RAISE,
+        ("9c", "4h"),
+        ("9d", "7s", "3h", "2c"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "turn-combo-draw",
+        _SHAPE_RAISE,
+        ("Qc", "Jc"),
+        ("Tc", "9c", "4h", "2d"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "one-side-all-in",
+        _SHAPE_JAM_THEN_CALL,
+        ("Kc", "Js"),
+        ("Td", "7h", "3c", "2d"),
+        _ROLE_FIRST_ACTOR,
+        True,
+    ),
+    FixtureRecipe(
+        "overpair-on-high-board",
+        _SHAPE_RAISE,
+        ("Jc", "Jd"),
+        ("Ah", "Qd", "8c", "3s", "2h"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "missed-draw-river",
+        _SHAPE_RAISE,
+        ("Kh", "Th"),
+        ("Jh", "6h", "2c", "8d", "3s"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "shared-board",
+        _SHAPE_RAISE,
+        ("2h", "2s"),
+        ("9c", "8d", "7h", "6s", "5c"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "sizes-merged",
+        _SHAPE_RAISE,
+        ("8c", "3h"),
+        ("8d", "5c", "2s", "9h", "Kd"),
+        _ROLE_NONE,
+        True,
+    ),
+)
+
+MIXED_IQV_RECIPE_BY_CATEGORY: dict[str, FixtureRecipe] = {
+    recipe.category: recipe for recipe in MIXED_IQV_RECIPES
+}
+MIXED_IQV_RECIPE_CATEGORY_ORDER: tuple[str, ...] = tuple(
+    recipe.category for recipe in MIXED_IQV_RECIPES
+)
+
 # ------------------------------------------------------------------ 清单模型
 
 
@@ -710,13 +797,14 @@ def _require_short_role_landed(
         raise MixedFixtureError("短码跟注的角色未落在决策者身上")
 
 
-def build_node(
-    category: str,
+def _build_node_from(
+    recipe: FixtureRecipe,
     player_count: int,
     *,
-    starting_stack: int = MIXED_DEFAULT_STACK,
+    starting_stack: int,
+    node_id_suffix: str,
 ) -> MixedNodeFixture:
-    """按冻结配方生成一个可行动节点。
+    """按给定配方生成一个可行动节点。
 
     先用占位底牌把短码角色迭代稳定并确定决策座位，再把主题牌面放到该座位重跑一次；
     两次的决策座位与决策街必须完全一致，否则显式失败，不做静默修补。
@@ -724,7 +812,7 @@ def build_node(
     ``starting_stack`` 用于把同一配方放到别的筹码深度上重跑：牌面与形状不变，翻后开注额
     由该深度下当时的合法区间决定。带短码角色的配方筹码额与深度无关，因此只在默认深度使用。
     """
-    recipe = MIXED_RECIPE_BY_CATEGORY[category]
+    category = recipe.category
     if player_count not in applicable_player_counts(category):
         raise MixedFixtureError(f"{category} 在 {player_count} 人桌是结构性不适用槽")
 
@@ -753,7 +841,7 @@ def build_node(
         raise MixedFixtureError(f"{category} 在 {player_count} 人桌的动作线与占位执行不一致")
 
     return MixedNodeFixture(
-        node_id=f"{category}-n{player_count}",
+        node_id=f"{category}-n{player_count}{node_id_suffix}",
         category=category,
         player_count=player_count,
         button=MIXED_NODE_BUTTON,
@@ -768,11 +856,50 @@ def build_node(
     )
 
 
+def build_node(
+    category: str,
+    player_count: int,
+    *,
+    starting_stack: int = MIXED_DEFAULT_STACK,
+) -> MixedNodeFixture:
+    """按首套冻结配方生成一个可行动节点；标识不带后缀，与既有清单逐字一致。"""
+    return _build_node_from(
+        MIXED_RECIPE_BY_CATEGORY[category],
+        player_count,
+        starting_stack=starting_stack,
+        node_id_suffix="",
+    )
+
+
+def build_iqv_node(
+    category: str,
+    player_count: int,
+    *,
+    starting_stack: int = MIXED_DEFAULT_STACK,
+) -> MixedNodeFixture:
+    """按第二套配方生成一个可行动节点；标识带后缀，与首套节点不重名。"""
+    return _build_node_from(
+        MIXED_IQV_RECIPE_BY_CATEGORY[category],
+        player_count,
+        starting_stack=starting_stack,
+        node_id_suffix=MIXED_IQV_NODE_ID_SUFFIX,
+    )
+
+
 def build_frozen_nodes() -> tuple[MixedNodeFixture, ...]:
     """按冻结配方的固定顺序生成全部可行动节点。"""
     return tuple(
         build_node(category, player_count)
         for category in _RECIPE_CATEGORY_ORDER
+        for player_count in applicable_player_counts(category)
+    )
+
+
+def build_frozen_iqv_nodes() -> tuple[MixedNodeFixture, ...]:
+    """按第二套配方的固定顺序生成全部可行动节点；数量与计划槽口径保持一致。"""
+    return tuple(
+        build_iqv_node(category, player_count)
+        for category in MIXED_IQV_RECIPE_CATEGORY_ORDER
         for player_count in applicable_player_counts(category)
     )
 
@@ -790,14 +917,18 @@ def build_frozen_manifest(
     stop_conditions: Sequence[str],
     report_format: str,
     strategy_id: str = MIXED_STRATEGY_IDENTIFIER,
+    nodes: Sequence[MixedNodeFixture] | None = None,
 ) -> MixedFixtureManifest:
-    """装配冻结清单：节点由配方生成，其余机械明细由调用方按规格注入。"""
+    """装配冻结清单：节点由配方生成，其余机械明细由调用方按规格注入。
+
+    ``nodes`` 省略时按首套配方生成，使既有调用逐字不变；显式传入时不做任何改写。
+    """
     return MixedFixtureManifest(
         strategy_id=strategy_id,
         code_identity=code_identity,
         config_digest=config_digest,
         seeds=tuple(seeds),
-        nodes=build_frozen_nodes(),
+        nodes=build_frozen_nodes() if nodes is None else tuple(nodes),
         scenario_order=scenario_order,
         seed_derivation=seed_derivation,
         stage_plan=tuple(stage_plan),

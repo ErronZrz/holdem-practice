@@ -76,6 +76,7 @@ from .mixed_bot_states import (
     MixedFixtureManifest,
     MixedNodeFixture,
     apply_node,
+    build_frozen_iqv_nodes,
     build_frozen_manifest,
     build_node,
     manifest_json,
@@ -86,6 +87,35 @@ MIXED_VALIDATION_SCHEMA_VERSION = "mixed-validation.v1"
 MIXED_VALIDATION_IDENTITY = "mixed-local-v1-validation"
 # 复用既有主种子数值，但必须重新获得产品验证运行许可。
 MIXED_MAIN_SEEDS: tuple[int, ...] = (1215, 20260918, 3311, 7926)
+
+# 第二套主种子：与既有四个主种子全部不同，取值由固定派生规则生成，不按任何读数挑选。
+MIXED_IQV_SEED_PREFIX = "mixed-local-iqv-v1:seed:"
+MIXED_IQV_MAIN_SEED_COUNT = 8
+
+
+def derive_iqv_main_seeds(count: int = MIXED_IQV_MAIN_SEED_COUNT) -> tuple[int, ...]:
+    """按冻结规则复算第二套主种子：派生串的 SHA-256 前 4 字节按大端解释为无符号整数。"""
+    if count < 1:
+        raise MixedValidationAuthorizationError("主种子个数必须为正")
+    return tuple(
+        int.from_bytes(
+            hashlib.sha256(f"{MIXED_IQV_SEED_PREFIX}{index}".encode()).digest()[:4],
+            "big",
+        )
+        for index in range(1, count + 1)
+    )
+
+
+MIXED_IQV_MAIN_SEEDS: tuple[int, ...] = (
+    184808075,
+    3360391539,
+    2335308857,
+    1406656097,
+    318027253,
+    1141464625,
+    2667074870,
+    4248100349,
+)
 MIXED_HAND_MODES: tuple[HandMode, ...] = (
     HandMode.NORMAL,
     HandMode.CAUTIOUS,
@@ -129,6 +159,42 @@ ADVERSARIAL_HANDS = (
     * len(ADVERSARIAL_ARMS)
     * sum(MIXED_PLAYER_COUNTS)
 )
+
+# 第二套对手族：只增不改，既有四族的名称与实现保持原样。
+ADVERSARIAL_OPPONENT_FAMILIES_IQV: tuple[str, ...] = (
+    *ADVERSARIAL_OPPONENT_FAMILIES,
+    "size-signal-probe",
+    "position-pressure-probe",
+    "marginal-call-pressure-probe",
+    "aggression-rate-probe",
+)
+# 族集注册表：运行入口按名称取族，未注册名称显式失败，不退回默认集合。
+ADVERSARIAL_FAMILY_SETS: dict[str, tuple[str, ...]] = {
+    "first-batch": ADVERSARIAL_OPPONENT_FAMILIES,
+    "iqv": ADVERSARIAL_OPPONENT_FAMILIES_IQV,
+}
+DEFAULT_ADVERSARIAL_FAMILY_SET = "first-batch"
+# 第二套排期的机械手数：只作算式，不构成任何耗时承诺。
+STAGE_A_ADVERSARIAL_HANDS_IQV = (
+    len(ADVERSARIAL_OPPONENT_FAMILIES_IQV)
+    * len(ADVERSARIAL_ARMS)
+    * len(MIXED_PLAYER_COUNTS)
+)
+ADVERSARIAL_HANDS_IQV = (
+    len(MIXED_IQV_MAIN_SEEDS)
+    * len(MixedStyle)
+    * len(ADVERSARIAL_OPPONENT_FAMILIES_IQV)
+    * len(ADVERSARIAL_ARMS)
+    * sum(MIXED_PLAYER_COUNTS)
+)
+
+
+def adversarial_families(family_set: str = DEFAULT_ADVERSARIAL_FAMILY_SET) -> tuple[str, ...]:
+    """按名称取对手族集；未注册名称显式失败。"""
+    try:
+        return ADVERSARIAL_FAMILY_SETS[family_set]
+    except KeyError:
+        raise MixedValidationAuthorizationError(f"未注册的对手族集：{family_set}") from None
 INTERVAL_STATUS_NOT_ESTIMATED = "not-estimated-small-fixed-seed-set"
 
 # 阶段 A 的分层子集与阶段预算提案（待批准上限，不是已获预算）。
@@ -156,6 +222,30 @@ MIXED_VALIDATION_LIMITATIONS: tuple[str, ...] = (
     "有限样本不能证明未来不会超预算，也不向 2–9 人以外外推。",
     "本报告的记录口径与离线训练产物的记录口径不是同一回事。",
 )
+
+# 第二套验证的局限说明：种子块个数不同，措辞必须与之一致，不沿用首套的四块口径。
+MIXED_IQV_VALIDATION_LIMITATIONS: tuple[str, ...] = (
+    "规则评分是启发式分数，不是概率、EV、GTO 或均衡结论。",
+    "单元测试与有界评测只证明契约与机制，不构成对手强度认证。",
+    "八个固定主种子块只能给出块间离散与粗区间，不构成总体覆盖承诺。",
+    "有限样本不能证明未来不会超预算，也不向 2–9 人以外外推。",
+    "本报告的记录口径与离线训练产物的记录口径不是同一回事。",
+)
+# 种子块个数与局限说明的对应关系：块数未登记时显式失败，避免套用别的块数措辞。
+VALIDATION_LIMITATIONS_BY_BLOCK_COUNT: dict[int, tuple[str, ...]] = {
+    4: MIXED_VALIDATION_LIMITATIONS,
+    8: MIXED_IQV_VALIDATION_LIMITATIONS,
+}
+
+
+def validation_limitations(seed_block_count: int) -> tuple[str, ...]:
+    """按清单实际的种子块个数取局限说明；未登记的块数显式失败。"""
+    try:
+        return VALIDATION_LIMITATIONS_BY_BLOCK_COUNT[seed_block_count]
+    except KeyError:
+        raise MixedValidationAuthorizationError(
+            f"未登记的种子块个数：{seed_block_count}"
+        ) from None
 
 
 class MixedValidationAuthorizationError(RuntimeError):
@@ -192,6 +282,19 @@ MIXED_STOP_CONDITIONS: tuple[str, ...] = (
 )
 MIXED_REPORT_FORMAT = (
     "mixed-validation.v1：字段闭集，输出目录只创建不覆盖，存在同名文件即拒绝运行"
+)
+
+# 第二套清单的机械明细文本：节点与种子都换过，因此场景顺序与手数说明必须重写。
+MIXED_IQV_SCENARIO_ORDER = (
+    "按第二套配方类别顺序 × 适用人数升序；成本矩阵每格在该街的可用节点间顺序轮换"
+)
+MIXED_IQV_STAGE_PLAN: tuple[str, ...] = (
+    "阶段 A：成本矩阵逐人数 36 格各取首个样本，"
+    f"合计 {STAGE_A_COST_SAMPLES} 次；补充场景首样本 {STAGE_A_SUPPLEMENTARY_SAMPLES} 次；"
+    f"对抗对照 {STAGE_A_ADVERSARIAL_HANDS_IQV} 手（单一主种子、单一风格、单一轮换）",
+    f"阶段 B：成本矩阵补足逐人数 {COST_DECISIONS_PER_PLAYER_COUNT} 次、"
+    f"补充场景 {SUPPLEMENTARY_TOTAL_SAMPLES} 次、对抗对照 {ADVERSARIAL_HANDS_IQV} 手；"
+    "A 样本不重跑、不替换",
 )
 
 
@@ -275,6 +378,32 @@ def frozen_manifest(
         scenario_order=MIXED_SCENARIO_ORDER,
         seed_derivation=MIXED_SEED_DERIVATION,
         stage_plan=MIXED_STAGE_PLAN,
+        resource_envelope=MIXED_RESOURCE_ENVELOPE,
+        stop_conditions=MIXED_STOP_CONDITIONS,
+        report_format=MIXED_REPORT_FORMAT,
+    )
+
+
+def frozen_iqv_manifest(
+    *,
+    code_identity: str,
+    output_dir: str,
+    strategy_id: str,
+) -> MixedFixtureManifest:
+    """装配第二套冻结清单：新节点集 + 新主种子。
+
+    只返回清单对象，不写任何文件、不创建目录；落盘属于单独授权的动作。
+    """
+    return build_frozen_manifest(
+        strategy_id=strategy_id,
+        code_identity=code_identity,
+        config_digest=config_digest(strategy_id),
+        seeds=MIXED_IQV_MAIN_SEEDS,
+        nodes=build_frozen_iqv_nodes(),
+        output_dir=output_dir,
+        scenario_order=MIXED_IQV_SCENARIO_ORDER,
+        seed_derivation=MIXED_SEED_DERIVATION,
+        stage_plan=MIXED_IQV_STAGE_PLAN,
         resource_envelope=MIXED_RESOURCE_ENVELOPE,
         stop_conditions=MIXED_STOP_CONDITIONS,
         report_format=MIXED_REPORT_FORMAT,
@@ -537,6 +666,143 @@ class FixedPressureProbe:
         if legal.can_fold:
             return Action(ActionType.FOLD)
         raise MixedValidationAuthorizationError("固定施压探针没有任何合法候选")
+
+
+# 第二套探针：只读公开信息与自己底牌，同 seed 下确定性；不读对手暗牌或人格参数。
+_SIZE_SIGNAL_LOW_RATIO = 1 / 3
+_SIZE_SIGNAL_HIGH_RATIO = 2 / 3
+_POSITION_PRESSURE_TABLE_LIMIT = 4
+_MARGINAL_HOLDING_SUIT_LIMIT = 4
+
+
+def _probe_fallback(legal: LegalActions) -> Action:
+    """探针兜底：先过牌、再跟注、再弃牌，最后才用最小主动额度。"""
+    if legal.can_check:
+        return Action(ActionType.CHECK)
+    if legal.can_call:
+        return Action(ActionType.CALL)
+    if legal.can_fold:
+        return Action(ActionType.FOLD)
+    if legal.can_raise:
+        return Action(ActionType.RAISE, legal.min_raise_to)
+    if legal.can_bet:
+        return Action(ActionType.BET, legal.min_bet)
+    raise MixedValidationAuthorizationError("探针没有任何合法候选")
+
+
+def _clamp_target(value: int, minimum: int, maximum: int) -> int:
+    """把目标额度夹紧到合法区间内，保证产出的动作一定合法。"""
+    return min(max(value, minimum), maximum)
+
+
+class SizeSignalProbe:
+    """尺度针对探针：按对手公开下注额相对底池的比例分档做固定响应。"""
+
+    def choose_action(self, state: GameState, legal: LegalActions) -> Action:
+        if legal.can_check or legal.call_amount <= 0:
+            return _probe_fallback(legal)
+        ratio = legal.call_amount / max(1, state.pot)
+        if ratio < _SIZE_SIGNAL_LOW_RATIO:
+            # 最小档固定弃牌，用于暴露「小尺度必被弃」这类固定反应。
+            if legal.can_fold:
+                return Action(ActionType.FOLD)
+            return _probe_fallback(legal)
+        if ratio <= _SIZE_SIGNAL_HIGH_RATIO:
+            if legal.can_call:
+                return Action(ActionType.CALL)
+            return _probe_fallback(legal)
+        # 最大档固定加价，用于暴露「大尺度必被反加」这类固定反应。
+        if legal.can_raise:
+            target = _clamp_target(
+                3 * legal.call_amount, legal.min_raise_to, legal.max_raise_to
+            )
+            return Action(ActionType.RAISE, target)
+        return _probe_fallback(legal)
+
+
+class PositionPressureProbe:
+    """位置人数针对探针：按人数与相对庄位分档固定施压，只读公开局面。"""
+
+    def choose_action(self, state: GameState, legal: LegalActions) -> Action:
+        seats = len(state.players)
+        live = sum(1 for player in state.players if not player.folded)
+        distance = (state.current_seat - state.button) % seats
+        late = distance * 2 >= seats
+        if late and live <= _POSITION_PRESSURE_TABLE_LIMIT:
+            if legal.can_bet:
+                return Action(
+                    ActionType.BET,
+                    _clamp_target(2 * MIXED_BIG_BLIND, legal.min_bet, legal.max_bet),
+                )
+            if legal.can_raise:
+                return Action(
+                    ActionType.RAISE,
+                    _clamp_target(2 * MIXED_BIG_BLIND, legal.min_raise_to, legal.max_raise_to),
+                )
+        return _probe_fallback(legal)
+
+
+def _is_marginal_holding(state: GameState) -> bool:
+    """只用公共牌与自己的底牌判断是否属于翻后边缘牌力（未成牌且无同花听牌）。"""
+    if state.street is Street.PREFLOP or len(state.board) < 3:
+        return False
+    mine = state.players[state.current_seat].hole_cards
+    if len(mine) != 2:
+        return False
+    board_ranks = {card.rank for card in state.board}
+    if any(card.rank in board_ranks for card in mine):
+        return False
+    cards = (*state.board, *mine)
+    longest_suit = max(
+        sum(1 for card in cards if card.suit == suit) for suit in {card.suit for card in cards}
+    )
+    return longest_suit < _MARGINAL_HOLDING_SUIT_LIMIT
+
+
+class MarginalCallPressureProbe:
+    """边缘跟弃压力探针：在翻后边缘牌力上固定施加小额下注。"""
+
+    def choose_action(self, state: GameState, legal: LegalActions) -> Action:
+        if not _is_marginal_holding(state):
+            return _probe_fallback(legal)
+        small = max(1, state.pot // 3)
+        if legal.can_bet:
+            return Action(
+                ActionType.BET, _clamp_target(small, legal.min_bet, legal.max_bet)
+            )
+        if legal.can_raise:
+            return Action(
+                ActionType.RAISE,
+                _clamp_target(
+                    legal.call_amount + small, legal.min_raise_to, legal.max_raise_to
+                ),
+            )
+        if legal.can_call and legal.call_amount <= 2 * MIXED_BIG_BLIND:
+            return Action(ActionType.CALL)
+        if legal.can_fold:
+            return Action(ActionType.FOLD)
+        return _probe_fallback(legal)
+
+
+def _opponents_still_passive(state: GameState) -> bool:
+    """公开判断：是否存在本手投入未超过一个大盲的未弃牌对手。"""
+    return any(
+        not player.folded and player.total_committed <= MIXED_BIG_BLIND
+        for player in state.players
+        if player.seat != state.current_seat
+    )
+
+
+class AggressionRateProbe:
+    """主动率针对探针：对手本手尚未主动时固定提高下注频率。"""
+
+    def choose_action(self, state: GameState, legal: LegalActions) -> Action:
+        if _opponents_still_passive(state) and legal.can_bet:
+            return Action(
+                ActionType.BET,
+                _clamp_target(state.pot // 2, legal.min_bet, legal.max_bet),
+            )
+        return _probe_fallback(legal)
 
 
 # ------------------------------------------------------------------ 派生与计时
@@ -1070,20 +1336,30 @@ def run_supplementary_matrix(
 
 def adversarial_schedule(
     stage: Literal["A", "B"],
+    *,
+    seeds: Sequence[int] | None = None,
+    family_set: str = DEFAULT_ADVERSARIAL_FAMILY_SET,
 ) -> list[tuple[int, MixedStyle, str, str, int, int]]:
-    """对照排期：阶段 A 只取首轮换的一个子集，阶段 B 为完整轮换。"""
+    """对照排期：阶段 A 只取首轮换的一个子集，阶段 B 为完整轮换。
+
+    主种子与对手族集可显式给出；省略时沿用既有常量，使既有调用逐字不变。
+    """
+    seed_blocks = MIXED_MAIN_SEEDS if seeds is None else tuple(seeds)
+    if not seed_blocks:
+        raise MixedValidationAuthorizationError("对照排期至少需要一个主种子块")
+    opponents = adversarial_families(family_set)
     schedule: list[tuple[int, MixedStyle, str, str, int, int]] = []
     if stage == "A":
-        seed = MIXED_MAIN_SEEDS[0]
+        seed = seed_blocks[0]
         style = MixedStyle.TIGHT
-        for opponent in ADVERSARIAL_OPPONENT_FAMILIES:
+        for opponent in opponents:
             for arm in ADVERSARIAL_ARMS:
                 for player_count in MIXED_PLAYER_COUNTS:
                     schedule.append((seed, style, opponent, arm, player_count, 0))
         return schedule
-    for seed in MIXED_MAIN_SEEDS:
+    for seed in seed_blocks:
         for style in MixedStyle:
-            for opponent in ADVERSARIAL_OPPONENT_FAMILIES:
+            for opponent in opponents:
                 for arm in ADVERSARIAL_ARMS:
                     for player_count in MIXED_PLAYER_COUNTS:
                         for rotation in range(player_count):
@@ -1142,6 +1418,14 @@ def _opponent_mover(family: str, seed: int) -> object:
         return PassiveCallProbe()
     if family == "fixed-pressure-probe":
         return FixedPressureProbe()
+    if family == "size-signal-probe":
+        return SizeSignalProbe()
+    if family == "position-pressure-probe":
+        return PositionPressureProbe()
+    if family == "marginal-call-pressure-probe":
+        return MarginalCallPressureProbe()
+    if family == "aggression-rate-probe":
+        return AggressionRateProbe()
     if family == "heuristic@1":
         return HeuristicStrategy(seed=seed)
     from app.strategy.random_strategy import RandomStrategy
@@ -1256,13 +1540,14 @@ def matches_from_tally(
     *,
     planned_hands: int,
     note: str | None = None,
+    seed_blocks: Sequence[int] | None = None,
 ) -> MixedValidationMatches:
     """把累计器内容汇总成报告用的对照结果；完成手数按实际写入的内容计数。"""
     payload: dict[str, object] = {
         "planned_hands": planned_hands,
         "completed_hands": len(tally.rows),
         "truncated_hands": tally.truncated,
-        "seed_blocks": MIXED_MAIN_SEEDS,
+        "seed_blocks": MIXED_MAIN_SEEDS if seed_blocks is None else tuple(seed_blocks),
         "rows": tuple(tally.rows),
     }
     if note is not None:
@@ -1276,17 +1561,21 @@ def run_adversarial_batch(
     allow_matches: bool = False,
     tally: _MatchTally | None = None,
     identifier: str = MIXED_STRATEGY_IDENTIFIER,
+    seeds: Sequence[int] | None = None,
+    family_set: str = DEFAULT_ADVERSARIAL_FAMILY_SET,
 ) -> _MatchTally:
     """执行第一批有界对照；达到动作上限的手截断、不补终局、不估算输赢。
 
     对抗对照属于评测实跑，必须由阶段许可显式开启；默认拒绝。结果写进累计器并返回。
+    主种子与对手族集可显式给出；省略时沿用既有常量，使既有调用逐字不变。
     """
     if not allow_matches:
         raise MixedValidationAuthorizationError("对抗对照属于评测实跑，须经阶段许可后显式开启")
     if tally is None:
         tally = _MatchTally()
     rules = rules_for_identifier(identifier)
-    for seed, style, opponent, arm, player_count, rotation in adversarial_schedule(stage):
+    schedule = adversarial_schedule(stage, seeds=seeds, family_set=family_set)
+    for seed, style, opponent, arm, player_count, rotation in schedule:
         outcome = play_adversarial_hand(
             seed=seed,
             style=style,
@@ -1381,14 +1670,20 @@ def run_validation(
     allow_stage: str | None,
     output_dir: str | None = None,
     stage_a_receipt: MixedValidationReport | None = None,
+    family_set: str = DEFAULT_ADVERSARIAL_FAMILY_SET,
 ) -> MixedValidationReport:
-    """执行一个显式授权的验证阶段；不访问、不修改任何封存工件。"""
+    """执行一个显式授权的验证阶段；不访问、不修改任何封存工件。
+
+    主种子块取自清单本身，对手族集可显式给出；省略时沿用既有口径，使既有调用逐字不变。
+    """
     frozen = require_stage_permission(
         stage=stage,
         allow_stage=allow_stage,
         manifest=manifest,
         stage_a_receipt=stage_a_receipt,
     )
+    # 局限说明按清单实际的种子块个数选取；块数未登记时在做任何计算之前失败。
+    resolved_limitations = validation_limitations(len(frozen.seeds))
     # 未注册身份在任何计算之前显式失败，避免报告身份与实际驱动口径不一致。
     strategy_rules(frozen)
     directory = prepare_output_dir(output_dir)
@@ -1410,7 +1705,7 @@ def run_validation(
         planned_hands=0,
         completed_hands=0,
         truncated_hands=0,
-        seed_blocks=MIXED_MAIN_SEEDS,
+        seed_blocks=frozen.seeds,
         rows=(),
         matches_note="本轮未执行到对抗对照，因此没有对照读数。",
     )
@@ -1438,7 +1733,7 @@ def run_validation(
                 planned_hands=0,
                 completed_hands=0,
                 truncated_hands=0,
-                seed_blocks=MIXED_MAIN_SEEDS,
+                seed_blocks=frozen.seeds,
                 rows=(),
                 matches_note="A0 前哨不执行对抗对照，因此没有对照读数。",
             )
@@ -1461,9 +1756,15 @@ def run_validation(
                 allow_matches=True,
                 tally=match_tally,
                 identifier=frozen.strategy_id,
+                seeds=frozen.seeds,
+                family_set=family_set,
             )
             matches = matches_from_tally(
-                match_tally, planned_hands=len(adversarial_schedule(full_stage))
+                match_tally,
+                planned_hands=len(
+                    adversarial_schedule(full_stage, seeds=frozen.seeds, family_set=family_set)
+                ),
+                seed_blocks=frozen.seeds,
             )
             behavior = collect_behavior(frozen, allow_full=True)
     except (
@@ -1478,8 +1779,11 @@ def run_validation(
         if not sentinel:
             matches = matches_from_tally(
                 match_tally,
-                planned_hands=len(adversarial_schedule(full_stage)),
+                planned_hands=len(
+                    adversarial_schedule(full_stage, seeds=frozen.seeds, family_set=family_set)
+                ),
                 note="本轮在跑完对抗对照前停止，计数只覆盖已经完成的手。",
+                seed_blocks=frozen.seeds,
             )
 
     wall_seconds = time.perf_counter() - wall_started
@@ -1562,9 +1866,9 @@ def run_validation(
         ),
         violations=tuple(violations),
         limitations=(
-            (MIXED_VALIDATION_LIMITATIONS + (STAGE_A0_LIMITATION,))
+            (resolved_limitations + (STAGE_A0_LIMITATION,))
             if sentinel
-            else MIXED_VALIDATION_LIMITATIONS
+            else resolved_limitations
         ),
     )
     if directory is not None:
@@ -1599,18 +1903,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if len(args) < 4:
         print(
             "用法：python -m tests.mixed_bot_validation <清单路径> <A0|A|B> <输出目录> "
-            "--allow-stage=<A0|A|B> [--stage-a-receipt=<阶段 A 回执路径>]",
+            "--allow-stage=<A0|A|B> [--stage-a-receipt=<阶段 A 回执路径>] "
+            "[--family-set=<已注册族集名>]",
             file=sys.stderr,
         )
         return 2
     manifest_path, stage, output_dir = args[0], args[1], args[2]
     allow_stage = None
     receipt_path = None
+    family_set = DEFAULT_ADVERSARIAL_FAMILY_SET
     for token in args[3:]:
         if token.startswith("--allow-stage="):
             allow_stage = token.split("=", 1)[1]
         elif token.startswith("--stage-a-receipt="):
             receipt_path = token.split("=", 1)[1]
+        elif token.startswith("--family-set="):
+            family_set = token.split("=", 1)[1]
     with open(manifest_path, encoding="utf-8") as handle:
         manifest = MixedFixtureManifest.model_validate(json.load(handle))
     receipt = None
@@ -1623,6 +1931,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         allow_stage=allow_stage,
         output_dir=output_dir,
         stage_a_receipt=receipt,
+        family_set=family_set,
     )
     print(report.model_dump_json(indent=2))
     return 0

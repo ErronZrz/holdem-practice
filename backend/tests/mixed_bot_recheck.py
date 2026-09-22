@@ -26,7 +26,6 @@ from app.strategy.mixed_policy import MixedStyle
 from .mixed_bot_states import MIXED_BIG_BLIND, MixedFixtureManifest
 from .mixed_bot_validation import (
     ADVERSARIAL_ARMS,
-    MIXED_MAIN_SEEDS,
     HandOutcome,
     MixedCategoryBehavior,
     MixedMatchFamilyRow,
@@ -41,12 +40,25 @@ from .mixed_bot_validation import (
 )
 
 RECHECK_SCHEMA_VERSION = "mixed-recheck.v1"
-RECHECK_LIMITATIONS: tuple[str, ...] = (
-    "补算只把既有回执缺失的指标按确定性口径重算，不产生新对局、不产生新样本、不追加强制种子。",
-    "VPIP/PFR 是焦点座位逐手的机械统计，不是范围强度、盈亏平衡频率或均衡频率。",
-    "按主种子块统计只有四个固定块，不出具具有总体覆盖承诺的置信区间。",
-    "风格间距离只说明分布差异存在，不说明哪一档更强、更弱或更难被针对。",
-)
+# 已登记的种子块个数与其中文写法：块数不同时措辞必须跟着变，不能沿用别的块数。
+RECHECK_BLOCK_COUNT_WORDS: dict[int, str] = {4: "四", 8: "八"}
+
+
+def recheck_limitations(seed_block_count: int) -> tuple[str, ...]:
+    """按回执实际的种子块个数生成块统计口径说明；未登记的块数显式失败。"""
+    try:
+        word = RECHECK_BLOCK_COUNT_WORDS[seed_block_count]
+    except KeyError:
+        raise MixedRecheckError(f"未登记的种子块个数：{seed_block_count}") from None
+    return (
+        "补算只把既有回执缺失的指标按确定性口径重算，不产生新对局、不产生新样本、不追加强制种子。",
+        "VPIP/PFR 是焦点座位逐手的机械统计，不是范围强度、盈亏平衡频率或均衡频率。",
+        f"按主种子块统计只有{word}个固定块，不出具具有总体覆盖承诺的置信区间。",
+        "风格间距离只说明分布差异存在，不说明哪一档更强、更弱或更难被针对。",
+    )
+
+
+RECHECK_LIMITATIONS: tuple[str, ...] = recheck_limitations(4)
 
 
 class MixedRecheckError(RuntimeError):
@@ -154,9 +166,11 @@ def aggregate_matches(
     schedule: Sequence[tuple[int, MixedStyle, str, str, int, int]],
     outcomes: Sequence[HandOutcome],
 ) -> tuple[tuple[MixedMatchAggregateRow, ...], tuple[MixedWorstOpponent, ...]]:
-    """汇总对照结果：块内先按轮换聚合，再给四个块的均值、样本标准差与最小最大值。"""
+    """汇总对照结果：块内先按轮换聚合，再给每个种子块的均值、样本标准差与最小最大值。"""
     if len(schedule) != len(outcomes):
         raise MixedRecheckError("排期长度与结果数量不一致，无法汇总")
+    # 种子块顺序取自排期自身，使换过主种子的清单也能给出正确的块统计。
+    seed_blocks = tuple(dict.fromkeys(entry[0] for entry in schedule))
     cells: dict[tuple[int, str, str, str], _CellTally] = {}
     for entry, outcome in zip(schedule, outcomes, strict=True):
         seed, style, opponent, arm, player_count, _rotation = entry
@@ -173,7 +187,7 @@ def aggregate_matches(
         hands = len(tally.net)
         block_means = tuple(
             statistics.fmean(tally.blocks[seed])
-            for seed in MIXED_MAIN_SEEDS
+            for seed in seed_blocks
             if seed in tally.blocks
         )
         rows.append(
@@ -344,6 +358,7 @@ def recheck(
             peak_rss_bytes=peak_rss_bytes(),
             output_bytes=0,
         ),
+        limitations=recheck_limitations(len(receipt.matches.seed_blocks)),
     )
     if directory is not None:
         target = os.path.join(directory, f"mixed-recheck-stage-{receipt.stage}.json")

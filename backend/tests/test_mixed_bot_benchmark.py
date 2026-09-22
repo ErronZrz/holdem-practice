@@ -35,6 +35,7 @@ from app.strategy.mixed_strategy import (
     MixedStrategyError,
     rules_for_identifier,
 )
+from app.strategy.projection import project_for_actor
 
 from . import mixed_bot_recheck
 from . import mixed_bot_validation as validation
@@ -50,6 +51,7 @@ from .mixed_bot_states import (
     MIXED_CATEGORY_IDS,
     MIXED_CATEGORY_STREET,
     MIXED_DEPTHS_BB,
+    MIXED_IQV_NODE_ID_SUFFIX,
     MIXED_PLANNED_SLOT_COUNT,
     MIXED_PLAYER_COUNTS,
     MIXED_STREETS,
@@ -61,6 +63,7 @@ from .mixed_bot_states import (
     MixedPublicAction,
     applicable_player_counts,
     apply_node,
+    build_frozen_iqv_nodes,
     build_frozen_nodes,
     build_node,
     iter_planned_slots,
@@ -71,28 +74,37 @@ from .mixed_bot_states import (
 from .mixed_bot_validation import (
     ADVERSARIAL_ARMS,
     ADVERSARIAL_HANDS,
+    ADVERSARIAL_HANDS_IQV,
     ADVERSARIAL_MAX_VOLUNTARY_ACTIONS,
     ADVERSARIAL_OPPONENT_FAMILIES,
+    ADVERSARIAL_OPPONENT_FAMILIES_IQV,
     BEHAVIOR_SMOKE_NODE_LIMIT,
     COST_CELLS_PER_PLAYER_COUNT,
     COST_DECISIONS_PER_PLAYER_COUNT,
     DIGEST_RULE_FIELDS,
     MIXED_DIRECT_DISTRIBUTION_COUNT,
+    MIXED_IQV_MAIN_SEEDS,
+    MIXED_IQV_VALIDATION_LIMITATIONS,
     MIXED_MAIN_SEEDS,
+    MIXED_VALIDATION_LIMITATIONS,
     STAGE_A0_COST_SAMPLES,
     STAGE_A_ADVERSARIAL_HANDS,
+    STAGE_A_ADVERSARIAL_HANDS_IQV,
     STAGE_A_COST_SAMPLES,
     STAGE_A_SUPPLEMENTARY_SAMPLES,
     SUPPLEMENTARY_TOTAL_SAMPLES,
     HandOutcome,
     MixedMatchFamilyRow,
     MixedValidationAuthorizationError,
+    adversarial_families,
     adversarial_schedule,
     cell_quota,
     collect_behavior,
     config_digest,
     cost_cells,
+    derive_iqv_main_seeds,
     fixture_at_depth,
+    frozen_iqv_manifest,
     frozen_manifest,
     js_distance,
     matches_from_tally,
@@ -104,6 +116,7 @@ from .mixed_bot_validation import (
     strategy_rules,
     supplementary_plan,
     usable_at_depth,
+    validation_limitations,
 )
 
 _ENV_SWITCH = "HOLDEM_MIXED_BENCHMARK"
@@ -941,6 +954,159 @@ def test_behavior_collection_smoke_is_bounded_and_labelled() -> None:
     assert behavior.direct_distributions == 9
     assert {row.style for row in behavior.styles} == {style.value for style in MixedStyle}
     assert all(row.distributions == 3 for row in behavior.styles)
+
+
+# ------------------------------------------------------------------ 第二套清单与探针
+
+
+def test_iqv_main_seeds_follow_the_frozen_derivation_rule() -> None:
+    """第二套主种子必须能按冻结规则复算，且与既有四个主种子全部不同。"""
+    assert derive_iqv_main_seeds() == MIXED_IQV_MAIN_SEEDS
+    assert len(MIXED_IQV_MAIN_SEEDS) == 8
+    assert len(set(MIXED_IQV_MAIN_SEEDS)) == len(MIXED_IQV_MAIN_SEEDS)
+    assert not set(MIXED_IQV_MAIN_SEEDS) & set(MIXED_MAIN_SEEDS)
+    with pytest.raises(MixedValidationAuthorizationError):
+        derive_iqv_main_seeds(0)
+
+
+def test_iqv_nodes_are_a_full_second_set() -> None:
+    """第二套节点数量与计划槽一致，标识带后缀，且与首套节点内容不重合。"""
+    first = build_frozen_nodes()
+    second = build_frozen_iqv_nodes()
+    assert len(first) == MIXED_APPLICABLE_NODE_COUNT
+    assert len(second) == MIXED_APPLICABLE_NODE_COUNT
+    assert all(node.node_id.endswith(MIXED_IQV_NODE_ID_SUFFIX) for node in second)
+    assert not {node.node_id for node in first} & {node.node_id for node in second}
+
+    def _content(node: MixedNodeFixture) -> tuple[object, ...]:
+        return (
+            node.category,
+            node.player_count,
+            tuple(node.hole_cards),
+            tuple(node.board),
+            tuple(
+                (action.street, action.seat, action.action, action.amount)
+                for action in node.actions
+            ),
+            tuple(node.stacks),
+        )
+
+    assert not {_content(node) for node in first} & {_content(node) for node in second}
+
+
+def test_iqv_family_set_extends_the_first_batch_untouched() -> None:
+    """第二套族集只增不改：前四族与既有一致，未注册族集名显式失败。"""
+    assert adversarial_families() == ADVERSARIAL_OPPONENT_FAMILIES
+    second = adversarial_families("iqv")
+    assert second == ADVERSARIAL_OPPONENT_FAMILIES_IQV
+    assert second[: len(ADVERSARIAL_OPPONENT_FAMILIES)] == ADVERSARIAL_OPPONENT_FAMILIES
+    assert len(second) == 8
+    with pytest.raises(MixedValidationAuthorizationError):
+        adversarial_families("未注册族集")
+
+
+def test_iqv_schedule_counts_match_the_mechanical_arithmetic() -> None:
+    """排期手数必须与规格算式一致；省略参数时既有口径逐字不变。"""
+    assert len(adversarial_schedule("A")) == STAGE_A_ADVERSARIAL_HANDS == 64
+    assert len(adversarial_schedule("B")) == ADVERSARIAL_HANDS == 4224
+    stage_a = adversarial_schedule("A", seeds=MIXED_IQV_MAIN_SEEDS, family_set="iqv")
+    full = adversarial_schedule("B", seeds=MIXED_IQV_MAIN_SEEDS, family_set="iqv")
+    assert len(stage_a) == STAGE_A_ADVERSARIAL_HANDS_IQV == 128
+    assert len(full) == ADVERSARIAL_HANDS_IQV == 16896
+    assert {entry[0] for entry in stage_a} == {MIXED_IQV_MAIN_SEEDS[0]}
+    assert {entry[2] for entry in full} == set(ADVERSARIAL_OPPONENT_FAMILIES_IQV)
+    with pytest.raises(MixedValidationAuthorizationError):
+        adversarial_schedule("B", seeds=())
+
+
+def test_iqv_manifest_keeps_the_same_slots_but_new_content() -> None:
+    """第二套清单必须完整冻结：新种子、新节点，且与首套清单摘要不同。"""
+    first = frozen_manifest(code_identity="code-identity", output_dir="/tmp/iqv-out")
+    second = frozen_iqv_manifest(
+        code_identity="code-identity",
+        output_dir="/tmp/iqv-out",
+        strategy_id=MIXED_STRATEGY_IDENTIFIER_V5,
+    )
+    assert second.seeds == MIXED_IQV_MAIN_SEEDS
+    assert len(second.nodes) == MIXED_APPLICABLE_NODE_COUNT
+    assert second.config_digest == config_digest(MIXED_STRATEGY_IDENTIFIER_V5)
+    assert second.digest() != first.digest()
+    assert validation.required_envelope_fields(second) == ()
+
+
+def test_iqv_probes_are_deterministic_and_blind_to_hidden_cards() -> None:
+    """第二套探针只看公开信息：换掉对手暗牌不得改变动作，同局面必须可复现。"""
+    probes = (
+        validation.SizeSignalProbe(),
+        validation.PositionPressureProbe(),
+        validation.MarginalCallPressureProbe(),
+        validation.AggressionRateProbe(),
+    )
+    legal_types = set(ActionType)
+    checked = 0
+    for node in build_frozen_iqv_nodes():
+        applied = apply_node(node)
+        legal = applied.legal_actions()
+        raw = applied.engine.snapshot()
+        public = project_for_actor(raw)
+        for probe in probes:
+            first = probe.choose_action(public, legal)
+            assert first == probe.choose_action(public, legal)
+            # 未脱敏快照带着对手暗牌；探针读不到暗牌才可能给出同一动作。
+            assert first == probe.choose_action(raw, legal)
+            assert first.type in legal_types
+            checked += 1
+    assert checked == len(probes) * MIXED_APPLICABLE_NODE_COUNT
+
+
+def test_iqv_adversarial_batch_runs_the_second_family_set(monkeypatch) -> None:
+    """显式 opt-in 路径必须真的能跑第二套族集与种子，而不只是常量改了。"""
+    monkeypatch.setattr(
+        validation,
+        "play_adversarial_hand",
+        lambda **kwargs: validation.HandOutcome(net_chips=5, truncated=False),
+    )
+    tally = run_adversarial_batch(
+        stage="A", allow_matches=True, seeds=MIXED_IQV_MAIN_SEEDS, family_set="iqv"
+    )
+    assert len(tally.rows) == STAGE_A_ADVERSARIAL_HANDS_IQV
+    assert {row.seed_block for row in tally.rows} == {MIXED_IQV_MAIN_SEEDS[0]}
+    assert {row.opponent for row in tally.rows} == set(ADVERSARIAL_OPPONENT_FAMILIES_IQV)
+    matches = matches_from_tally(
+        tally,
+        planned_hands=STAGE_A_ADVERSARIAL_HANDS_IQV,
+        seed_blocks=MIXED_IQV_MAIN_SEEDS,
+    )
+    assert matches.seed_blocks == MIXED_IQV_MAIN_SEEDS
+
+
+def test_limit_wording_follows_the_seed_block_count() -> None:
+    """局限说明必须与清单实际块数一致，不能套用别的块数措辞。"""
+    assert validation_limitations(4) == MIXED_VALIDATION_LIMITATIONS
+    assert validation_limitations(8) == MIXED_IQV_VALIDATION_LIMITATIONS
+    with pytest.raises(MixedValidationAuthorizationError):
+        validation_limitations(5)
+    assert mixed_bot_recheck.recheck_limitations(4) == mixed_bot_recheck.RECHECK_LIMITATIONS
+    assert "八个固定块" in mixed_bot_recheck.recheck_limitations(8)[2]
+    with pytest.raises(MixedRecheckError):
+        mixed_bot_recheck.recheck_limitations(5)
+
+
+def test_aggregate_matches_uses_the_schedule_seed_blocks() -> None:
+    """汇总必须按排期自身的种子块统计，换过主种子的排期不能丢掉块统计。"""
+    schedule = [
+        (seed, MixedStyle.TIGHT, "random@1", "mixed-focus", 2, 0)
+        for seed in MIXED_IQV_MAIN_SEEDS
+    ]
+    outcomes = [HandOutcome(net_chips=1, truncated=False) for _ in schedule]
+    aggregates, worst = aggregate_matches(schedule, outcomes)
+    assert len(aggregates) == 1
+    assert len(aggregates[0].block_means) == len(MIXED_IQV_MAIN_SEEDS)
+    assert worst
+    first_schedule = adversarial_schedule("A")
+    first_outcomes = [HandOutcome(net_chips=1, truncated=False) for _ in first_schedule]
+    first_rows, _ = aggregate_matches(first_schedule, first_outcomes)
+    assert all(row.block_means == (1.0,) for row in first_rows)
 
 
 # ------------------------------------------------------------------ 显式 opt-in
