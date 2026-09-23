@@ -26,7 +26,10 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.poker.actions import Action, ActionType, IllegalActionError, LegalActions
+from app.poker.cards import Card
 from app.poker.engine import PokerEngine
+from app.poker.evaluator import evaluate_fast
+from app.poker.hand import HandCategory
 from app.poker.state import GameState, Street
 from app.strategy.heuristic import HeuristicStrategy
 from app.strategy.lookup_budget import (
@@ -91,6 +94,8 @@ from .mixed_bot_states import (
 MIXED_VALIDATION_SCHEMA_VERSION = "mixed-validation.v1"
 # 逐节点明细引入后的报告版本；上一版的字段与语义保持不变，历史回执继续可读。
 MIXED_VALIDATION_SCHEMA_VERSION_V2 = "mixed-validation.v2"
+# 逐手观测工件的版本：单独落盘，不并入主报告，避免主报告体积与职责膨胀。
+MIXED_OBSERVATIONS_SCHEMA_VERSION = "mixed-observations.v1"
 # 验证身份独立于任何既有评测身份，不是任何既有运行许可的续用。
 MIXED_VALIDATION_IDENTITY = "mixed-local-v1-validation"
 # 复用既有主种子数值，但必须重新获得产品验证运行许可。
@@ -643,6 +648,46 @@ class MixedNodeBehavior(_FrozenModel):
     effective_scale_count: int = Field(ge=0)
     structural_single_size: int = Field(ge=0)
     has_active_candidate: bool
+
+
+class MixedObservationAction(_FrozenModel):
+    """一次落子的机械记录：只记公开动作与额度，不记任何牌面。"""
+
+    street: str
+    seat: int
+    action: str
+    amount: int
+
+
+class MixedObservationHand(_FrozenModel):
+    """一手对照的落子序列与派生标签；牌力档是算出来的标签，不是牌面本身。"""
+
+    hand_index: int
+    player_count: int
+    style: str
+    opponent: str
+    arm: str
+    seed_block: int | None = None
+    rotation: int | None = None
+    actions: tuple[MixedObservationAction, ...] = ()
+    # 各街结束时的底池；只出现在本手实际发生过落子的街上。
+    pot_after_street: dict[str, int] = Field(default_factory=dict)
+    net_chips: int = 0
+    focus_strength_bucket: str | None = None
+
+
+class MixedObservations(_FrozenModel):
+    """逐手观测工件：仅供离线归因，不进入任何决策路径。"""
+
+    schema_version: Literal["mixed-observations.v1"] = MIXED_OBSERVATIONS_SCHEMA_VERSION
+    strategy_id: str
+    manifest_digest: str
+    hands: tuple[MixedObservationHand, ...] = ()
+    output_bytes: int = Field(default=0, ge=0)
+    observations_note: str = (
+        "落子序列与底池来自对局记录层；牌力档是焦点座位自身牌力的派生标签。"
+        "工件不含底牌、公共牌或牌堆内容，也不参与任何决策。"
+    )
 
 
 class MixedValidationBehavior(_FrozenModel):
@@ -1611,6 +1656,10 @@ class HandOutcome:
     pfr: bool = False
     aggressive_actions: int = 0
     total_actions: int = 0
+    # 观测开启时另存落子序列、各街底池与派生的牌力档；默认关闭时保持为空。
+    actions: tuple[MixedObservationAction, ...] = ()
+    pot_after_street: dict[str, int] = field(default_factory=dict)
+    strength_bucket: str | None = None
 
 
 def _focus_mover(
@@ -1664,6 +1713,26 @@ def _opponent_mover(family: str, seed: int) -> object:
     return RandomStrategy(seed=seed)
 
 
+def _sorted_pots(by_street: dict[str, int]) -> dict[str, int]:
+    """按街名排序后返回，使同一手在不同运行下的序列化结果一致。"""
+    return {key: by_street[key] for key in sorted(by_street)}
+
+
+def _strength_bucket(hole: Sequence[Card], board: Sequence[Card]) -> str | None:
+    """按焦点座位自身的成手牌力给一个粗档；公共牌不足三张时不给档。
+
+    只使用焦点座位自己的底牌与公开公共牌，因此不引入任何对手私有信息。
+    """
+    if not hole or len(board) < 3:
+        return None
+    category = evaluate_fast([*hole, *board]).category
+    if category <= HandCategory.ONE_PAIR:
+        return "weak"
+    if category <= HandCategory.STRAIGHT:
+        return "medium"
+    return "strong"
+
+
 def play_adversarial_hand(
     *,
     seed: int,
@@ -1673,8 +1742,12 @@ def play_adversarial_hand(
     player_count: int,
     rotation: int,
     rules: MixedPolicyRules,
+    observe: bool = False,
 ) -> HandOutcome:
-    """一手有界对照：每手重置到 100BB、盲注 5/10、不设抽水。"""
+    """一手有界对照：每手重置到 100BB、盲注 5/10、不设抽水。
+
+    观测默认关闭；开启时另存落子序列、各街底池与派生的牌力档。
+    """
     engine = PokerEngine(
         player_count,
         MIXED_SMALL_BLIND,
@@ -1710,9 +1783,13 @@ def play_adversarial_hand(
     focus_pfr = False
     focus_aggressive = 0
     focus_actions = 0
+    observed_actions: list[MixedObservationAction] = []
+    pot_by_street: dict[str, int] = {}
     while not engine.hand_over:
         legal = engine.legal_actions()
         seat = engine.current_seat
+        # 落子所属的街必须在应用动作之前取，动作应用后可能已进入下一条街。
+        street_before = engine.street
         preflop = engine.street is Street.PREFLOP
         if seat == focus_seat:
             if not tracker.active:
@@ -1736,6 +1813,17 @@ def play_adversarial_hand(
             if preflop and action.type is ActionType.RAISE:
                 focus_pfr = True
         engine.apply_action(action)
+        if observe:
+            observed_actions.append(
+                MixedObservationAction(
+                    street=street_before.name.lower(),
+                    seat=seat,
+                    action=action.type.value,
+                    amount=action.amount,
+                )
+            )
+            # 底池按整手累计投入计算，覆盖本街读数即得该街结束时的底池。
+            pot_by_street[street_before.name.lower()] = engine.pot
         if tracker.active:
             # 摘要覆盖全桌公开事件，与谁行动无关。
             tracker.consume_after_action(engine.history)
@@ -1747,6 +1835,11 @@ def play_adversarial_hand(
                 pfr=focus_pfr,
                 aggressive_actions=focus_aggressive,
                 total_actions=focus_actions,
+                actions=tuple(observed_actions),
+                pot_after_street=_sorted_pots(pot_by_street),
+                strength_bucket=_strength_bucket(
+                    engine.players[focus_seat].hole_cards, engine.board
+                ),
             )
     return HandOutcome(
         net_chips=engine.last_net.get(focus_seat, 0),
@@ -1755,6 +1848,11 @@ def play_adversarial_hand(
         pfr=focus_pfr,
         aggressive_actions=focus_aggressive,
         total_actions=focus_actions,
+        actions=tuple(observed_actions),
+        pot_after_street=_sorted_pots(pot_by_street),
+        strength_bucket=_strength_bucket(
+            engine.players[focus_seat].hole_cards, engine.board
+        ),
     )
 
 
@@ -1764,6 +1862,8 @@ class _MatchTally:
 
     rows: list[MixedMatchFamilyRow] = field(default_factory=list)
     truncated: int = 0
+    # 观测开启时逐手另存归因用的落子序列；关闭时保持为空，不影响既有路径。
+    observations: list[MixedObservationHand] = field(default_factory=list)
 
 
 def matches_from_tally(
@@ -1794,6 +1894,7 @@ def run_adversarial_batch(
     identifier: str = MIXED_STRATEGY_IDENTIFIER,
     seeds: Sequence[int] | None = None,
     family_set: str = DEFAULT_ADVERSARIAL_FAMILY_SET,
+    observe: bool = False,
 ) -> _MatchTally:
     """执行第一批有界对照；达到动作上限的手截断、不补终局、不估算输赢。
 
@@ -1815,8 +1916,25 @@ def run_adversarial_batch(
             player_count=player_count,
             rotation=rotation,
             rules=rules,
+            observe=observe,
         )
         tally.truncated += 1 if outcome.truncated else 0
+        if observe:
+            tally.observations.append(
+                MixedObservationHand(
+                    hand_index=len(tally.rows),
+                    player_count=player_count,
+                    style=style.value,
+                    opponent=opponent,
+                    arm=arm,
+                    seed_block=seed,
+                    rotation=rotation,
+                    actions=outcome.actions,
+                    pot_after_street=outcome.pot_after_street,
+                    net_chips=outcome.net_chips,
+                    focus_strength_bucket=outcome.strength_bucket,
+                )
+            )
         tally.rows.append(
             MixedMatchFamilyRow(
                 player_count=player_count,
@@ -1876,6 +1994,32 @@ def prepare_output_dir(output_dir: str | None) -> str | None:
     return output_dir
 
 
+def write_observations(
+    observations: MixedObservations,
+    directory: str,
+    stage: str,
+) -> str:
+    """把逐手观测工件写入目录；已存在同名文件时拒绝覆盖。
+
+    与主报告一致，写进文件的字节数就是这份文件自身的大小。
+    """
+    target = os.path.join(directory, f"mixed-observations-stage-{stage}.json")
+    if os.path.exists(target):
+        raise MixedValidationAuthorizationError("观测工件已存在，不得覆盖")
+    # 工件只供离线机器读取，紧凑落盘以控制体积；主报告仍保持逐字可读的缩进格式。
+    payload = observations.model_dump_json()
+    for _ in range(3):
+        revised = observations.model_copy(
+            update={"output_bytes": len(payload.encode("utf-8"))}
+        ).model_dump_json()
+        if revised == payload:
+            break
+        payload = revised
+    with open(target, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+    return target
+
+
 def write_frozen_manifest(manifest: MixedFixtureManifest, directory: str) -> str:
     """把冻结清单写入指定目录；已存在同名文件时拒绝覆盖。"""
     os.makedirs(directory, exist_ok=True)
@@ -1902,6 +2046,7 @@ def run_validation(
     output_dir: str | None = None,
     stage_a_receipt: MixedValidationReport | None = None,
     family_set: str = DEFAULT_ADVERSARIAL_FAMILY_SET,
+    emit_observations: bool = False,
 ) -> MixedValidationReport:
     """执行一个显式授权的验证阶段；不访问、不修改任何封存工件。
 
@@ -1989,6 +2134,7 @@ def run_validation(
                 identifier=frozen.strategy_id,
                 seeds=frozen.seeds,
                 family_set=family_set,
+                observe=emit_observations,
             )
             matches = matches_from_tally(
                 match_tally,
@@ -2127,6 +2273,16 @@ def run_validation(
             payload = revised
         with open(target, "w", encoding="utf-8") as handle:
             handle.write(payload)
+        if emit_observations:
+            write_observations(
+                MixedObservations(
+                    strategy_id=report.strategy_id,
+                    manifest_digest=report.manifest_digest,
+                    hands=tuple(match_tally.observations),
+                ),
+                directory,
+                stage,
+            )
     return report
 
 
@@ -2140,7 +2296,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "用法：python -m tests.mixed_bot_validation <清单路径> <A0|A|B> <输出目录> "
             "--allow-stage=<A0|A|B> [--stage-a-receipt=<阶段 A 回执路径>] "
-            "[--family-set=<已注册族集名>]",
+            "[--family-set=<已注册族集名>] [--emit-observations]",
             file=sys.stderr,
         )
         return 2
@@ -2148,6 +2304,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     allow_stage = None
     receipt_path = None
     family_set = DEFAULT_ADVERSARIAL_FAMILY_SET
+    emit_observations = False
     for token in args[3:]:
         if token.startswith("--allow-stage="):
             allow_stage = token.split("=", 1)[1]
@@ -2155,6 +2312,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             receipt_path = token.split("=", 1)[1]
         elif token.startswith("--family-set="):
             family_set = token.split("=", 1)[1]
+        elif token == "--emit-observations":
+            emit_observations = True
     with open(manifest_path, encoding="utf-8") as handle:
         manifest = MixedFixtureManifest.model_validate(json.load(handle))
     receipt = None
@@ -2168,6 +2327,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_dir=output_dir,
         stage_a_receipt=receipt,
         family_set=family_set,
+        emit_observations=emit_observations,
     )
     print(report.model_dump_json(indent=2))
     return 0

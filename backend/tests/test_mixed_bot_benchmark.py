@@ -13,6 +13,7 @@
 import json
 import os
 from dataclasses import asdict
+from pathlib import Path
 
 import pytest
 
@@ -88,6 +89,7 @@ from .mixed_bot_validation import (
     MIXED_IQV_MAIN_SEEDS,
     MIXED_IQV_VALIDATION_LIMITATIONS,
     MIXED_MAIN_SEEDS,
+    MIXED_OBSERVATIONS_SCHEMA_VERSION,
     MIXED_VALIDATION_LIMITATIONS,
     MIXED_VALIDATION_SCHEMA_VERSION_V2,
     STAGE_A0_COST_SAMPLES,
@@ -98,6 +100,9 @@ from .mixed_bot_validation import (
     SUPPLEMENTARY_TOTAL_SAMPLES,
     HandOutcome,
     MixedMatchFamilyRow,
+    MixedObservationAction,
+    MixedObservationHand,
+    MixedObservations,
     MixedValidationAuthorizationError,
     MixedValidationReport,
     adversarial_families,
@@ -115,6 +120,7 @@ from .mixed_bot_validation import (
     js_distance,
     matches_from_tally,
     peak_rss_bytes,
+    play_adversarial_hand,
     prepare_output_dir,
     require_stage_permission,
     run_adversarial_batch,
@@ -123,6 +129,7 @@ from .mixed_bot_validation import (
     supplementary_plan,
     usable_at_depth,
     validation_limitations,
+    write_observations,
 )
 
 _ENV_SWITCH = "HOLDEM_MIXED_BENCHMARK"
@@ -1258,3 +1265,84 @@ def test_iqv2_seed_rule_reproduces_the_frozen_values() -> None:
     """第三套主种子由固定派生规则给出，且与第二套取值完全不重合。"""
     assert derive_iqv2_main_seeds() == MIXED_IQV2_MAIN_SEEDS
     assert not set(MIXED_IQV2_MAIN_SEEDS) & set(MIXED_IQV_MAIN_SEEDS)
+
+
+def test_observations_are_opt_in_and_field_closed(tmp_path: Path) -> None:
+    """观测默认不产出；开启时逐手与报告自洽，且字段闭集不含任何牌面。"""
+    seed = MIXED_IQV2_MAIN_SEEDS[0]
+    tally = run_adversarial_batch(
+        stage="A", allow_matches=True, seeds=(seed,), observe=True
+    )
+    assert len(tally.observations) == len(tally.rows)
+    assert [hand.hand_index for hand in tally.observations] == list(range(len(tally.rows)))
+    assert all(
+        hand.net_chips == row.net_chips
+        for hand, row in zip(tally.observations, tally.rows, strict=True)
+    )
+    assert {hand.seed_block for hand in tally.observations} == {seed}
+    assert all(
+        hand.focus_strength_bucket in {None, "weak", "medium", "strong"}
+        for hand in tally.observations
+    )
+    assert all(
+        set(hand.pot_after_street) <= {"preflop", "flop", "turn", "river"}
+        for hand in tally.observations
+    )
+    # 字段闭集：新增任何字段（尤其牌面）都必须先改这三条断言。
+    assert set(MixedObservationAction.model_fields) == {
+        "street",
+        "seat",
+        "action",
+        "amount",
+    }
+    assert set(MixedObservationHand.model_fields) == {
+        "hand_index",
+        "player_count",
+        "style",
+        "opponent",
+        "arm",
+        "seed_block",
+        "rotation",
+        "actions",
+        "pot_after_street",
+        "net_chips",
+        "focus_strength_bucket",
+    }
+    assert set(MixedObservations.model_fields) == {
+        "schema_version",
+        "strategy_id",
+        "manifest_digest",
+        "hands",
+        "output_bytes",
+        "observations_note",
+    }
+
+    target = write_observations(
+        MixedObservations(
+            strategy_id=MIXED_STRATEGY_IDENTIFIER_V5,
+            manifest_digest="0" * 64,
+            hands=tuple(tally.observations),
+        ),
+        str(tmp_path),
+        "A",
+    )
+    loaded = json.loads(Path(target).read_text(encoding="utf-8"))
+    assert loaded["schema_version"] == MIXED_OBSERVATIONS_SCHEMA_VERSION
+    assert loaded["output_bytes"] == Path(target).stat().st_size
+    assert len(loaded["hands"]) == len(tally.rows)
+
+
+def test_observation_capture_stays_empty_by_default() -> None:
+    """默认关闭观测时，逐手返回值必须保持为空，既有调用逐字不变。"""
+    outcome = play_adversarial_hand(
+        seed=MIXED_IQV2_MAIN_SEEDS[0],
+        style=MixedStyle.TIGHT,
+        opponent="random@1",
+        arm=ADVERSARIAL_ARMS[0],
+        player_count=2,
+        rotation=0,
+        rules=rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V5),
+    )
+    assert outcome.actions == ()
+    assert outcome.pot_after_street == {}
+    assert outcome.strength_bucket is None
