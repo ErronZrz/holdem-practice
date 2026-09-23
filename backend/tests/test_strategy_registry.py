@@ -50,7 +50,7 @@ def test_mixed_identity_has_no_unversioned_alias() -> None:
         resolve_identifier("mixed-local")
     # 已注册的版本号逐版上移，因此这里改用尚未注册的版本号；「未知版本必须被拒」的性质不变。
     with pytest.raises(UnknownStrategyError):
-        resolve_identifier("mixed-local@6")
+        resolve_identifier("mixed-local@7")
 
 
 def test_mixed_strategy_factory_is_registered() -> None:
@@ -161,7 +161,7 @@ def test_create_game_accepts_versioned_identifier() -> None:
         "cfr",
         "heuristic@2",
         "mixed-local",
-        "mixed-local@6",
+        "mixed-local@7",
         "app.strategy.HeuristicStrategy",
         "os.system",
     ],

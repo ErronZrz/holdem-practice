@@ -83,6 +83,11 @@ class MixedPolicyRules:
     preflop_call_bonus: StyleCallBonus = StyleCallBonus()
     # 翻后仅作用于跟注分支的风格偏移，用于拉开被动分支上的风格差异。
     postflop_call_bonus: StyleCallBonus = StyleCallBonus()
+    # 主动分支的尺度倍率：取 1 时主动量与首版逐位相同，取更大值则与被动分支的
+    # 整数刻度对齐，使风格倍率的差异不再被量级差淹没。
+    active_scale_percent: int = 1
+    # 人数惩罚的上限：取 0 表示不设上限；取正值时多人桌上的扣分到此封顶。
+    contender_penalty_cap: int = 0
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -110,6 +115,17 @@ MIXED_LOCAL_V5_RULES = MixedPolicyRules(
     preflop_contender_penalty=30,
     preflop_call_bonus=PreflopCallBonus(tight=30, aggressive=35, calling=110),
     postflop_call_bonus=StyleCallBonus(tight=0, aggressive=0, calling=100),
+)
+# 第六版口径：主动分支与被动分支放在同一尺度，并给人数惩罚设上限；
+# 其余取值与第五版逐字一致，因此两版只在上述两处行为上不同。
+MIXED_LOCAL_V6_RULES = MixedPolicyRules(
+    shared_board_chop_caliber=True,
+    preflop_price_weight=150,
+    preflop_contender_penalty=30,
+    preflop_call_bonus=PreflopCallBonus(tight=30, aggressive=35, calling=110),
+    postflop_call_bonus=StyleCallBonus(tight=0, aggressive=0, calling=100),
+    active_scale_percent=10,
+    contender_penalty_cap=70,
 )
 
 
@@ -269,7 +285,10 @@ def build_distribution(
     value_quality = max(0, score - value_threshold + 120)
     bluff_quality = _non_value_quality(features)
     aggression_scale = Fraction(
-        parameters.aggression_percent * _MODE_AGGRESSION_PERCENT[mode], _PERCENT
+        parameters.aggression_percent
+        * _MODE_AGGRESSION_PERCENT[mode]
+        * rules.active_scale_percent,
+        _PERCENT,
     )
 
     active = _active_candidates(
@@ -317,6 +336,9 @@ def _score(
     if rules.shared_board_chop_caliber and features.shared_board_locked:
         # 锁定平分局面上英雄不会输，人数不再降低其权益，故不施加人数惩罚。
         contender_penalty = 0
+    if rules.contender_penalty_cap > 0:
+        # 人数惩罚在此封顶：多人桌上不再按人数线性累加扣分。
+        contender_penalty = min(contender_penalty, rules.contender_penalty_cap)
     return clip(
         features.base
         + features.draw

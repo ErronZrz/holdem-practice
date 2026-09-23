@@ -59,6 +59,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V3,
     MIXED_STRATEGY_IDENTIFIER_V4,
     MIXED_STRATEGY_IDENTIFIER_V5,
+    MIXED_STRATEGY_IDENTIFIER_V6,
     MixedDistribution,
     MixedLocalStrategy,
     MixedSeatPolicy,
@@ -414,6 +415,15 @@ DIGEST_RULE_FIELDS: dict[str, tuple[str, ...]] = {
         "preflop_contender_penalty",
         "preflop_call_bonus",
         "postflop_call_bonus",
+    ),
+    MIXED_STRATEGY_IDENTIFIER_V6: (
+        "shared_board_chop_caliber",
+        "preflop_price_weight",
+        "preflop_contender_penalty",
+        "preflop_call_bonus",
+        "postflop_call_bonus",
+        "active_scale_percent",
+        "contender_penalty_cap",
     ),
 }
 
