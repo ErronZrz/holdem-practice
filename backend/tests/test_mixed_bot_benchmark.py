@@ -86,6 +86,7 @@ from .mixed_bot_validation import (
     DIGEST_RULE_FIELDS,
     MIXED_DIRECT_DISTRIBUTION_COUNT,
     MIXED_IQV2_MAIN_SEEDS,
+    MIXED_IQV2_VALIDATION_LIMITATIONS,
     MIXED_IQV_MAIN_SEEDS,
     MIXED_IQV_VALIDATION_LIMITATIONS,
     MIXED_MAIN_SEEDS,
@@ -1330,6 +1331,59 @@ def test_observations_are_opt_in_and_field_closed(tmp_path: Path) -> None:
     assert loaded["schema_version"] == MIXED_OBSERVATIONS_SCHEMA_VERSION
     assert loaded["output_bytes"] == Path(target).stat().st_size
     assert len(loaded["hands"]) == len(tally.rows)
+
+
+def test_every_known_manifest_seed_block_count_has_registered_limitations() -> None:
+    """三套清单的块数都必须登记局限说明：新增块数而漏登记，入口会在计算前失败。"""
+    cases = (
+        (frozen_manifest(code_identity="0" * 40, output_dir="/tmp/unused/runs"),
+         MIXED_VALIDATION_LIMITATIONS),
+        (frozen_iqv_manifest(
+            code_identity="0" * 40,
+            output_dir="/tmp/unused/runs",
+            strategy_id=MIXED_STRATEGY_IDENTIFIER_V5,
+        ), MIXED_IQV_VALIDATION_LIMITATIONS),
+        (frozen_iqv2_manifest(
+            code_identity="0" * 40,
+            output_dir="/tmp/unused/runs",
+            strategy_id=MIXED_STRATEGY_IDENTIFIER_V5,
+        ), MIXED_IQV2_VALIDATION_LIMITATIONS),
+    )
+    for manifest, expected in cases:
+        assert validation_limitations(len(manifest.seeds)) is expected
+
+
+def test_stage_entry_path_runs_with_the_sixteen_block_manifest(tmp_path: Path) -> None:
+    """入口链必须能真正跑通：门禁、局限说明、报告版本分派与观测写出一次走完。"""
+    manifest = frozen_iqv2_manifest(
+        code_identity="0" * 40,
+        output_dir=str(tmp_path / "runs"),
+        strategy_id=MIXED_STRATEGY_IDENTIFIER_V5,
+    )
+    report = run_validation(
+        manifest=manifest,
+        stage="A0",
+        allow_stage="A0",
+        output_dir=str(tmp_path / "out"),
+        emit_observations=True,
+    )
+    assert report.status == "completed"
+    assert report.violations == ()
+    assert report.schema_version == MIXED_VALIDATION_SCHEMA_VERSION_V2
+    # 前哨会在登记的局限说明之后追加一条自己的说明，基元必须是登记文本本身。
+    assert report.limitations[: len(MIXED_IQV2_VALIDATION_LIMITATIONS)] == (
+        MIXED_IQV2_VALIDATION_LIMITATIONS
+    )
+    assert len(report.limitations) == len(MIXED_IQV2_VALIDATION_LIMITATIONS) + 1
+    # 前哨不跑对抗也不收集分布矩阵，这两项在报告里记为未运行。
+    assert report.matches.completed_hands == 0
+    assert report.behavior.nodes == ()
+    assert (tmp_path / "out" / "mixed-validation-stage-A0.json").exists()
+    artifact = json.loads(
+        (tmp_path / "out" / "mixed-observations-stage-A0.json").read_text(encoding="utf-8")
+    )
+    assert artifact["schema_version"] == MIXED_OBSERVATIONS_SCHEMA_VERSION
+    assert artifact["hands"] == []
 
 
 def test_observation_capture_stays_empty_by_default() -> None:

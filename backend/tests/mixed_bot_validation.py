@@ -294,10 +294,19 @@ MIXED_IQV_VALIDATION_LIMITATIONS: tuple[str, ...] = (
     "有限样本不能证明未来不会超预算，也不向 2–9 人以外外推。",
     "本报告的记录口径与离线训练产物的记录口径不是同一回事。",
 )
+# 第三套验证的局限说明：块数再次变化，措辞必须同步，不沿用四块或八块口径。
+MIXED_IQV2_VALIDATION_LIMITATIONS: tuple[str, ...] = (
+    "规则评分是启发式分数，不是概率、EV、GTO 或均衡结论。",
+    "单元测试与有界评测只证明契约与机制，不构成对手强度认证。",
+    "十六个固定主种子块只能给出块间离散与粗区间，不构成总体覆盖承诺。",
+    "有限样本不能证明未来不会超预算，也不向 2–9 人以外外推。",
+    "本报告的记录口径与离线训练产物的记录口径不是同一回事。",
+)
 # 种子块个数与局限说明的对应关系：块数未登记时显式失败，避免套用别的块数措辞。
 VALIDATION_LIMITATIONS_BY_BLOCK_COUNT: dict[int, tuple[str, ...]] = {
     4: MIXED_VALIDATION_LIMITATIONS,
     8: MIXED_IQV_VALIDATION_LIMITATIONS,
+    16: MIXED_IQV2_VALIDATION_LIMITATIONS,
 }
 
 
