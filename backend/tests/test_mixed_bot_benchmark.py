@@ -599,6 +599,52 @@ def test_recheck_covers_the_observation_artifact_through_the_entry_path(
     )
 
 
+def test_recheck_entry_path_accepts_the_sixteen_block_receipt(tmp_path: Path) -> None:
+    """十六块回执的补算入口链必须跑通：块数措辞按回执的种子块个数取，缺登记就产不出报告。"""
+    full = frozen_iqv2_manifest(
+        code_identity="0" * 40,
+        output_dir=str(tmp_path / "runs"),
+        strategy_id=MIXED_STRATEGY_IDENTIFIER_V5,
+    )
+    # 只留一个节点：本条核对的是种子块个数与补算入口链，不是节点覆盖面。
+    manifest = full.model_copy(update={"nodes": (full.nodes[0],)})
+    assert len(manifest.seeds) == 16
+    assert manifest.report_format.startswith(MIXED_VALIDATION_SCHEMA_VERSION_V2)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(manifest_json(manifest), encoding="utf-8")
+    stage_a_dir = tmp_path / "stage-a"
+    assert (
+        validation.main([str(manifest_path), "A", str(stage_a_dir), "--allow-stage=A"]) == 0
+    )
+    receipt = json.loads(
+        (stage_a_dir / "mixed-validation-stage-A.json").read_text(encoding="utf-8")
+    )
+    # 十六个种子块必须逐块各出一行，否则块间离散无从比较。
+    assert len(receipt["behavior"]["nodes"]) == 1 * len(MixedStyle) * 3 * 16
+    assert {row["seed_block"] for row in receipt["behavior"]["nodes"]} == set(manifest.seeds)
+
+    recheck_dir = tmp_path / "stage-a-recheck"
+    assert (
+        mixed_bot_recheck.main(
+            [
+                str(manifest_path),
+                str(stage_a_dir / "mixed-validation-stage-A.json"),
+                str(recheck_dir),
+                "--allow-recheck",
+            ]
+        )
+        == 0
+    )
+    report = json.loads(
+        (recheck_dir / "mixed-recheck-stage-A.json").read_text(encoding="utf-8")
+    )
+    assert report["status"] == "completed"
+    assert any("十六个固定块" in text for text in report["limitations"])
+    assert report["consistency"]["net_chips_exact"] is True
+    assert report["consistency"]["behavior_exact"] is True
+    assert report["consistency"]["hands_compared"] == receipt["matches"]["completed_hands"]
+
+
 def test_depth_scaling_rules(frozen: MixedFixtureManifest) -> None:
     scalable = next(node for node in frozen.nodes if node.depth_scalable)
     scaled = fixture_at_depth(scalable, 15)
@@ -1169,6 +1215,7 @@ def test_limit_wording_follows_the_seed_block_count() -> None:
         validation_limitations(5)
     assert mixed_bot_recheck.recheck_limitations(4) == mixed_bot_recheck.RECHECK_LIMITATIONS
     assert "八个固定块" in mixed_bot_recheck.recheck_limitations(8)[2]
+    assert "十六个固定块" in mixed_bot_recheck.recheck_limitations(16)[2]
     with pytest.raises(MixedRecheckError):
         mixed_bot_recheck.recheck_limitations(5)
 

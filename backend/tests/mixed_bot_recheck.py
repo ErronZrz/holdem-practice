@@ -43,7 +43,7 @@ from .mixed_bot_validation import (
 
 RECHECK_SCHEMA_VERSION = "mixed-recheck.v1"
 # 已登记的种子块个数与其中文写法：块数不同时措辞必须跟着变，不能沿用别的块数。
-RECHECK_BLOCK_COUNT_WORDS: dict[int, str] = {4: "四", 8: "八"}
+RECHECK_BLOCK_COUNT_WORDS: dict[int, str] = {4: "四", 8: "八", 16: "十六"}
 
 
 def recheck_limitations(seed_block_count: int) -> tuple[str, ...]:
