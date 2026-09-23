@@ -18,6 +18,7 @@ from .mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V5,
     MIXED_STRATEGY_IDENTIFIER_V6,
     MIXED_STRATEGY_IDENTIFIER_V7,
+    MIXED_STRATEGY_IDENTIFIER_V8,
     MixedLocalStrategy,
 )
 from .random_strategy import RandomStrategy
@@ -181,5 +182,17 @@ register_strategy(
             seed=seed, identifier=MIXED_STRATEGY_IDENTIFIER_V7
         ),
         description="本地规则型混合对手第七版：非价值进攻依据改为连续量，累积第六版口径",
+    ),
+)
+# 第八版为累积版：翻后主动门槛随公开局面按风格分化，其余口径与第七版一致。
+register_strategy(
+    StrategySpec(
+        identifier="mixed-local@8",
+        name="mixed-local",
+        version=8,
+        factory=lambda seed: MixedLocalStrategy(
+            seed=seed, identifier=MIXED_STRATEGY_IDENTIFIER_V8
+        ),
+        description="本地规则型混合对手第八版：翻后主动门槛随公开局面按风格分化，累积第七版口径",
     ),
 )

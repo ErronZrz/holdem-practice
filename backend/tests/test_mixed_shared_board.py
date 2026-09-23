@@ -232,7 +232,7 @@ def test_second_identity_is_registered_alongside_the_first() -> None:
 
 
 # 已注册的版本号逐版上移，因此这里改用尚未注册的版本号。
-@pytest.mark.parametrize("value", ["mixed-local", "mixed-local@8", "mixed-local@1 "])
+@pytest.mark.parametrize("value", ["mixed-local", "mixed-local@9", "mixed-local@1 "])
 def test_unregistered_mixed_identifiers_still_fail(value: str) -> None:
     with pytest.raises(UnknownStrategyError):
         resolve_identifier(value)
@@ -250,7 +250,7 @@ def test_factory_keeps_each_version_on_its_own_caliber() -> None:
 
 def test_unregistered_identity_never_falls_back_to_the_first_version() -> None:
     """未注册身份必须显式失败，不得静默沿用首版口径或随机流。"""
-    unknown = "mixed-local@8"
+    unknown = "mixed-local@9"
     with pytest.raises(MixedStrategyError):
         rules_for_identifier(unknown)
     with pytest.raises(MixedStrategyError):

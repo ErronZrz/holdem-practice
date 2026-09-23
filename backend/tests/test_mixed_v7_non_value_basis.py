@@ -45,6 +45,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V5,
     MIXED_STRATEGY_IDENTIFIER_V6,
     MIXED_STRATEGY_IDENTIFIER_V7,
+    MIXED_STRATEGY_IDENTIFIER_V8,
     MIXED_STRATEGY_IDENTIFIERS,
     rules_for_identifier,
 )
@@ -184,6 +185,7 @@ def test_seventh_identity_is_registered_and_cumulative() -> None:
         MIXED_STRATEGY_IDENTIFIER_V5,
         MIXED_STRATEGY_IDENTIFIER_V6,
         MIXED_STRATEGY_IDENTIFIER_V7,
+        MIXED_STRATEGY_IDENTIFIER_V8,
     )
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V7).version == 7
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V7).name == "mixed-local"
@@ -195,7 +197,7 @@ def test_seventh_identity_is_registered_and_cumulative() -> None:
 
 
 def test_digest_fields_cover_exactly_the_registered_identities() -> None:
-    """摘要字段按身份登记：前六个身份的登记条目未被增删，第七版登记全部八个字段。"""
+    """摘要字段按身份登记：既有身份的登记条目未被增删，第七版登记全部八个字段。"""
     assert set(DIGEST_RULE_FIELDS) == {
         MIXED_STRATEGY_IDENTIFIER_V2,
         MIXED_STRATEGY_IDENTIFIER_V3,
@@ -203,6 +205,7 @@ def test_digest_fields_cover_exactly_the_registered_identities() -> None:
         MIXED_STRATEGY_IDENTIFIER_V5,
         MIXED_STRATEGY_IDENTIFIER_V6,
         MIXED_STRATEGY_IDENTIFIER_V7,
+        MIXED_STRATEGY_IDENTIFIER_V8,
     }
     assert DIGEST_RULE_FIELDS[MIXED_STRATEGY_IDENTIFIER_V7] == (
         "shared_board_chop_caliber",

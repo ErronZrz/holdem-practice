@@ -13,6 +13,7 @@ from app.strategy.mixed_policy import MixedStyle
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V6,
     MIXED_STRATEGY_IDENTIFIER_V7,
+    MIXED_STRATEGY_IDENTIFIER_V8,
 )
 
 from . import mixed_bot_recheck
@@ -225,7 +226,12 @@ def test_fourth_set_block_count_reuses_the_registered_limitations() -> None:
 
 
 @pytest.mark.parametrize(
-    "strategy_id", [MIXED_STRATEGY_IDENTIFIER_V6, MIXED_STRATEGY_IDENTIFIER_V7]
+    "strategy_id",
+    [
+        MIXED_STRATEGY_IDENTIFIER_V6,
+        MIXED_STRATEGY_IDENTIFIER_V7,
+        MIXED_STRATEGY_IDENTIFIER_V8,
+    ],
 )
 def test_fourth_set_runs_through_stage_a_and_the_recheck_entry(
     tmp_path: Path, strategy_id: str

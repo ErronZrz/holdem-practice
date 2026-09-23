@@ -50,6 +50,14 @@ _NON_VALUE_POSITION_WEIGHT = 4
 _NON_VALUE_DRAW_WEIGHT = 4
 # 听牌分数的封顶：与翻牌听牌分数的上限一致，翻后按同一比例折算。
 _NON_VALUE_DRAW_CAP = 180
+# 主动门槛的基准容差：分化开关关闭时即为既有取值。
+_VALUE_GATE_TOLERANCE = 120
+# 局面指数的上限：与位置、听牌两项跨度之和一致。
+_ACTIVE_GATE_INDEX_CAP = 100
+# 局面指数里位置分量的跨度。
+_ACTIVE_GATE_POSITION_SPAN = 60
+# 局面指数里听牌分量的跨度。
+_ACTIVE_GATE_DRAW_SPAN = 40
 
 
 class MixedPolicyError(ValueError):
@@ -99,6 +107,9 @@ class MixedPolicyRules:
     # 非价值进攻依据的口径：取假沿用离散人数表，取真改用公开特征定义的连续量。
     # 默认取假，使既有各版身份的分布逐位不变。
     continuous_non_value_basis: bool = False
+    # 翻后主动门槛是否随公开局面按风格分化：取假沿用与风格无关的门槛。
+    # 默认取假，使既有各版身份的分布逐位不变。
+    situational_active_gate: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -140,6 +151,8 @@ MIXED_LOCAL_V6_RULES = MixedPolicyRules(
 )
 # 第七版口径：只把非价值进攻依据改成连续量，其余七个字段与第六版逐字一致。
 MIXED_LOCAL_V7_RULES = replace(MIXED_LOCAL_V6_RULES, continuous_non_value_basis=True)
+# 第八版口径：只把翻后主动门槛改成随公开局面按风格分化，其余八个字段与第七版逐字一致。
+MIXED_LOCAL_V8_RULES = replace(MIXED_LOCAL_V7_RULES, situational_active_gate=True)
 
 
 class MixedStyle(StrEnum):
@@ -205,6 +218,12 @@ STYLE_PARAMETERS: dict[MixedStyle, StyleParameters] = {
         aggression_percent=60,
         size_preferences=(6, 3, 1, 1),
     ),
+}
+# 翻后主动门槛的逐风格权重：负值抬高门槛、正值放宽门槛，三档互不相等。
+_ACTIVE_GATE_WEIGHT: dict[MixedStyle, int] = {
+    MixedStyle.TIGHT: -6,
+    MixedStyle.AGGRESSIVE: 8,
+    MixedStyle.CALLING: 1,
 }
 
 
@@ -295,8 +314,11 @@ def build_distribution(
     )
     fold_weight = max(0, call_threshold - passive_score + 160) * parameters.fold_percent
     call_weight = max(0, passive_score - call_threshold + 160) * parameters.call_percent
-    value_quality = max(0, score - value_threshold + 120)
-    bluff_quality = _non_value_quality(features, rules)
+    gate = _active_gate(features, style, rules)
+    value_quality = max(0, score - value_threshold + _VALUE_GATE_TOLERANCE + gate)
+    # 分化只调整已有依据的幅度，不给没有公开依据的场合凭空加依据。
+    bluff_raw = _non_value_quality(features, rules)
+    bluff_quality = max(0, bluff_raw + gate) if bluff_raw > 0 else 0
     aggression_scale = Fraction(
         parameters.aggression_percent
         * _MODE_AGGRESSION_PERCENT[mode]
@@ -408,6 +430,25 @@ def _non_value_quality(features: MixedFeatures, rules: MixedPolicyRules) -> int:
     if rules.continuous_non_value_basis:
         return _continuous_non_value_quality(features)
     return _SEAT_COUNT_FOR_U.get(features.contenders, 0)
+
+
+def _active_gate(
+    features: MixedFeatures, style: MixedStyle, rules: MixedPolicyRules
+) -> int:
+    """翻后主动门槛的偏移：按本风格权重缩放公开局面指数。
+
+    指数只由公开的位置与听牌质量构成；翻前或分化关闭时恒为零，因此这两种情形
+    与未分化口径逐位一致。全部为整数运算，同一输入必得同一偏移。
+    """
+    if not rules.situational_active_gate or features.street is Street.PREFLOP:
+        return 0
+    index = clip(
+        (features.position + 40) * _ACTIVE_GATE_POSITION_SPAN // 80
+        + min(features.draw, _NON_VALUE_DRAW_CAP) * _ACTIVE_GATE_DRAW_SPAN // _NON_VALUE_DRAW_CAP,
+        0,
+        _ACTIVE_GATE_INDEX_CAP,
+    )
+    return _ACTIVE_GATE_WEIGHT[style] * index // _ACTIVE_GATE_INDEX_CAP
 
 
 _VALUE_THRESHOLDS = {
