@@ -75,6 +75,7 @@ from .mixed_bot_states import (
     MIXED_DEPTHS_BB,
     MIXED_IQV2_NODE_ID_SUFFIX,
     MIXED_IQV3_NODE_ID_SUFFIX,
+    MIXED_IQV4_NODE_ID_SUFFIX,
     MIXED_IQV_NODE_ID_SUFFIX,
     MIXED_PLANNED_SLOT_COUNT,
     MIXED_PLAYER_COUNTS,
@@ -87,10 +88,12 @@ from .mixed_bot_states import (
     apply_node,
     build_frozen_iqv2_nodes,
     build_frozen_iqv3_nodes,
+    build_frozen_iqv4_nodes,
     build_frozen_iqv_nodes,
     build_frozen_manifest,
     build_iqv2_node,
     build_iqv3_node,
+    build_iqv4_node,
     build_iqv_node,
     build_node,
     manifest_json,
@@ -207,6 +210,43 @@ MIXED_IQV3_MAIN_SEEDS: tuple[int, ...] = (
     2182117330,
     1255170312,
     1138830182,
+)
+
+# 第五套主种子：再换独立派生前缀；块数与前一套相同，只为换取新样本。
+MIXED_IQV4_SEED_PREFIX = "mixed-local-iqv-v4:seed:"
+MIXED_IQV4_MAIN_SEED_COUNT = 16
+
+
+def derive_iqv4_main_seeds(count: int = MIXED_IQV4_MAIN_SEED_COUNT) -> tuple[int, ...]:
+    """按冻结规则复算第五套主种子：派生串的 SHA-256 前 4 字节按大端解释为无符号整数。"""
+    if count < 1:
+        raise MixedValidationAuthorizationError("主种子个数必须为正")
+    return tuple(
+        int.from_bytes(
+            hashlib.sha256(f"{MIXED_IQV4_SEED_PREFIX}{index}".encode()).digest()[:4],
+            "big",
+        )
+        for index in range(1, count + 1)
+    )
+
+
+MIXED_IQV4_MAIN_SEEDS: tuple[int, ...] = (
+    1780719137,
+    1236765905,
+    2134507197,
+    2265833065,
+    1298901453,
+    4293932627,
+    4195004242,
+    23362354,
+    2615148125,
+    3861800455,
+    2973349364,
+    1973802598,
+    2776075815,
+    848535546,
+    1162498705,
+    467384311,
 )
 MIXED_HAND_MODES: tuple[HandMode, ...] = (
     HandMode.NORMAL,
@@ -446,6 +486,19 @@ MIXED_IQV3_STAGE_PLAN: tuple[str, ...] = (
     "A 样本不重跑、不替换",
 )
 
+# 第五套清单的机械明细文本：节点与种子再次更换，因此场景顺序与手数说明同步重写。
+MIXED_IQV4_SCENARIO_ORDER = (
+    "按第五套配方类别顺序 × 适用人数升序；成本矩阵每格在该街的可用节点间顺序轮换"
+)
+MIXED_IQV4_STAGE_PLAN: tuple[str, ...] = (
+    "阶段 A：成本矩阵逐人数 36 格各取首个样本，"
+    f"合计 {STAGE_A_COST_SAMPLES} 次；补充场景首样本 {STAGE_A_SUPPLEMENTARY_SAMPLES} 次；"
+    f"对抗对照 {STAGE_A_ADVERSARIAL_HANDS_IQV2} 手（单一主种子、单一风格、单一轮换）",
+    f"阶段 B：成本矩阵补足逐人数 {COST_DECISIONS_PER_PLAYER_COUNT} 次、"
+    f"补充场景 {SUPPLEMENTARY_TOTAL_SAMPLES} 次、对抗对照 {ADVERSARIAL_HANDS_IQV2} 手；"
+    "A 样本不重跑、不替换",
+)
+
 
 # 每个身份参与配置摘要的规则字段：只登记该身份自身引入的口径，
 # 使后续身份新增规则字段时，旧身份的摘要仍可逐字复算。
@@ -625,6 +678,32 @@ def frozen_iqv3_manifest(
         scenario_order=MIXED_IQV3_SCENARIO_ORDER,
         seed_derivation=MIXED_SEED_DERIVATION,
         stage_plan=MIXED_IQV3_STAGE_PLAN,
+        resource_envelope=MIXED_RESOURCE_ENVELOPE,
+        stop_conditions=MIXED_STOP_CONDITIONS,
+        report_format=MIXED_REPORT_FORMAT_V2,
+    )
+
+
+def frozen_iqv4_manifest(
+    *,
+    code_identity: str,
+    output_dir: str,
+    strategy_id: str,
+) -> MixedFixtureManifest:
+    """装配第五套冻结清单：又一套节点集与主种子，报告版本与前一版相同。
+
+    只返回清单对象，不写任何文件、不创建目录；落盘属于单独授权的动作。
+    """
+    return build_frozen_manifest(
+        strategy_id=strategy_id,
+        code_identity=code_identity,
+        config_digest=config_digest(strategy_id),
+        seeds=MIXED_IQV4_MAIN_SEEDS,
+        nodes=build_frozen_iqv4_nodes(),
+        output_dir=output_dir,
+        scenario_order=MIXED_IQV4_SCENARIO_ORDER,
+        seed_derivation=MIXED_SEED_DERIVATION,
+        stage_plan=MIXED_IQV4_STAGE_PLAN,
         resource_envelope=MIXED_RESOURCE_ENVELOPE,
         stop_conditions=MIXED_STOP_CONDITIONS,
         report_format=MIXED_REPORT_FORMAT_V2,
@@ -1521,6 +1600,8 @@ def _rebuild_fixture(
         builder = build_iqv2_node
     elif fixture.node_id == base + MIXED_IQV3_NODE_ID_SUFFIX:
         builder = build_iqv3_node
+    elif fixture.node_id == base + MIXED_IQV4_NODE_ID_SUFFIX:
+        builder = build_iqv4_node
     else:
         raise MixedValidationAuthorizationError(
             f"节点标识 {fixture.node_id} 不属于任何已注册的配方集"
