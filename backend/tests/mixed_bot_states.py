@@ -500,6 +500,93 @@ MIXED_IQV2_RECIPE_CATEGORY_ORDER: tuple[str, ...] = tuple(
     recipe.category for recipe in MIXED_IQV2_RECIPES
 )
 
+# ------------------------------------------------------------------ 第四次构造配方
+#
+# 第四套配方：类别与形状语义沿用既有定义，逐项换成与前几套都不同的构造，
+# 使节点在牌面与行动线上与既有清单正交。既有配方常量不得改动，
+# 否则已落盘清单的可复现性会被破坏。
+
+MIXED_IQV3_NODE_ID_SUFFIX = "-iqv3"
+
+MIXED_IQV3_RECIPES: tuple[FixtureRecipe, ...] = (
+    FixtureRecipe("hu-blind-position", _SHAPE_OPEN, ("Jh", "9h"), (), _ROLE_NONE, False),
+    FixtureRecipe("unopened-open", _SHAPE_OPEN, ("Ac", "Qc"), (), _ROLE_NONE, False),
+    FixtureRecipe("open-after-limp", _SHAPE_LIMP, ("Qh", "Ts"), (), _ROLE_NONE, False),
+    FixtureRecipe("facing-first-raise", _SHAPE_RAISE, ("Ad", "Jh"), (), _ROLE_NONE, False),
+    FixtureRecipe("facing-reraise", _SHAPE_RERAISE, ("8d", "8h"), (), _ROLE_NONE, False),
+    FixtureRecipe(
+        "short-stack-call", _SHAPE_SHORT_CALL, ("5h", "5s"), (), _ROLE_ACTOR, False
+    ),
+    FixtureRecipe(
+        "incomplete-raise", _SHAPE_INCOMPLETE_RAISE, ("Ah", "Kc"), (), _ROLE_BIG_BLIND, False
+    ),
+    FixtureRecipe("free-check", _SHAPE_OPEN, ("Js", "8s"), ("9s", "4h", "2d"), _ROLE_NONE, False),
+    FixtureRecipe("flop-draw", _SHAPE_RAISE, ("Kd", "Td"), ("9d", "7d", "3c"), _ROLE_NONE, True),
+    FixtureRecipe(
+        "top-pair-weak-kicker",
+        _SHAPE_RAISE,
+        ("Jc", "6h"),
+        ("Jd", "8s", "3c", "2h"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "turn-combo-draw",
+        _SHAPE_RAISE,
+        ("9c", "8c"),
+        ("7c", "6c", "Kd", "2s"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "one-side-all-in",
+        _SHAPE_JAM_THEN_CALL,
+        ("Ac", "9h"),
+        ("8s", "5d", "2h", "3c"),
+        _ROLE_FIRST_ACTOR,
+        True,
+    ),
+    FixtureRecipe(
+        "overpair-on-high-board",
+        _SHAPE_RAISE,
+        ("9h", "9s"),
+        ("Ah", "Kc", "Qd", "5s", "3h"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "missed-draw-river",
+        _SHAPE_RAISE,
+        ("Ah", "4h"),
+        ("Kh", "8h", "2c", "5d", "9s"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "shared-board",
+        _SHAPE_RAISE,
+        ("4c", "3s"),
+        ("Th", "9d", "8c", "7s", "6h"),
+        _ROLE_NONE,
+        True,
+    ),
+    FixtureRecipe(
+        "sizes-merged",
+        _SHAPE_RAISE,
+        ("Qh", "5c"),
+        ("Qd", "9s", "4h", "2c", "7d"),
+        _ROLE_NONE,
+        True,
+    ),
+)
+
+MIXED_IQV3_RECIPE_BY_CATEGORY: dict[str, FixtureRecipe] = {
+    recipe.category: recipe for recipe in MIXED_IQV3_RECIPES
+}
+MIXED_IQV3_RECIPE_CATEGORY_ORDER: tuple[str, ...] = tuple(
+    recipe.category for recipe in MIXED_IQV3_RECIPES
+)
+
 # ------------------------------------------------------------------ 清单模型
 
 
@@ -1011,6 +1098,30 @@ def build_frozen_iqv2_nodes() -> tuple[MixedNodeFixture, ...]:
     return tuple(
         build_iqv2_node(category, player_count)
         for category in MIXED_IQV2_RECIPE_CATEGORY_ORDER
+        for player_count in applicable_player_counts(category)
+    )
+
+
+def build_iqv3_node(
+    category: str,
+    player_count: int,
+    *,
+    starting_stack: int = MIXED_DEFAULT_STACK,
+) -> MixedNodeFixture:
+    """按第四套配方生成一个可行动节点；标识带独立后缀，与前三套节点都不重名。"""
+    return _build_node_from(
+        MIXED_IQV3_RECIPE_BY_CATEGORY[category],
+        player_count,
+        starting_stack=starting_stack,
+        node_id_suffix=MIXED_IQV3_NODE_ID_SUFFIX,
+    )
+
+
+def build_frozen_iqv3_nodes() -> tuple[MixedNodeFixture, ...]:
+    """按第四套配方的固定顺序生成全部可行动节点。"""
+    return tuple(
+        build_iqv3_node(category, player_count)
+        for category in MIXED_IQV3_RECIPE_CATEGORY_ORDER
         for player_count in applicable_player_counts(category)
     )
 
