@@ -10,7 +10,10 @@ import pytest
 
 from app.poker.evaluator import evaluate_fast
 from app.strategy.mixed_policy import MixedStyle
-from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V6
+from app.strategy.mixed_strategy import (
+    MIXED_STRATEGY_IDENTIFIER_V6,
+    MIXED_STRATEGY_IDENTIFIER_V7,
+)
 
 from . import mixed_bot_recheck
 from . import mixed_bot_validation as validation
@@ -221,12 +224,17 @@ def test_fourth_set_block_count_reuses_the_registered_limitations() -> None:
 # ------------------------------------------------------------------ opt-in 入口链
 
 
-def test_fourth_set_runs_through_stage_a_and_the_recheck_entry(tmp_path: Path) -> None:
-    """两条 opt-in 入口链必须真正走通：阶段 A 与小规模补算都按第六版身份执行。"""
+@pytest.mark.parametrize(
+    "strategy_id", [MIXED_STRATEGY_IDENTIFIER_V6, MIXED_STRATEGY_IDENTIFIER_V7]
+)
+def test_fourth_set_runs_through_stage_a_and_the_recheck_entry(
+    tmp_path: Path, strategy_id: str
+) -> None:
+    """两条 opt-in 入口链必须真正走通：阶段 A 与小规模补算都按清单声明的身份执行。"""
     full = frozen_iqv3_manifest(
         code_identity="0" * 40,
         output_dir=str(tmp_path / "runs"),
-        strategy_id=MIXED_STRATEGY_IDENTIFIER_V6,
+        strategy_id=strategy_id,
     )
     # 只留一个节点：本条核对的是入口链与身份分派，不是节点覆盖面。
     manifest = full.model_copy(update={"nodes": (full.nodes[0],)})
@@ -240,7 +248,7 @@ def test_fourth_set_runs_through_stage_a_and_the_recheck_entry(tmp_path: Path) -
     receipt = json.loads(
         (stage_a_dir / "mixed-validation-stage-A.json").read_text(encoding="utf-8")
     )
-    assert receipt["strategy_id"] == MIXED_STRATEGY_IDENTIFIER_V6
+    assert receipt["strategy_id"] == strategy_id
     assert receipt["schema_version"] == MIXED_VALIDATION_SCHEMA_VERSION_V2
     assert receipt["violations"] == []
     # 逐节点行按（节点 × 风格 × 手模式 × 种子块）给出，块集合与清单一致。

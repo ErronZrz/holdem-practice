@@ -60,6 +60,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V4,
     MIXED_STRATEGY_IDENTIFIER_V5,
     MIXED_STRATEGY_IDENTIFIER_V6,
+    MIXED_STRATEGY_IDENTIFIER_V7,
     MixedDistribution,
     MixedLocalStrategy,
     MixedSeatPolicy,
@@ -477,6 +478,17 @@ DIGEST_RULE_FIELDS: dict[str, tuple[str, ...]] = {
         "postflop_call_bonus",
         "active_scale_percent",
         "contender_penalty_cap",
+    ),
+    # 第七版在第六版的七个字段之上多出非价值进攻依据的口径开关。
+    MIXED_STRATEGY_IDENTIFIER_V7: (
+        "shared_board_chop_caliber",
+        "preflop_price_weight",
+        "preflop_contender_penalty",
+        "preflop_call_bonus",
+        "postflop_call_bonus",
+        "active_scale_percent",
+        "contender_penalty_cap",
+        "continuous_non_value_basis",
     ),
 }
 

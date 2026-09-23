@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from fractions import Fraction
 from typing import Literal
@@ -42,6 +42,14 @@ _POSTFLOP_PRICE_WEIGHT = 450
 # 连续进攻的封顶计数。
 _AGGRESSION_CAP = 3
 _SEAT_COUNT_FOR_U = {1: 12, 2: 6, 3: 3}
+# 连续式非价值进攻依据的基数：与人数表的最大值一致，使单挑量级不变。
+_NON_VALUE_BASE = 12
+# 位置分量的上限：与位置评分的整幅刻度同阶。
+_NON_VALUE_POSITION_WEIGHT = 4
+# 听牌质量分量的上限。
+_NON_VALUE_DRAW_WEIGHT = 4
+# 听牌分数的封顶：与翻牌听牌分数的上限一致，翻后按同一比例折算。
+_NON_VALUE_DRAW_CAP = 180
 
 
 class MixedPolicyError(ValueError):
@@ -88,6 +96,9 @@ class MixedPolicyRules:
     active_scale_percent: int = 1
     # 人数惩罚的上限：取 0 表示不设上限；取正值时多人桌上的扣分到此封顶。
     contender_penalty_cap: int = 0
+    # 非价值进攻依据的口径：取假沿用离散人数表，取真改用公开特征定义的连续量。
+    # 默认取假，使既有各版身份的分布逐位不变。
+    continuous_non_value_basis: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -127,6 +138,8 @@ MIXED_LOCAL_V6_RULES = MixedPolicyRules(
     active_scale_percent=10,
     contender_penalty_cap=70,
 )
+# 第七版口径：只把非价值进攻依据改成连续量，其余七个字段与第六版逐字一致。
+MIXED_LOCAL_V7_RULES = replace(MIXED_LOCAL_V6_RULES, continuous_non_value_basis=True)
 
 
 class MixedStyle(StrEnum):
@@ -283,7 +296,7 @@ def build_distribution(
     fold_weight = max(0, call_threshold - passive_score + 160) * parameters.fold_percent
     call_weight = max(0, passive_score - call_threshold + 160) * parameters.call_percent
     value_quality = max(0, score - value_threshold + 120)
-    bluff_quality = _non_value_quality(features)
+    bluff_quality = _non_value_quality(features, rules)
     aggression_scale = Fraction(
         parameters.aggression_percent
         * _MODE_AGGRESSION_PERCENT[mode]
@@ -362,7 +375,28 @@ def _postflop_call_bonus(rules: MixedPolicyRules, style: MixedStyle) -> int:
     return int(getattr(rules.postflop_call_bonus, style.value))
 
 
-def _non_value_quality(features: MixedFeatures) -> int:
+def _continuous_non_value_parts(features: MixedFeatures) -> tuple[int, int, int]:
+    """连续式的三个分量：对手数、位置与听牌质量，各自封顶后再求和。
+
+    准入已保证至少存在一名未弃牌对手，故除数恒不小于 1。
+    """
+    seats = max(1, _NON_VALUE_BASE // features.contenders)
+    # 位置评分落在 -40..40：平移半幅后按整幅归一，最差位置得 0，最好位置得满幅。
+    place = _NON_VALUE_POSITION_WEIGHT * (features.position + 40) // 80
+    potential = (
+        _NON_VALUE_DRAW_WEIGHT
+        * min(features.draw, _NON_VALUE_DRAW_CAP)
+        // _NON_VALUE_DRAW_CAP
+    )
+    return seats, place, potential
+
+
+def _continuous_non_value_quality(features: MixedFeatures) -> int:
+    """连续式非价值进攻依据：三个分量之和，再按基数封顶。"""
+    return min(_NON_VALUE_BASE, sum(_continuous_non_value_parts(features)))
+
+
+def _non_value_quality(features: MixedFeatures, rules: MixedPolicyRules) -> int:
     """非价值进攻质量：只在有公开依据时给分，否则为 0。"""
     if features.recent_aggression > 1 or features.live_opponents == 0:
         return 0
@@ -371,6 +405,8 @@ def _non_value_quality(features: MixedFeatures) -> int:
             return 0
     elif features.draw <= 0 and not features.has_broadway_blocker:
         return 0
+    if rules.continuous_non_value_basis:
+        return _continuous_non_value_quality(features)
     return _SEAT_COUNT_FOR_U.get(features.contenders, 0)
 
 

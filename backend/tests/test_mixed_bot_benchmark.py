@@ -444,7 +444,7 @@ def test_extra_rule_fields_do_not_move_earlier_digests(monkeypatch: pytest.Monke
 def test_config_digest_refuses_an_unregistered_identity() -> None:
     # 已注册的版本号逐版上移，因此这里改用尚未注册的版本号；「未注册必须被拒」的性质不变。
     with pytest.raises(MixedStrategyError):
-        config_digest("mixed-local@7")
+        config_digest("mixed-local@8")
 
 
 def test_config_digest_refuses_an_identity_without_registered_fields(
@@ -482,7 +482,7 @@ def test_frozen_manifest_refuses_an_unregistered_identity() -> None:
         frozen_manifest(
             code_identity="test-code-identity",
             output_dir="/tmp/test-output",
-            strategy_id="mixed-local@7",
+            strategy_id="mixed-local@8",
         )
 
 
@@ -492,7 +492,7 @@ def test_strategy_rules_follow_the_manifest_identity() -> None:
     second = _manifest((fixture,), strategy_id=MIXED_STRATEGY_IDENTIFIER_V2)
     assert strategy_rules(second).shared_board_chop_caliber is True
     with pytest.raises(MixedStrategyError):
-        strategy_rules(_manifest((fixture,), strategy_id="mixed-local@7"))
+        strategy_rules(_manifest((fixture,), strategy_id="mixed-local@8"))
 
 
 def test_behavior_collection_follows_the_manifest_identity() -> None:
@@ -511,7 +511,7 @@ def test_behavior_collection_follows_the_manifest_identity() -> None:
 
 def test_adversarial_batch_refuses_an_unregistered_identity() -> None:
     with pytest.raises(MixedStrategyError):
-        run_adversarial_batch(stage="A", allow_matches=True, identifier="mixed-local@7")
+        run_adversarial_batch(stage="A", allow_matches=True, identifier="mixed-local@8")
 
 
 def test_recheck_replays_with_the_receipt_caliber(monkeypatch) -> None:
