@@ -532,6 +532,73 @@ def test_recheck_replays_with_the_receipt_caliber(monkeypatch) -> None:
         )
 
 
+def test_recheck_covers_the_observation_artifact_through_the_entry_path(
+    tmp_path: Path,
+) -> None:
+    """补算入口必须核对回执旁的观测工件：一致才算通过，任何不一致立即中止且不写报告。"""
+    manifest = _manifest((build_node("shared-board", 2),))
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(manifest_json(manifest), encoding="utf-8")
+    stage_a_dir = tmp_path / "stage-a"
+    assert (
+        validation.main(
+            [
+                str(manifest_path),
+                "A",
+                str(stage_a_dir),
+                "--allow-stage=A",
+                "--emit-observations",
+            ]
+        )
+        == 0
+    )
+    receipt_path = stage_a_dir / "mixed-validation-stage-A.json"
+    observations_path = stage_a_dir / "mixed-observations-stage-A.json"
+    assert receipt_path.exists() and observations_path.exists()
+    original = observations_path.read_text(encoding="utf-8")
+
+    recheck_dir = tmp_path / "stage-a-recheck"
+    assert (
+        mixed_bot_recheck.main(
+            [str(manifest_path), str(receipt_path), str(recheck_dir), "--allow-recheck"]
+        )
+        == 0
+    )
+    assert (recheck_dir / "mixed-recheck-stage-A.json").exists()
+
+    def _refuses(payload: str, name: str) -> None:
+        observations_path.write_text(payload, encoding="utf-8")
+        target = tmp_path / name
+        with pytest.raises(MixedRecheckError):
+            mixed_bot_recheck.main(
+                [str(manifest_path), str(receipt_path), str(target), "--allow-recheck"]
+            )
+        assert not (target / "mixed-recheck-stage-A.json").exists()
+
+    # 手数比回执逐手行少一条：必须中止。
+    shortened = json.loads(original)
+    shortened["hands"] = shortened["hands"][:-1]
+    _refuses(json.dumps(shortened, ensure_ascii=False), "short-recheck")
+    # 手数相同但逐手净筹码不一致：同样必须中止。
+    drifted = json.loads(original)
+    drifted["hands"][3]["net_chips"] += 1
+    _refuses(json.dumps(drifted, ensure_ascii=False), "drifted-recheck")
+    # 工件自洽但与回执不同源：仍然必须中止。
+    alien = json.loads(original)
+    alien["manifest_digest"] = "0" * 64
+    _refuses(json.dumps(alien, ensure_ascii=False), "alien-recheck")
+
+    # 回执旁没有观测工件时不得据此判失败：缺件只表示本轮没有产出该工件。
+    observations_path.unlink()
+    bare_dir = tmp_path / "bare-recheck"
+    assert (
+        mixed_bot_recheck.main(
+            [str(manifest_path), str(receipt_path), str(bare_dir), "--allow-recheck"]
+        )
+        == 0
+    )
+
+
 def test_depth_scaling_rules(frozen: MixedFixtureManifest) -> None:
     scalable = next(node for node in frozen.nodes if node.depth_scalable)
     scaled = fixture_at_depth(scalable, 15)

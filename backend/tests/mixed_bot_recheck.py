@@ -3,7 +3,8 @@
 纪律：
 - 只有被显式调用时才运行；默认 pytest 不触发任何对局或矩阵；
 - 只读取已冻结清单与既有阶段回执，绝不改写任何证据文件；输出目录只创建、不覆盖；
-- 逐手净筹码或行为指标与既有回执不一致时立即中止上报，不写报告、不解释差异、不挑好看的读数。
+- 逐手净筹码、行为指标或回执旁的观测工件与既有回执不一致时立即中止上报，
+  不写报告、不解释差异、不挑好看的读数。
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from .mixed_bot_validation import (
     HandOutcome,
     MixedCategoryBehavior,
     MixedMatchFamilyRow,
+    MixedObservations,
     MixedStyleJsDistance,
     MixedValidationReport,
     adversarial_schedule,
@@ -270,6 +272,61 @@ def compare_net_chips(
     return len(rows)
 
 
+def observations_path_of(receipt_path: str, stage: str) -> str:
+    """按回执所在目录推导观测工件的落盘位置：两者始终同目录同名族。"""
+    return os.path.join(
+        os.path.dirname(os.path.abspath(receipt_path)),
+        f"mixed-observations-stage-{stage}.json",
+    )
+
+
+def load_receipt_observations(receipt_path: str, stage: str) -> MixedObservations | None:
+    """回执旁存在观测工件时载入；没有该文件表示本轮未产出观测，不据此判失败。"""
+    target = observations_path_of(receipt_path, stage)
+    if not os.path.exists(target):
+        return None
+    try:
+        with open(target, encoding="utf-8") as handle:
+            return MixedObservations.model_validate(json.load(handle))
+    except (OSError, ValueError) as error:
+        # 无法读取或解析等于无法核对，与核对不通过同等对待。
+        raise MixedRecheckError(f"观测工件无法读取或解析：{target}") from error
+
+
+def compare_receipt_observations(
+    receipt: MixedValidationReport,
+    observations: MixedObservations,
+) -> int:
+    """观测工件必须与回执同源、同数、同序且逐手净筹码一致；任何差异立即抛错。"""
+    if observations.strategy_id != receipt.strategy_id:
+        raise MixedRecheckError("观测工件的身份与回执不一致，停止补算且不写报告")
+    if observations.manifest_digest != receipt.manifest_digest:
+        raise MixedRecheckError("观测工件的清单摘要与回执不一致，停止补算且不写报告")
+    rows = receipt.matches.rows
+    if len(observations.hands) != len(rows):
+        raise MixedRecheckError(
+            f"观测工件手数 {len(observations.hands)} 与回执逐手行数 {len(rows)} 不一致，"
+            "停止补算且不写报告"
+        )
+    for index, (row, hand) in enumerate(zip(rows, observations.hands, strict=True)):
+        if hand.hand_index != index:
+            raise MixedRecheckError(
+                f"观测工件第 {index} 条的下标为 {hand.hand_index}，与逐手顺序不符"
+            )
+        actual = (hand.player_count, hand.style, hand.opponent, hand.arm)
+        expected = (row.player_count, row.style, row.opponent, row.arm)
+        if actual != expected:
+            raise MixedRecheckError(
+                f"观测工件第 {index} 条的分组键与回执不一致：{actual} != {expected}"
+            )
+        if hand.net_chips != row.net_chips:
+            raise MixedRecheckError(
+                f"观测工件第 {index} 手净筹码与回执不一致："
+                f"{hand.net_chips} != {row.net_chips}"
+            )
+    return len(rows)
+
+
 def node_rows_match_receipt(
     receipt: MixedValidationReport,
     rebuilt: object,
@@ -380,6 +437,10 @@ def recheck(
         for seed, style, opponent, arm, player_count, rotation in schedule
     ]
     compared = compare_net_chips(receipt.matches.rows, schedule, outcomes)
+    # 逐手净筹码核对之后再核对回执旁的观测工件；工件缺失时本项不参与，报告照常产出。
+    observations = load_receipt_observations(receipt_path, receipt.stage)
+    if observations is not None:
+        compare_receipt_observations(receipt, observations)
     aggregates, worst = aggregate_matches(schedule, outcomes)
 
     report = MixedRecheckReport(
