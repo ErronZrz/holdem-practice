@@ -21,6 +21,7 @@
 - `backend/app/llm/`：LLM 适配，仅解释不决策。
 - `backend/app/storage/`：持久化。
 - `backend/app/api/`：FastAPI 接口。
+- `backend/app/verification/`：配对比较的运行前规格、材料绑定与校验。纯 Python，只读依赖 `poker/` 的牌类型、`strategy/` 的座位风格顺序与基线实现入口的元数据（只读读取 `HeuristicStrategy.__init__` 的默认值及受限代码对象元数据，不构造实例）、`analysis/` 的参考版本快照；不依赖 `api/`、`llm/`、`storage/`，不读写数据库与文件，不含可推进牌局的执行路径。
 - `backend/tests/`：pytest 测试。
 - `tools/trainer/`：离线 CFR 训练。
 
