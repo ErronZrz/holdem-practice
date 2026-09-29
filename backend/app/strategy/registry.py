@@ -9,6 +9,17 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from .distribution_observation import (
+    CapabilityDeclaration,
+    CapabilityHealth,
+    DeclarationMissingError,
+    DistributionObservationEntry,
+    declaration_for,
+    entry_for,
+    health_status,
+    register_observation_entry,
+    supported_declaration,
+)
 from .heuristic import HeuristicStrategy
 from .interface import Strategy
 from .mixed_strategy import (
@@ -19,6 +30,7 @@ from .mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V6,
     MIXED_STRATEGY_IDENTIFIER_V7,
     MIXED_STRATEGY_IDENTIFIER_V8,
+    MIXED_STRATEGY_RULES,
     MixedLocalStrategy,
 )
 from .random_strategy import RandomStrategy
@@ -80,6 +92,40 @@ def create_strategy(value: str, seed: int | None = None) -> Strategy:
 def known_identifiers() -> tuple[str, ...]:
     """返回全部规范标识，供诊断与测试枚举。"""
     return tuple(sorted(_REGISTRY))
+
+
+def _canonical_identifier(value: str) -> str:
+    """把提交值规范化为规范标识；未知标识按「没有能力声明」处理。"""
+    try:
+        return resolve_identifier(value)
+    except UnknownStrategyError as error:
+        raise DeclarationMissingError(f"未知策略标识，无能力声明：{value!r}") from error
+
+
+def capability_declaration(value: str) -> CapabilityDeclaration:
+    """声明读取入口：按规范标识取能力声明，不需要实例化被测策略。"""
+    return declaration_for(_canonical_identifier(value))
+
+
+def capability_health() -> CapabilityHealth:
+    """能力健康读取入口：不接受任何输入，也不读取对局状态。"""
+    return health_status()
+
+
+def observation_entry(value: str) -> DistributionObservationEntry:
+    """查询调用入口：返回绑定该身份的观测句柄。
+
+    句柄的观测输入为安全状态、合法动作集与可选的模式覆盖三项。
+    """
+    return entry_for(_canonical_identifier(value))
+
+
+# 三项能力入口的登记：静态检查只读这张表，不发起任何调用。
+OBSERVATION_ENTRYPOINTS: dict[str, Callable[..., object]] = {
+    "declaration": capability_declaration,
+    "health": capability_health,
+    "query": observation_entry,
+}
 
 
 register_strategy(
@@ -195,4 +241,10 @@ register_strategy(
         ),
         description="本地规则型混合对手第八版：翻后主动门槛随公开局面按风格分化，累积第七版口径",
     ),
+)
+# 分布观测能力只登记在研发中的身份上；登记不改变该身份的标识、版本与分布行为。
+register_observation_entry(
+    MIXED_STRATEGY_IDENTIFIER_V8,
+    supported_declaration(),
+    MIXED_STRATEGY_RULES[MIXED_STRATEGY_IDENTIFIER_V8],
 )
