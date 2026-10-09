@@ -17,32 +17,50 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from .config import DomainRunSpec, schedule_digest, spec_digest
-from .digests import DIGEST_ALGORITHMS, bytes_digest
-from .errors import FreezeBindingError, VerificationError
+from .config import (
+    DomainRunSpec,
+    campaign_configuration_digest,
+    schedule_digest,
+    spec_digest,
+)
+from .deal import deal_mapping_digest
+from .digests import DIGEST_ALGORITHMS, bytes_digest, content_digest
+from .errors import FreezeBindingError, IdentityMappingError, VerificationError
 from .execution_identity import (
     ExecutionIdentityRecord,
     execution_identity_digest,
     reference_snapshot,
 )
+from .guards import injection_precheck_category_entries
 from .identity import ConstructionCaliber
 from .instantiation import (
     construction_caliber_digest,
     materials_digest,
+    public_summary_mapping_digest,
     require_construction_calibers,
     require_instantiation_caliber,
     require_materials,
 )
-from .materials import HandMaterials, MaterialManifest, manifest_digest
+from .materials import (
+    HandMaterials,
+    MaterialManifest,
+    manifest_digest,
+    require_supplied_materials_order,
+)
 from .protocol import (
     AuditedMaterials,
     commitment_digest,
     protocol_digest,
+    purpose_index_mapping_digest,
     read_record_digest,
     verify_audit,
     verify_manifest_binding,
     verify_material_binding,
 )
+from .source_manifest import require_source_manifest, source_manifest_digest
+
+# 材料生成器清单的唯一入口。摘要必须由显式传入的清单重算，不能只核对十六进制形状。
+_GENERATOR_ENTRYPOINT: tuple[str, ...] = ("backend/tools/material_generator.py",)
 
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
@@ -74,9 +92,36 @@ FROZEN_MANIFEST_ITEMS: tuple[str, ...] = (
 
 
 def flow_step_entries() -> tuple[tuple[str, str], ...]:
-    """把流程步骤整理成记录条目，顺序与声明顺序一致。"""
+    """把流程步骤整理成记录条目，顺序与声明顺序一致。
+
+    覆盖清单不再使用这些旧名称。
+    """
     return tuple(
         (f"step-{index + 1}", name) for index, name in enumerate(RUN_FLOW_STEPS)
+    )
+
+
+def runner_flow_digest(algorithm: str) -> str:
+    """对流程名称数组取摘要，不加包装对象。"""
+    return content_digest(list(RUN_FLOW_STEPS), algorithm=algorithm)
+
+
+def runner_category_entries(
+    runner_manifest: Mapping[str, object],
+    *,
+    algorithm: str,
+) -> tuple[tuple[str, str], ...]:
+    """运行器类别的封闭条目。清单必须事先造好，本函数不读盘。"""
+    manifest = require_source_manifest(runner_manifest)
+    if tuple(manifest["entrypoints"]) != ("backend/app/verification/runner.py",):
+        raise VerificationError("运行器清单的入口必须是运行器模块")
+    return (
+        ("runner-flow-version", "1"),
+        ("runner-flow-digest", runner_flow_digest(algorithm)),
+        (
+            "runner-code-manifest-digest",
+            source_manifest_digest(manifest, algorithm=algorithm),
+        ),
     )
 
 
@@ -144,7 +189,7 @@ def build_frozen_manifest(
         spec_digest=spec_digest(spec),
         schedule_digest=schedule_digest(spec),
         protocol_digest=protocol_digest(spec.protocol),
-        supplied_materials_digest=materials_digest(bundle, algorithm=algorithm),
+        supplied_materials_digest=materials_digest(bundle, spec=spec, algorithm=algorithm),
         material_manifest_digest=manifest_digest(material_manifest, algorithm=algorithm),
         audit_transcript_digest=bytes_digest(audit.transcript, algorithm=algorithm),
         audit_read_record_digest=read_record_digest(
@@ -168,6 +213,168 @@ def _compare(item: str, recorded: str, recomputed: str) -> None:
         raise FreezeBindingError(f"冻结清单与本次输入不一致：{item}")
 
 
+def _recorded_entries(
+    record: ExecutionIdentityRecord, category: str
+) -> dict[str, str]:
+    return {entry.name: entry.value for entry in record.entries_for(category)}
+
+
+def _require_identity_value(name: str, recorded: str, expected: str) -> None:
+    """执行身份里的取值必须等于由当前输入重算的结果。"""
+    if recorded != expected:
+        raise IdentityMappingError(f"执行身份与当前输入不一致：{name}")
+
+
+def _require_category_values(
+    recorded: Mapping[str, str], expected: Sequence[tuple[str, str]]
+) -> None:
+    for name, value in expected:
+        _require_identity_value(name, recorded[name], value)
+
+
+def _manifest_digest(
+    manifest: Mapping[str, object],
+    *,
+    algorithm: str,
+    entrypoints: tuple[str, ...] | None = None,
+) -> str:
+    """对显式传入的清单重算摘要。入口被限定时，不符即失败。"""
+    normalized = require_source_manifest(manifest)
+    if entrypoints is not None and tuple(normalized["entrypoints"]) != entrypoints:
+        raise IdentityMappingError("源码清单的入口与该条目不符")
+    return source_manifest_digest(normalized, algorithm=algorithm)
+
+
+def _require_bound_execution_identity(
+    *,
+    spec: DomainRunSpec,
+    bundle: Sequence[HandMaterials],
+    audit: AuditedMaterials,
+    execution_identity: ExecutionIdentityRecord,
+    material_manifest: MaterialManifest,
+    runner_manifest: Mapping[str, object],
+    generator_manifest: Mapping[str, object],
+    engine_manifest: Mapping[str, object],
+    baseline_strategy_manifest: Mapping[str, object],
+    under_test_strategy_manifest: Mapping[str, object],
+    verification_manifest: Mapping[str, object],
+) -> None:
+    """把其余类别中依赖本次输入的条目逐项重算并核对。
+
+    占位十六进制不能代替当前规格、材料、审计或显式传入的源码清单。
+    """
+    algorithm = spec.protocol.digest_algorithm
+    _require_category_values(
+        _recorded_entries(execution_identity, "runner"),
+        runner_category_entries(runner_manifest, algorithm=algorithm),
+    )
+    _require_category_values(
+        _recorded_entries(execution_identity, "injection-precheck"),
+        injection_precheck_category_entries(algorithm),
+    )
+    generator_digest = _manifest_digest(
+        generator_manifest, algorithm=algorithm, entrypoints=_GENERATOR_ENTRYPOINT
+    )
+    protocol_entries = _recorded_entries(execution_identity, "randomization-protocol")
+    _require_identity_value(
+        "randomization-protocol-digest",
+        protocol_entries["randomization-protocol-digest"],
+        protocol_digest(spec.protocol),
+    )
+    _require_identity_value(
+        "source-interface-id",
+        protocol_entries["source-interface-id"],
+        spec.protocol.source_interface_id,
+    )
+    _require_identity_value(
+        "environment-record",
+        protocol_entries["environment-record"],
+        spec.protocol.environment_record,
+    )
+    _require_identity_value(
+        "supplied-materials-digest",
+        protocol_entries["supplied-materials-digest"],
+        materials_digest(bundle, spec=spec, algorithm=algorithm),
+    )
+    _require_identity_value(
+        "material-manifest-digest",
+        protocol_entries["material-manifest-digest"],
+        manifest_digest(material_manifest, algorithm=algorithm),
+    )
+    _require_identity_value(
+        "audit-transcript-digest",
+        protocol_entries["audit-transcript-digest"],
+        bytes_digest(audit.transcript, algorithm=algorithm),
+    )
+    _require_identity_value(
+        "audit-read-record-digest",
+        protocol_entries["audit-read-record-digest"],
+        read_record_digest(
+            audit.reads,
+            encoding=spec.protocol.read_record_encoding,
+            algorithm=algorithm,
+        ),
+    )
+    _require_identity_value(
+        "audit-commitment-digest",
+        protocol_entries["audit-commitment-digest"],
+        commitment_digest(audit.commitment),
+    )
+    _require_identity_value(
+        "generator-code-digest",
+        protocol_entries["generator-code-digest"],
+        generator_digest,
+    )
+    if audit.commitment.generator_code_digest != generator_digest:
+        raise IdentityMappingError("生成器代码摘要与承诺不一致")
+    campaign = campaign_configuration_digest(
+        num_players=spec.num_players,
+        starting_stack=spec.starting_stack,
+        small_blind=spec.small_blind,
+        big_blind=spec.big_blind,
+        baseline_identifier=spec.baseline_identifier,
+        under_test_identifier=spec.under_test_identifier,
+        lock_versions=spec.campaign_configuration.lock_versions,
+    )
+    mapping_entries = _recorded_entries(execution_identity, "input-mapping")
+    _require_identity_value(
+        "campaign-configuration-digest",
+        mapping_entries["campaign-configuration-digest"],
+        campaign,
+    )
+    _require_identity_value(
+        "deal-mapping-digest",
+        mapping_entries["deal-mapping-digest"],
+        deal_mapping_digest(algorithm=algorithm),
+    )
+    _require_identity_value(
+        "purpose-index-mapping-digest",
+        mapping_entries["purpose-index-mapping-digest"],
+        purpose_index_mapping_digest(algorithm=algorithm),
+    )
+    _require_identity_value(
+        "schedule-digest", mapping_entries["schedule-digest"], schedule_digest(spec)
+    )
+    _require_identity_value(
+        "public-summary-mapping-digest",
+        mapping_entries["public-summary-mapping-digest"],
+        public_summary_mapping_digest(algorithm=algorithm),
+    )
+    code_entries = _recorded_entries(execution_identity, "engine-and-strategy-code")
+    code_manifests = (
+        ("engine-code-manifest-digest", engine_manifest),
+        ("baseline-strategy-code-manifest-digest", baseline_strategy_manifest),
+        ("under-test-strategy-code-manifest-digest", under_test_strategy_manifest),
+        ("verification-code-manifest-digest", verification_manifest),
+    )
+    for name, source_manifest in code_manifests:
+        _require_identity_value(
+            name,
+            code_entries[name],
+            _manifest_digest(source_manifest, algorithm=algorithm),
+        )
+
+
 def verify_frozen_inputs(
     *,
     manifest: FrozenRunManifest,
@@ -177,6 +384,12 @@ def verify_frozen_inputs(
     audit: AuditedMaterials,
     execution_identity: ExecutionIdentityRecord,
     material_manifest: MaterialManifest,
+    runner_manifest: Mapping[str, object],
+    generator_manifest: Mapping[str, object],
+    engine_manifest: Mapping[str, object],
+    baseline_strategy_manifest: Mapping[str, object],
+    under_test_strategy_manifest: Mapping[str, object],
+    verification_manifest: Mapping[str, object],
 ) -> None:
     """核验本次输入就是冻结清单所指的那一份，并核验材料来源可复核。
 
@@ -184,6 +397,7 @@ def verify_frozen_inputs(
     （清单 ↔ 审计 ↔ 送交材料 ↔ 承诺里的清单摘要），再校验材料与规格的结构一致，
     再走身份口径主链（显式构造口径与规格标识的逐字比对、基线一侧接口与公开摘要及座位范围
     三项硬限制、材料格式、逐手逐臂逐座位构造计划、执行身份里的实例化口径一致性），
+    再把执行身份里依赖本次输入的条目与规格、材料、审计和显式传入的源码清单逐项重算比对，
     最后用本次输入重算全部十项摘要并与清单比对。任一项不符即失败，不重取材料、不修补。
     """
     protocol = spec.protocol
@@ -202,8 +416,10 @@ def verify_frozen_inputs(
         reads=audit.reads,
         bundle=bundle,
         commitment=audit.commitment,
+        spec=spec,
     )
     require_materials(spec, bundle)
+    require_supplied_materials_order(spec, bundle)
     require_construction_calibers(spec, caliber, bundle)
 
     algorithm = protocol.digest_algorithm
@@ -214,13 +430,26 @@ def verify_frozen_inputs(
         bundle=bundle,
         algorithm=algorithm,
     )
+    _require_bound_execution_identity(
+        spec=spec,
+        bundle=bundle,
+        audit=audit,
+        execution_identity=execution_identity,
+        material_manifest=material_manifest,
+        runner_manifest=runner_manifest,
+        generator_manifest=generator_manifest,
+        engine_manifest=engine_manifest,
+        baseline_strategy_manifest=baseline_strategy_manifest,
+        under_test_strategy_manifest=under_test_strategy_manifest,
+        verification_manifest=verification_manifest,
+    )
     _compare("spec-digest", manifest.spec_digest, spec_digest(spec))
     _compare("schedule-digest", manifest.schedule_digest, schedule_digest(spec))
     _compare("protocol-digest", manifest.protocol_digest, protocol_digest(protocol))
     _compare(
         "supplied-materials-digest",
         manifest.supplied_materials_digest,
-        materials_digest(bundle, algorithm=algorithm),
+        materials_digest(bundle, spec=spec, algorithm=algorithm),
     )
     _compare(
         "material-manifest-digest",

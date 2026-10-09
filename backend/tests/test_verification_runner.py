@@ -25,6 +25,7 @@ from app.verification import (
     FROZEN_MANIFEST_ITEMS,
     INSTANTIATION_CALIBER_CATEGORY,
     RUN_FLOW_STEPS,
+    AuditedMaterials,
     DomainRunSpec,
     ExecutionIdentityRecord,
     FreezeBindingError,
@@ -33,7 +34,6 @@ from app.verification import (
     IdentityMappingError,
     MaterialBindingError,
     MaterialEntry,
-    MaterialKeyError,
     PairedHandRecord,
     PairedRunOutput,
     ProtocolAuditError,
@@ -74,8 +74,25 @@ PACKAGE_NAME = "app.verification"
 # 包与其全部子模块的声明，以及各模块允许出现的公开函数：新增模块或函数即失败。
 EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
     PACKAGE_NAME: frozenset(),
-    f"{PACKAGE_NAME}.config": frozenset({"spec_digest", "schedule_digest"}),
-    f"{PACKAGE_NAME}.deal": frozenset({"card_universe", "draw_order", "deal_for_hand"}),
+    f"{PACKAGE_NAME}.config": frozenset(
+        {
+            "spec_digest",
+            "schedule_digest",
+            "schedule_payload",
+            "campaign_configuration_payload",
+            "campaign_configuration_digest",
+            "build_domain_run_spec",
+        }
+    ),
+    f"{PACKAGE_NAME}.deal": frozenset(
+        {
+            "card_universe",
+            "draw_order",
+            "deal_for_hand",
+            "deal_mapping_payload",
+            "deal_mapping_digest",
+        }
+    ),
     f"{PACKAGE_NAME}.digests": frozenset(
         {"require_algorithm", "canonical_bytes", "bytes_digest", "content_digest"}
     ),
@@ -90,6 +107,8 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
     f"{PACKAGE_NAME}.guards": frozenset(
         {
             "precheck_rule_entries",
+            "injection_precheck_rules_digest",
+            "injection_precheck_category_entries",
             "precheck_injection",
             "same_deal",
             "require_same_deal",
@@ -115,6 +134,9 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
             "scope_seats",
             "probed_seat_style",
             "materials_digest",
+            "encode_baseline_entry_payload",
+            "public_summary_mapping_payload",
+            "public_summary_mapping_digest",
             "require_materials",
             "plan_payload",
             "construction_caliber_payload",
@@ -124,11 +146,16 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
             "plan_by_seat",
         }
     ),
-    f"{PACKAGE_NAME}.materials": frozenset({"bundle_payload", "manifest_digest"}),
+    f"{PACKAGE_NAME}.materials": frozenset(
+        {"bundle_payload", "manifest_digest", "require_supplied_materials_order"}
+    ),
     f"{PACKAGE_NAME}.protocol": frozenset(
         {
             "required_bit_width",
             "protocol_digest",
+            "protocol_payload",
+            "purpose_index_mapping_payload",
+            "purpose_index_mapping_digest",
             "resolve_read",
             "commitment_digest",
             "read_record_digest",
@@ -141,10 +168,15 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
     f"{PACKAGE_NAME}.runner": frozenset(
         {
             "flow_step_entries",
+            "runner_flow_digest",
+            "runner_category_entries",
             "build_frozen_manifest",
             "verify_frozen_inputs",
             "build_run_metadata",
         }
+    ),
+    f"{PACKAGE_NAME}.source_manifest": frozenset(
+        {"require_source_manifest", "source_manifest_digest"}
     ),
 }
 
@@ -154,9 +186,11 @@ ALLOWED_IMPORTS: frozenset[str] = frozenset(
         "__future__",
         "collections.abc",
         "dataclasses",
+        "datetime",
         "enum",
         "hashlib",
         "json",
+        "math",
         "types",
         "typing",
         "pydantic",
@@ -703,6 +737,19 @@ def _signature_violations(module: ModuleType) -> list[str]:
     return found
 
 
+def _source_manifest_kwargs(fixture: Fixture) -> dict[str, object]:
+    """把夹具里的手造清单传给冻结输入主链。"""
+    manifests = fixture.source_manifests
+    return {
+        "runner_manifest": manifests.runner,
+        "generator_manifest": manifests.generator,
+        "engine_manifest": manifests.engine,
+        "baseline_strategy_manifest": manifests.baseline_strategy,
+        "under_test_strategy_manifest": manifests.under_test_strategy,
+        "verification_manifest": manifests.verification,
+    }
+
+
 def _verify_fixture(
     fixture: Fixture = FIXTURE,
     *,
@@ -718,6 +765,7 @@ def _verify_fixture(
         audit=fixture.audit,
         execution_identity=fixture.identity,
         material_manifest=fixture.material_manifest,
+        **_source_manifest_kwargs(fixture),
     )
 
 
@@ -1144,6 +1192,7 @@ def test_tampered_audit_transcript_fails_before_binding() -> None:
             audit=audit,
             execution_identity=FIXTURE.identity,
             material_manifest=FIXTURE.material_manifest,
+            **_source_manifest_kwargs(FIXTURE),
         )
 
 
@@ -1158,7 +1207,9 @@ def test_forged_manifest_cannot_unlock_unaligned_materials() -> None:
     forged_bundle = replace_entries(FIXTURE.bundle, 0, entries)
     forged_manifest = FIXTURE.manifest.model_copy(
         update={
-            "supplied_materials_digest": materials_digest(forged_bundle, algorithm=algorithm)
+            "supplied_materials_digest": materials_digest(
+                forged_bundle, spec=FIXTURE.spec, algorithm=algorithm
+            )
         }
     )
     with pytest.raises(MaterialBindingError):
@@ -1170,6 +1221,7 @@ def test_forged_manifest_cannot_unlock_unaligned_materials() -> None:
             audit=FIXTURE.audit,
             execution_identity=FIXTURE.identity,
             material_manifest=FIXTURE.material_manifest,
+            **_source_manifest_kwargs(FIXTURE),
         )
 
 
@@ -1191,6 +1243,7 @@ def test_forged_commitment_and_manifest_cannot_pass() -> None:
             audit=audit,
             execution_identity=FIXTURE.identity,
             material_manifest=forged_manifest_content,
+            **_source_manifest_kwargs(FIXTURE),
         )
 
 
@@ -1212,8 +1265,8 @@ def test_material_digest_is_content_derived() -> None:
         purpose_label=first.purpose_label, index_key=first.index_key, value=first.value + 1
     )
     changed = replace_entries(FIXTURE.bundle, 0, entries)
-    assert materials_digest(changed, algorithm=algorithm) != materials_digest(
-        FIXTURE.bundle, algorithm=algorithm
+    assert materials_digest(changed, spec=FIXTURE.spec, algorithm=algorithm) != materials_digest(
+        FIXTURE.bundle, spec=FIXTURE.spec, algorithm=algorithm
     )
 
 
@@ -1234,16 +1287,26 @@ def test_build_frozen_manifest_recomputes_from_content() -> None:
 
 def test_chain_requires_identifier_agreement() -> None:
     """规格里的身份标识与显式构造口径不一致时，冻结输入校验即失败。"""
-    mismatched = run_spec(under_test_identifier="absent@1")
+    with pytest.raises(SpecIncompleteError):
+        run_spec(under_test_identifier="absent@1")
+    mismatched_caliber = construction_caliber(identifier="absent@1")
     with pytest.raises(IdentityMappingError):
-        _verify_fixture(spec=mismatched)
+        verify_frozen_inputs(
+            manifest=FIXTURE.manifest,
+            spec=FIXTURE.spec,
+            caliber=mismatched_caliber,
+            bundle=FIXTURE.bundle,
+            audit=FIXTURE.audit,
+            execution_identity=FIXTURE.identity,
+            material_manifest=FIXTURE.material_manifest,
+            **_source_manifest_kwargs(FIXTURE),
+        )
 
 
 def test_chain_rejects_out_of_range_material_key() -> None:
     """协议域放宽到超过 32 字节时，身份相关的主键约束仍须拦下越界材料。"""
-    oversized = build_fixture(under_test_bits=264, under_test_value=1 << 256)
-    with pytest.raises(MaterialKeyError):
-        _verify_fixture(oversized)
+    with pytest.raises(IdentityMappingError):
+        build_fixture(under_test_bits=264, under_test_value=1 << 256)
 
 
 def test_caliber_content_is_bound_by_its_own_digest() -> None:
@@ -1251,7 +1314,14 @@ def test_caliber_content_is_bound_by_its_own_digest() -> None:
     algorithm = FIXTURE.spec.protocol.digest_algorithm
     forged = construction_caliber(SeatScope.ALL_SEATS)
     identity = build_execution_identity_record(
-        caliber_categories(forged, FIXTURE.spec, FIXTURE.bundle)
+        caliber_categories(
+            forged,
+            FIXTURE.spec,
+            FIXTURE.bundle,
+            FIXTURE.audit,
+            FIXTURE.material_manifest,
+            FIXTURE.source_manifests,
+        )
     )
     manifest = FIXTURE.manifest.model_copy(
         update={
@@ -1269,32 +1339,38 @@ def test_caliber_content_is_bound_by_its_own_digest() -> None:
             audit=FIXTURE.audit,
             execution_identity=identity,
             material_manifest=FIXTURE.material_manifest,
+            **_source_manifest_kwargs(FIXTURE),
         )
 
 
 def test_execution_identity_caliber_must_match_current_caliber() -> None:
     """执行身份里的实例化口径与当前构造口径逐项不一致时必须失败。"""
     algorithm = FIXTURE.spec.protocol.digest_algorithm
-    categories = caliber_categories(FIXTURE.caliber, FIXTURE.spec, FIXTURE.bundle)
+    categories = caliber_categories(
+        FIXTURE.caliber,
+        FIXTURE.spec,
+        FIXTURE.bundle,
+        FIXTURE.audit,
+        FIXTURE.material_manifest,
+        FIXTURE.source_manifests,
+    )
     entries = categories[INSTANTIATION_CALIBER_CATEGORY]
     forged_values = [
         (name, "0" * 64) if name == "construction-plan-digest" else (name, value)
         for name, value in entries
     ]
-    dropped = [pair for pair in entries if pair[0] != "under-test-interface"]
-    for forged in (forged_values, dropped):
-        identity = build_execution_identity_record(
-            {**categories, INSTANTIATION_CALIBER_CATEGORY: forged}
-        )
-        manifest = FIXTURE.manifest.model_copy(
-            update={
-                "execution_identity_digest": execution_identity_digest(
-                    identity, algorithm=algorithm
-                )
-            }
-        )
-        with pytest.raises(IdentityMappingError, match="实例化口径"):
-            verify_frozen_inputs(
+    identity = build_execution_identity_record(
+        {**categories, INSTANTIATION_CALIBER_CATEGORY: forged_values}
+    )
+    manifest = FIXTURE.manifest.model_copy(
+        update={
+            "execution_identity_digest": execution_identity_digest(
+                identity, algorithm=algorithm
+            )
+        }
+    )
+    with pytest.raises(IdentityMappingError, match="实例化口径"):
+        verify_frozen_inputs(
                 manifest=manifest,
                 spec=FIXTURE.spec,
                 caliber=FIXTURE.caliber,
@@ -1302,6 +1378,7 @@ def test_execution_identity_caliber_must_match_current_caliber() -> None:
                 audit=FIXTURE.audit,
                 execution_identity=identity,
                 material_manifest=FIXTURE.material_manifest,
+                **_source_manifest_kwargs(FIXTURE),
             )
 
 
@@ -1316,24 +1393,30 @@ def test_conflicting_baseline_caliber_fails_end_to_end() -> None:
             audit=FIXTURE.audit,
             execution_identity=FIXTURE.identity,
             material_manifest=FIXTURE.material_manifest,
+            **_source_manifest_kwargs(FIXTURE),
         )
 
 
 @pytest.mark.parametrize(
-    "name",
+    ("name", "value"),
     [
-        "baseline-effective-samples",
-        "baseline-effective-bluff-freq",
-        "baseline-registry-location",
-        "baseline-entry-code-digest",
+        ("baseline-effective-samples", "1"),
+        ("baseline-entry-code-digest", "0" * 64),
     ],
 )
-def test_forged_baseline_execution_entry_fails(name: str) -> None:
+def test_forged_baseline_execution_entry_fails(name: str, value: str) -> None:
     """基线执行口径的任一项被改写、其余摘要照着重算时，仍必须失败。"""
     algorithm = FIXTURE.spec.protocol.digest_algorithm
     identity = build_execution_identity_record(
         forged_caliber_categories(
-            FIXTURE.caliber, FIXTURE.spec, FIXTURE.bundle, name=name, value="0" * 64
+            FIXTURE.caliber,
+            FIXTURE.spec,
+            FIXTURE.bundle,
+            FIXTURE.audit,
+            FIXTURE.material_manifest,
+            FIXTURE.source_manifests,
+            name=name,
+            value=value,
         )
     )
     manifest = FIXTURE.manifest.model_copy(
@@ -1352,6 +1435,7 @@ def test_forged_baseline_execution_entry_fails(name: str) -> None:
             audit=FIXTURE.audit,
             execution_identity=identity,
             material_manifest=FIXTURE.material_manifest,
+            **_source_manifest_kwargs(FIXTURE),
         )
 
 
@@ -1375,14 +1459,101 @@ def test_placeholder_identity_categories_are_not_enough() -> None:
             audit=FIXTURE.audit,
             execution_identity=identity,
             material_manifest=FIXTURE.material_manifest,
+            **_source_manifest_kwargs(FIXTURE),
+        )
+
+
+@pytest.mark.parametrize(
+    ("category", "name"),
+    [
+        ("randomization-protocol", "randomization-protocol-digest"),
+        ("randomization-protocol", "supplied-materials-digest"),
+        ("randomization-protocol", "material-manifest-digest"),
+        ("randomization-protocol", "audit-transcript-digest"),
+        ("randomization-protocol", "audit-read-record-digest"),
+        ("randomization-protocol", "audit-commitment-digest"),
+        ("randomization-protocol", "generator-code-digest"),
+        ("input-mapping", "campaign-configuration-digest"),
+        ("input-mapping", "schedule-digest"),
+        ("runner", "runner-code-manifest-digest"),
+        ("engine-and-strategy-code", "engine-code-manifest-digest"),
+        ("engine-and-strategy-code", "baseline-strategy-code-manifest-digest"),
+        ("engine-and-strategy-code", "under-test-strategy-code-manifest-digest"),
+        ("engine-and-strategy-code", "verification-code-manifest-digest"),
+    ],
+)
+def test_placeholder_execution_identity_digest_cannot_pass_main_chain(
+    category: str, name: str
+) -> None:
+    """占位摘要即使其余条目与当前输入一致，也不能通过冻结输入主链。"""
+    categories = caliber_categories(
+        FIXTURE.caliber,
+        FIXTURE.spec,
+        FIXTURE.bundle,
+        FIXTURE.audit,
+        FIXTURE.material_manifest,
+        FIXTURE.source_manifests,
+    )
+    placeholder = "ab" * 32
+    assert dict(categories[category])[name] != placeholder
+    categories[category] = [
+        (entry_name, placeholder if entry_name == name else entry_value)
+        for entry_name, entry_value in categories[category]
+    ]
+    identity = build_execution_identity_record(categories)
+    with pytest.raises(IdentityMappingError, match="当前输入"):
+        verify_frozen_inputs(
+            manifest=FIXTURE.manifest,
+            spec=FIXTURE.spec,
+            caliber=FIXTURE.caliber,
+            bundle=FIXTURE.bundle,
+            audit=FIXTURE.audit,
+            execution_identity=identity,
+            material_manifest=FIXTURE.material_manifest,
+            **_source_manifest_kwargs(FIXTURE),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_interface_id", "test-source-interface"),
+        ("environment_record", "test-environment"),
+    ],
+)
+def test_identity_source_and_environment_must_match_current_protocol(
+    field: str, value: str
+) -> None:
+    """来源接口与环境记录必须等于当前协议；只改一侧时主链失败。"""
+    protocol = FIXTURE.spec.protocol.model_copy(update={field: value})
+    spec = FIXTURE.spec.model_copy(update={"protocol": protocol})
+    audit = AuditedMaterials(
+        transcript=FIXTURE.audit.transcript,
+        reads=FIXTURE.audit.reads,
+        commitment=FIXTURE.audit.commitment.model_copy(update={field: value}),
+    )
+    with pytest.raises(IdentityMappingError, match="当前输入"):
+        verify_frozen_inputs(
+            manifest=FIXTURE.manifest,
+            spec=spec,
+            caliber=FIXTURE.caliber,
+            bundle=FIXTURE.bundle,
+            audit=audit,
+            execution_identity=FIXTURE.identity,
+            material_manifest=FIXTURE.material_manifest,
+            **_source_manifest_kwargs(FIXTURE),
         )
 
 
 def test_execution_identity_digest_is_content_derived() -> None:
     algorithm = FIXTURE.spec.protocol.digest_algorithm
-    other = build_execution_identity_record(
-        {**identity_categories(), EXECUTION_IDENTITY_CATEGORIES[0]: [("entry", "changed")]}
-    )
+    categories = identity_categories()
+    runner_entries = categories[EXECUTION_IDENTITY_CATEGORIES[0]]
+    categories[EXECUTION_IDENTITY_CATEGORIES[0]] = [
+        (name, "c" * 64 if name == "runner-code-manifest-digest" else value)
+        for name, value in runner_entries
+    ]
+    other = build_execution_identity_record(categories)
     assert execution_identity_digest(other, algorithm=algorithm) != execution_identity_digest(
         FIXTURE.identity, algorithm=algorithm
     )
@@ -1395,7 +1566,7 @@ def test_execution_identity_record_requires_all_categories() -> None:
     record = build_execution_identity_record(identity_categories())
     assert [name for name, _ in record.categories] == list(EXECUTION_IDENTITY_CATEGORIES)
     assert record.reference_snapshot == reference_snapshot()
-    assert len(record.entries_for(EXECUTION_IDENTITY_CATEGORIES[0])) == 1
+    assert len(record.entries_for(EXECUTION_IDENTITY_CATEGORIES[0])) == 3
 
 
 def test_execution_identity_record_rejects_incomplete_input() -> None:

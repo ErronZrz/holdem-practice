@@ -243,7 +243,7 @@ def test_identifier_match_uses_exact_key_only() -> None:
     """身份选择只做规范标识的精确相等：别名与近似写法都不成立。"""
     mapping = under_test_mapping()
     require_identifier_match(UNDER_TEST_IDENTIFIER, mapping)
-    for value in ("mixed-local", "mixedlocal@8", "mixed-local@9", ""):
+    for value in ("mixed-local", "mixedlocal@8", "mixed-local@8x", ""):
         with pytest.raises(IdentityMappingError):
             require_identifier_match(value, mapping)
 
@@ -483,8 +483,8 @@ def test_construction_plan_covers_every_seat() -> None:
 
 
 def test_construction_plan_carries_all_seats_scope() -> None:
-    caliber = construction_caliber(SeatScope.ALL_SEATS, identifier="mixed-local@7")
-    spec = run_spec(num_players=3, probed_seat=1, under_test_identifier="mixed-local@7")
+    caliber = construction_caliber(SeatScope.ALL_SEATS, identifier=UNDER_TEST_IDENTIFIER)
+    spec = run_spec(num_players=3, probed_seat=1, under_test_identifier=UNDER_TEST_IDENTIFIER)
     fixture = build_fixture(num_players=3, probed_seat=1)
     plan = build_arm_construction_plan(
         spec, caliber, Arm.UNDER_TEST, spec.schedule[0], fixture.bundle[0]
@@ -496,13 +496,15 @@ def test_construction_plan_carries_all_seats_scope() -> None:
 def test_construction_plan_requires_matching_identifier() -> None:
     """规格里的标识与显式构造口径不一致时，构造计划即失败。"""
     fixture = build_fixture()
-    mismatched = run_spec(num_players=3, probed_seat=1, under_test_identifier="absent@1")
+    with pytest.raises(SpecIncompleteError):
+        run_spec(num_players=3, probed_seat=1, under_test_identifier="absent@1")
+    mismatched_caliber = construction_caliber(identifier="absent@1")
     with pytest.raises(IdentityMappingError):
         build_arm_construction_plan(
-            mismatched,
-            fixture.caliber,
+            fixture.spec,
+            mismatched_caliber,
             Arm.UNDER_TEST,
-            mismatched.schedule[0],
+            fixture.spec.schedule[0],
             fixture.bundle[0],
         )
 
@@ -600,7 +602,7 @@ def test_baseline_execution_caliber_comes_from_strategy_code() -> None:
     assert "samples" in entries["baseline-parameter-layout"]
     assert entries["baseline-effective-samples"] == "500"
     assert entries["baseline-effective-bluff-freq"] == "0.1"
-    assert entries["baseline-effective-seed"] == "none"
+    assert entries["baseline-effective-seed"] == "per-hand-arm_b-material"
     assert len(entries["baseline-entry-code-digest"]) == 64
     assert entries["baseline-requires-public-summary"] == "false"
     assert entries["baseline-seat-scope"] == "none"

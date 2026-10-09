@@ -462,14 +462,8 @@ def test_read_index_must_be_contiguous() -> None:
         record.model_copy(update={"read_index": index + 1})
         for index, record in enumerate(FIXTURE.audit.reads)
     )
-    audit = recommit_audit(FIXTURE.audit, reads=reads)
     with pytest.raises(ProtocolAuditError, match="序号"):
-        verify_audit(
-            protocol=FIXTURE.spec.protocol,
-            transcript=audit.transcript,
-            reads=audit.reads,
-            commitment=audit.commitment,
-        )
+        recommit_audit(FIXTURE.audit, reads=reads)
 
 
 def test_raw_value_must_match_transcript() -> None:
@@ -664,13 +658,16 @@ def test_isolated_rejection_at_purpose_end_fails() -> None:
 
 def test_isolated_rejection_at_audit_end_fails() -> None:
     """发牌用途排在遍历顺序末尾时，审计末尾的孤立拒绝读取同样失败。"""
+    order = (
+        NON_PROBED_LABEL,
+        UNDER_TEST_LABEL,
+        BASELINE_LABEL,
+        DEAL_LABEL,
+    )
+    by_label = {purpose.label: purpose for purpose in protocol_spec().purposes}
     protocol = protocol_spec(
-        traversal_order=(
-            NON_PROBED_LABEL,
-            UNDER_TEST_LABEL,
-            BASELINE_LABEL,
-            DEAL_LABEL,
-        )
+        purposes=tuple(by_label[label] for label in order),
+        traversal_order=order,
     )
     plan = list(read_plan(protocol, ((1, 1),), 3))
     plan.append((DEAL_LABEL, _deal_index(1, 11), REJECTED_RAW, None))
@@ -721,6 +718,7 @@ def test_multi_hand_audit_passes_end_to_end() -> None:
         reads=fixture.audit.reads,
         bundle=fixture.bundle,
         commitment=fixture.audit.commitment,
+        spec=fixture.spec,
     )
 
 
@@ -740,6 +738,7 @@ def test_manifest_binding_passes_for_fixture() -> None:
         reads=FIXTURE.audit.reads,
         bundle=FIXTURE.bundle,
         commitment=FIXTURE.audit.commitment,
+        spec=FIXTURE.spec,
     )
 
 
@@ -781,6 +780,7 @@ def test_manifest_content_digest_is_recomputed() -> None:
             reads=audit.reads,
             bundle=FIXTURE.bundle,
             commitment=audit.commitment,
+            spec=FIXTURE.spec,
         )
 
 
@@ -793,6 +793,7 @@ def test_commitment_manifest_digest_must_match_manifest_content() -> None:
             reads=audit.reads,
             bundle=FIXTURE.bundle,
             commitment=audit.commitment,
+            spec=FIXTURE.spec,
         )
 
 
@@ -809,6 +810,7 @@ def test_manifest_must_match_supplied_materials() -> None:
             reads=FIXTURE.audit.reads,
             bundle=replace_entries(FIXTURE.bundle, 0, entries),
             commitment=FIXTURE.audit.commitment,
+            spec=FIXTURE.spec,
         )
 
 
@@ -846,7 +848,7 @@ def test_counts_must_cover_declared_purposes() -> None:
         if label != DEAL_LABEL
     )
     audit = recommit_audit(FIXTURE.audit, entry_counts=counts)
-    with pytest.raises(ProtocolAuditError, match="未覆盖"):
+    with pytest.raises(ProtocolAuditError, match="计数"):
         verify_audit(
             protocol=FIXTURE.spec.protocol,
             transcript=audit.transcript,

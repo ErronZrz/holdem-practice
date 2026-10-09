@@ -13,17 +13,29 @@ from __future__ import annotations
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
-from typing import Annotated, Literal, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self
+
+if TYPE_CHECKING:
+    from .config import DomainRunSpec
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .digests import DIGEST_ALGORITHMS, bytes_digest, content_digest
 from .errors import MaterialBindingError, ProtocolAuditError, ProtocolSpecError
-from .materials import HandMaterials, MaterialManifest, manifest_digest
+from .materials import (
+    HandMaterials,
+    MaterialManifest,
+    manifest_digest,
+    require_supplied_materials_order,
+)
 
 # 本模块已实现的逐读取记录编码；其余取值一律显式失败，不静默替代。
 READ_RECORD_ENCODINGS: tuple[str, ...] = ("compact-json-v1",)
+# 拒绝规则的规范标识：标识不变则规则内容不得变化。
+REJECTION_RULE_ID = "rejection-whole-multiple-truncation-v1"
+_DOMAIN_SIZE_2_256 = 1 << 256
 
 NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
@@ -113,6 +125,8 @@ class PurposeSpec(BaseModel):
     role: PurposeRole
     label: str
     index_fields: tuple[str, ...]
+    # 按整数比较的索引字段，次序与它们在索引字段中的出现次序一致。
+    integer_fields: tuple[str, ...] = ()
     # 发牌用途用于标识抽取次序的索引字段；其余用途不得声明。
     draw_index_field: str | None = None
     # 非被测座位用途用于标识座位号的索引字段；其余用途不得声明。
@@ -130,6 +144,17 @@ class PurposeSpec(BaseModel):
             raise ProtocolSpecError("索引字段必须互不重复")
         if any(not name.strip() for name in self.index_fields):
             raise ProtocolSpecError("索引字段名不能为空")
+        if len(set(self.integer_fields)) != len(self.integer_fields):
+            raise ProtocolSpecError("整数字段必须互不重复")
+        if any(name not in self.index_fields for name in self.integer_fields):
+            raise ProtocolSpecError("整数字段必须属于索引字段")
+        positions = [self.index_fields.index(name) for name in self.integer_fields]
+        if positions != sorted(positions):
+            raise ProtocolSpecError("整数字段必须按索引字段中的次序给出")
+        if self.draw_index_field is not None and self.draw_index_field not in self.integer_fields:
+            raise ProtocolSpecError("抽取次序字段必须按整数比较")
+        if self.seat_index_field is not None and self.seat_index_field not in self.integer_fields:
+            raise ProtocolSpecError("座位号字段必须按整数比较")
         for name in (self.draw_index_field, self.seat_index_field):
             if name is not None and name not in self.index_fields:
                 raise ProtocolSpecError("声明的定位字段必须属于索引字段")
@@ -171,27 +196,41 @@ class PurposeSpec(BaseModel):
     def index_order_key(self, index_key: tuple[str, ...]) -> tuple[int | str, ...]:
         """索引比较键：按声明字段顺序逐字段比较。
 
-        声明的定位字段（抽取次序、座位号）按整数比较，其余字段按字符串比较；
-        同一用途内所有索引键在同一位置上的类型因此一致，可直接比较。
+        整数字段按无前导零十进制解析后比较，其余字段按字符串比较。
         """
         if len(index_key) != len(self.index_fields):
             raise ProtocolSpecError("索引键的取值数与索引字段数不符")
-        locators = {self.draw_index_field, self.seat_index_field}
+        integers = set(self.integer_fields)
         return tuple(
-            _locator_value(name, value) if name in locators else value
+            _parse_canonical_integer(name, value) if name in integers else value
             for name, value in zip(self.index_fields, index_key, strict=True)
         )
+
+    def field_text(self, index_key: tuple[str, ...], name: str) -> str:
+        """取索引键中某个具名字段的原文；字段不存在或长度不符即失败。"""
+        if len(index_key) != len(self.index_fields):
+            raise ProtocolSpecError("索引键的取值数与索引字段数不符")
+        if name not in self.index_fields:
+            raise ProtocolSpecError(f"该用途未声明字段：{name!r}")
+        return index_key[self.index_fields.index(name)]
+
+    def field_integer(self, index_key: tuple[str, ...], name: str) -> int:
+        """把具名字段按无前导零十进制解析成整数。"""
+        return _parse_canonical_integer(name, self.field_text(index_key, name))
+
+
+def _parse_canonical_integer(field: str, raw: str) -> int:
+    """整数字段只接受无前导零的 ASCII 十进制；`0` 本身合法。"""
+    if not raw or any(character not in "0123456789" for character in raw):
+        raise ProtocolSpecError(f"整数字段必须是无前导零的十进制：{field!r}")
+    if raw.startswith("0") and raw != "0":
+        raise ProtocolSpecError(f"整数字段必须是无前导零的十进制：{field!r}")
+    return int(raw)
 
 
 def _locator_value(field: str, raw: str) -> int:
     """把定位字段的取值解析为非负整数；非法即失败。"""
-    try:
-        value = int(raw)
-    except ValueError as error:
-        raise ProtocolSpecError(f"定位字段的取值必须是整数：{field!r}") from error
-    if value < 0:
-        raise ProtocolSpecError(f"定位字段的取值不能为负：{field!r}")
-    return value
+    return _parse_canonical_integer(field, raw)
 
 
 def _require_integer_field(
@@ -212,6 +251,7 @@ class RandomizationProtocolSpec(BaseModel):
 
     source_interface_id: str
     environment_record: str
+    rejection_rule: str
     purposes: tuple[PurposeSpec, ...]
     # 用途的生成次序；每个用途内部按索引的升序生成。
     traversal_order: tuple[str, ...]
@@ -230,14 +270,16 @@ class RandomizationProtocolSpec(BaseModel):
         for name, value in declared:
             if not value.strip():
                 raise ProtocolSpecError(f"协议字段不能为空：{name}")
+        if self.rejection_rule != REJECTION_RULE_ID:
+            raise ProtocolSpecError("拒绝规则标识与锁定值不符")
         roles = [purpose.role for purpose in self.purposes]
         if len(set(roles)) != len(roles) or set(roles) != set(PURPOSE_ROLES):
             raise ProtocolSpecError("用途必须恰好覆盖四种角色各一次")
         labels = [purpose.label for purpose in self.purposes]
         if len(set(labels)) != len(labels):
             raise ProtocolSpecError("用途标签必须互不重复")
-        if sorted(self.traversal_order) != sorted(labels):
-            raise ProtocolSpecError("遍历顺序必须恰好覆盖全部用途标签各一次")
+        if tuple(self.traversal_order) != tuple(labels):
+            raise ProtocolSpecError("用途次序必须与遍历顺序一致")
         if self.digest_algorithm not in DIGEST_ALGORITHMS:
             raise ProtocolSpecError(f"摘要算法未实现：{self.digest_algorithm!r}")
         if self.read_record_encoding not in READ_RECORD_ENCODINGS:
@@ -263,11 +305,95 @@ class RandomizationProtocolSpec(BaseModel):
         return any(purpose.label == label for purpose in self.purposes)
 
 
+def _purpose_protocol_payload(purpose: PurposeSpec) -> dict[str, object]:
+    """协议载荷中的单个用途：字段集封闭，域大小用精确整数。"""
+    domain = purpose.domain
+    if isinstance(domain, ShrinkingDomain):
+        domain_payload: dict[str, object] = {
+            "kind": "shrinking",
+            "initial_size": domain.initial_size,
+        }
+    else:
+        domain_payload = {"kind": "fixed", "size": domain.size}
+    return {
+        "label": purpose.label,
+        "role": purpose.role.value,
+        "index_fields": list(purpose.index_fields),
+        "integer_fields": list(purpose.integer_fields),
+        "draw_index_field": purpose.draw_index_field,
+        "seat_index_field": purpose.seat_index_field,
+        "domain": domain_payload,
+        "bit_width": purpose.bit_width,
+    }
+
+
+def protocol_payload(protocol: RandomizationProtocolSpec) -> dict[str, object]:
+    """随机化协议的封闭载荷。摘要只覆盖这些字段，不覆盖模型上的其他属性。"""
+    return {
+        "schema": "randomization-protocol-v1",
+        "source_interface_id": protocol.source_interface_id,
+        "environment_record": protocol.environment_record,
+        "rejection_rule": protocol.rejection_rule,
+        "purposes": [_purpose_protocol_payload(purpose) for purpose in protocol.purposes],
+        "traversal_order": list(protocol.traversal_order),
+        "commitment_form": protocol.commitment_form,
+        "audit_format_version": protocol.audit_format_version,
+        "digest_algorithm": protocol.digest_algorithm,
+        "read_record_encoding": protocol.read_record_encoding,
+    }
+
+
 def protocol_digest(protocol: RandomizationProtocolSpec) -> str:
-    """由协议内容重算摘要：内容相同才可能得到相同摘要。"""
-    return content_digest(
-        protocol.model_dump(mode="json"), algorithm=protocol.digest_algorithm
-    )
+    """由封闭协议载荷重算摘要。"""
+    return content_digest(protocol_payload(protocol), algorithm=protocol.digest_algorithm)
+
+
+def purpose_index_mapping_payload() -> dict[str, object]:
+    """用途与索引映射的封闭载荷，与某次测试协议的字段取值无关。"""
+    fixed = {"kind": "fixed", "size": _DOMAIN_SIZE_2_256}
+    return {
+        "schema": "purpose-index-mapping-v1",
+        "purposes": [
+            {
+                "label": "deal",
+                "role": PurposeRole.DEAL.value,
+                "index_fields": ["campaign", "block", "hand", "draw"],
+                "integer_fields": ["block", "hand", "draw"],
+                "domain": {"kind": "shrinking", "initial_size": 52},
+                "bit_width": 8,
+            },
+            {
+                "label": "non_probed",
+                "role": PurposeRole.NON_PROBED_SEED.value,
+                "index_fields": ["campaign", "block", "hand", "seat"],
+                "integer_fields": ["block", "hand", "seat"],
+                "domain": fixed,
+                "bit_width": 256,
+            },
+            {
+                "label": "arm_m",
+                "role": PurposeRole.UNDER_TEST_MATERIAL.value,
+                "index_fields": ["campaign", "block", "hand"],
+                "integer_fields": ["block", "hand"],
+                "domain": fixed,
+                "bit_width": 256,
+            },
+            {
+                "label": "arm_b",
+                "role": PurposeRole.BASELINE_SEED.value,
+                "index_fields": ["campaign", "block", "hand"],
+                "integer_fields": ["block", "hand"],
+                "domain": fixed,
+                "bit_width": 256,
+            },
+        ],
+        "traversal_order": ["deal", "non_probed", "arm_m", "arm_b"],
+    }
+
+
+def purpose_index_mapping_digest(*, algorithm: str) -> str:
+    """按封闭载荷重算用途与索引映射摘要。"""
+    return content_digest(purpose_index_mapping_payload(), algorithm=algorithm)
 
 
 def resolve_read(raw_value: int, *, bit_width: int, domain_size: int) -> int | None:
@@ -354,13 +480,14 @@ class TranscriptCommitment(BaseModel):
         for name, value in declared:
             if not value.strip():
                 raise ProtocolAuditError(f"承诺字段不能为空：{name}")
-        declared = (
-            ("generation_started_at", self.generation_started_at),
-            ("generation_finished_at", self.generation_finished_at),
+        started = _parse_generation_timestamp(
+            "generation_started_at", self.generation_started_at
         )
-        for name, value in declared:
-            if not value.strip():
-                raise ProtocolAuditError(f"生成时段字段不能为空：{name}")
+        finished = _parse_generation_timestamp(
+            "generation_finished_at", self.generation_finished_at
+        )
+        if started > finished:
+            raise ProtocolAuditError("生成开始时刻不得晚于结束时刻")
         declared = (
             ("transcript_digest", self.transcript_digest),
             ("read_record_digest", self.read_record_digest),
@@ -419,12 +546,35 @@ class AuditedMaterials:
             raise ProtocolAuditError("原始字节转录必须是字节串")
 
 
+def _parse_generation_timestamp(name: str, value: str) -> datetime:
+    """生成时刻只接受六位微秒、后缀为 Z 的有效公历时间。"""
+    fraction = value[20:26]
+    if (
+        len(value) != 27
+        or value[4] != "-"
+        or value[7] != "-"
+        or value[10] != "T"
+        or value[13] != ":"
+        or value[16] != ":"
+        or value[19] != "."
+        or value[26] != "Z"
+        or not fraction.isdigit()
+    ):
+        raise ProtocolAuditError(f"生成时刻格式不合法：{name}")
+    try:
+        return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
+    except ValueError as error:
+        raise ProtocolAuditError(f"生成时刻不是有效公历时间：{name}") from error
+
+
 def read_record_digest(
     reads: Sequence[ReadRecord], *, encoding: str, algorithm: str
 ) -> str:
-    """对逐读取记录取与字段顺序无关的摘要，供不可变顺序承诺比对。"""
+    """按调用时的物理序号编码逐读取记录。序号不连续则拒绝，不先排序再取摘要。"""
     if encoding != "compact-json-v1":
         raise ProtocolSpecError(f"逐读取记录编码未实现：{encoding!r}")
+    if [record.read_index for record in reads] != list(range(len(reads))):
+        raise ProtocolAuditError("逐读取记录必须按物理序号从零起连续排列")
     text = json.dumps(
         [record.model_dump(mode="json") for record in reads],
         separators=(",", ":"),
@@ -466,7 +616,10 @@ def _require_counts_match(
         ("rejection_counts", commitment.rejection_counts, rejected),
     )
     for name, counts, observed in reported:
-        if {label for label, _ in counts} != declared:
+        labels = [label for label, _ in counts]
+        if labels != list(protocol.traversal_order):
+            raise ProtocolAuditError(f"计数条目必须按遍历顺序排列：{name}")
+        if set(labels) != declared:
             raise ProtocolAuditError(f"承诺的计数条目未覆盖全部用途：{name}")
         for label in declared:
             if commitment.count_for(name, label) != observed[label]:
@@ -735,12 +888,17 @@ def verify_manifest_binding(
     reads: Sequence[ReadRecord],
     bundle: Sequence[HandMaterials],
     commitment: TranscriptCommitment,
+    spec: DomainRunSpec,
 ) -> None:
     """三步链：材料清单 ↔ 审计中被接受的取值 ↔ 送交材料，并与承诺里的清单摘要比对。
 
     清单摘要由清单内容重算，因此「抄录一个与内容不符的摘要」必然失败；同时清单条目必须
     与审计的被接受取值、送交材料逐项一致，材料来源由此形成完整可复核链条。
+    送交材料的次序在定位比对之前核对，且协议对象必须就是规格上的那一份。
     """
+    if protocol is not spec.protocol:
+        raise MaterialBindingError("绑定的协议必须就是规格上的协议")
+    require_supplied_materials_order(spec, bundle)
     require_manifest_consistent(protocol, manifest)
     declared = manifest.entry_map()
     if commitment.manifest_digest != manifest_digest(

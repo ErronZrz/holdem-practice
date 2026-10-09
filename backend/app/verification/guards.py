@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from app.poker.cards import Card
 
 from .deal import BOARD_SIZE, HOLE_CARDS_PER_SEAT, HandDeal, card_universe
+from .digests import content_digest
 from .errors import InjectionPrecheckError
 
 # 校验项名：元组顺序即检查顺序，静态检查与执行身份记录都读这张表。
@@ -28,8 +29,24 @@ PRECHECK_ITEMS: tuple[str, ...] = (
 
 
 def precheck_rule_entries() -> tuple[tuple[str, str], ...]:
-    """把校验项整理成记录条目，顺序与检查顺序一致。"""
+    """把校验项整理成记录条目，顺序与检查顺序一致。
+
+    覆盖清单不再使用这些旧名称，只保留给仍按项名阅读检查顺序的调用方。
+    """
     return tuple((f"item-{index + 1}", name) for index, name in enumerate(PRECHECK_ITEMS))
+
+
+def injection_precheck_rules_digest(algorithm: str) -> str:
+    """对校验项名称数组取摘要，不加包装对象。"""
+    return content_digest(list(PRECHECK_ITEMS), algorithm=algorithm)
+
+
+def injection_precheck_category_entries(algorithm: str) -> tuple[tuple[str, str], ...]:
+    """注入前类别的封闭条目：版本与规则摘要。"""
+    return (
+        ("injection-precheck-version", "1"),
+        ("injection-precheck-rules-digest", injection_precheck_rules_digest(algorithm)),
+    )
 
 
 def _fail(item: str, detail: str) -> None:

@@ -147,4 +147,6 @@ def require_explicit_seed(value: object) -> int:
         raise IdentityMappingError("种子材料不得为空")
     if isinstance(value, bool) or not isinstance(value, int):
         raise IdentityMappingError("种子材料必须是整数")
+    if not 0 <= value < MATERIAL_KEY_UPPER_BOUND:
+        raise IdentityMappingError("种子材料超出取值范围")
     return value

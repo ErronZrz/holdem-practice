@@ -5,8 +5,7 @@
 也不是任何冻结工件。
 
 读取排布遵循结构规则：用途按遍历顺序、用途内部按索引升序；每手第 0 次发牌先给出一条
-与之同索引的被拒绝读取，随后一条同索引的接受读取。手号零填充，以便非定位字段按字符串
-比较时仍与数值顺序一致。
+与之同索引的被拒绝读取，随后一条同索引的接受读取。整数字段按无前导零十进制渲染。
 """
 
 from __future__ import annotations
@@ -17,10 +16,12 @@ from typing import Any
 from app.verification import (
     BASELINE_IDENTIFIER,
     DIGEST_ALGORITHMS,
-    EXECUTION_IDENTITY_CATEGORIES,
     INSTANTIATION_CALIBER_CATEGORY,
     READ_RECORD_ENCODINGS,
+    UNDER_TEST_IDENTIFIER,
     AuditedMaterials,
+    CampaignConfiguration,
+    CampaignLockVersions,
     ConstructionCaliber,
     ConstructionInterface,
     ConstructionMapping,
@@ -40,12 +41,25 @@ from app.verification import (
     SeatScope,
     ShrinkingDomain,
     TranscriptCommitment,
+    build_domain_run_spec,
     build_execution_identity_record,
     build_frozen_manifest,
     bytes_digest,
+    campaign_configuration_digest,
+    commitment_digest,
+    deal_mapping_digest,
+    injection_precheck_category_entries,
     instantiation_caliber_entries,
     manifest_digest,
+    materials_digest,
+    protocol_digest,
+    public_summary_mapping_digest,
+    purpose_index_mapping_digest,
     read_record_digest,
+    require_source_manifest,
+    runner_category_entries,
+    schedule_digest,
+    source_manifest_digest,
 )
 
 # 测试自建的牌规范序：先点数后花色，共一副牌。
@@ -68,12 +82,36 @@ TRAVERSAL_ORDER: tuple[str, ...] = (
     BASELINE_LABEL,
 )
 
-# 候选侧标识在构造计划阶段不需要真的存在；基线标识固定为单一基线身份。
-UNDER_TEST_IDENTIFIER = "mixed-local@8"
-
 # 测试自建的索引前缀、材料基数与被拒绝的原始值。
-CONFIGURATION = "cfg"
-BLOCK = "b1"
+# campaign 由夹具组成字段现算，只存在于本次进程，不作为实际配置摘要保存。
+BLOCK = "0"
+
+
+def fixture_lock_versions() -> CampaignLockVersions:
+    """夹具用的五个版本号。它们不是五个对象锁定之后的实际版本。"""
+    return CampaignLockVersions(
+        pairing_and_reset=1,
+        per_hand_bound=1,
+        fragment_template=1,
+        weight_class=1,
+        seat_rotation=1,
+    )
+
+
+def fixture_campaign(*, num_players: int = 3) -> str:
+    """夹具配置摘要。只供本进程内的索引键使用。"""
+    return campaign_configuration_digest(
+        num_players=num_players,
+        starting_stack=200,
+        small_blind=1,
+        big_blind=2,
+        baseline_identifier=BASELINE_IDENTIFIER,
+        under_test_identifier=UNDER_TEST_IDENTIFIER,
+        lock_versions=fixture_lock_versions(),
+    )
+
+
+CONFIGURATION = fixture_campaign()
 INDEX_PREFIX: tuple[str, ...] = (CONFIGURATION, BLOCK)
 NON_PROBED_BASE = 1000
 UNDER_TEST_BASE = 1 << 250
@@ -85,8 +123,8 @@ _Values = dict[tuple[str, tuple[str, ...]], int]
 
 
 def hand_field(hand: int) -> str:
-    """手号的渲染：零填充，保证按字符串比较时与数值顺序一致。"""
-    return f"{hand:02d}"
+    """手号的十进制渲染：不补零。"""
+    return str(hand)
 
 
 def purpose_specs(under_test_bits: int = 256) -> tuple[PurposeSpec, ...]:
@@ -95,7 +133,8 @@ def purpose_specs(under_test_bits: int = 256) -> tuple[PurposeSpec, ...]:
         PurposeSpec(
             role=PurposeRole.DEAL,
             label=DEAL_LABEL,
-            index_fields=("configuration", "block", "hand", DRAW_FIELD),
+            index_fields=("campaign", "block", "hand", DRAW_FIELD),
+            integer_fields=("block", "hand", DRAW_FIELD),
             draw_index_field=DRAW_FIELD,
             domain=ShrinkingDomain(initial_size=52),
             bit_width=8,
@@ -103,7 +142,8 @@ def purpose_specs(under_test_bits: int = 256) -> tuple[PurposeSpec, ...]:
         PurposeSpec(
             role=PurposeRole.NON_PROBED_SEED,
             label=NON_PROBED_LABEL,
-            index_fields=("configuration", "block", "hand", SEAT_FIELD),
+            index_fields=("campaign", "block", "hand", SEAT_FIELD),
+            integer_fields=("block", "hand", SEAT_FIELD),
             seat_index_field=SEAT_FIELD,
             domain=FixedDomain(size=1 << 64),
             bit_width=64,
@@ -111,14 +151,16 @@ def purpose_specs(under_test_bits: int = 256) -> tuple[PurposeSpec, ...]:
         PurposeSpec(
             role=PurposeRole.UNDER_TEST_MATERIAL,
             label=UNDER_TEST_LABEL,
-            index_fields=("configuration", "block", "hand"),
+            index_fields=("campaign", "block", "hand"),
+            integer_fields=("block", "hand"),
             domain=FixedDomain(size=1 << under_test_bits),
             bit_width=under_test_bits,
         ),
         PurposeSpec(
             role=PurposeRole.BASELINE_SEED,
             label=BASELINE_LABEL,
-            index_fields=("configuration", "block", "hand"),
+            index_fields=("campaign", "block", "hand"),
+            integer_fields=("block", "hand"),
             domain=FixedDomain(size=1 << 64),
             bit_width=64,
         ),
@@ -130,8 +172,9 @@ def protocol_spec(
 ) -> RandomizationProtocolSpec:
     """测试自建的协议规格；需要覆盖某一字段时按关键字替换。"""
     fields: dict[str, object] = {
-        "source_interface_id": "test-source-interface",
-        "environment_record": "测试环境记录",
+        "source_interface_id": "python-os-urandom@1",
+        "environment_record": "local-single-process-no-parallel@1",
+        "rejection_rule": "rejection-whole-multiple-truncation-v1",
         "purposes": purpose_specs(under_test_bits),
         "traversal_order": TRAVERSAL_ORDER,
         "commitment_form": "single-digest-seal",
@@ -164,7 +207,7 @@ def run_spec(
         HandPlan(hand_ordinal=hand, button=hand % num_players, probed_seat=probed_seat)
         for hand in range(1, hands + 1)
     )
-    return DomainRunSpec(
+    return build_domain_run_spec(
         num_players=num_players,
         starting_stack=200,
         small_blind=1,
@@ -175,6 +218,8 @@ def run_spec(
         deal=deal_spec(),
         protocol=protocol_spec(under_test_bits),
         schedule=schedule,
+        block=0,
+        campaign_configuration=CampaignConfiguration(lock_versions=fixture_lock_versions()),
     )
 
 
@@ -211,10 +256,120 @@ def construction_caliber(
     )
 
 
-def identity_categories() -> dict[str, list[tuple[str, str]]]:
-    """覆盖清单的六类占位条目：只用于结构类校验，不代表任何真实构造口径。"""
+def _manifest_row(path: str, digest: str) -> dict[str, str]:
+    return {"path": path, "sha256": digest}
+
+
+@dataclass(frozen=True)
+class SourceManifestSet:
+    """六份手造源码清单。文件摘要是占位十六进制，不是仓库源码的真实摘要。"""
+
+    runner: dict[str, object]
+    generator: dict[str, object]
+    engine: dict[str, object]
+    baseline_strategy: dict[str, object]
+    under_test_strategy: dict[str, object]
+    verification: dict[str, object]
+
+
+def fixture_source_manifests() -> SourceManifestSet:
+    """主链夹具使用的非实际清单。不读取这些路径上的文件。"""
+    return SourceManifestSet(
+        runner=hand_source_manifest("backend/app/verification/runner.py"),
+        generator=hand_source_manifest("backend/tools/material_generator.py"),
+        engine=hand_source_manifest("backend/fixtures/engine.py"),
+        baseline_strategy=hand_source_manifest("backend/fixtures/baseline.py"),
+        under_test_strategy=hand_source_manifest("backend/fixtures/under_test.py"),
+        verification=hand_source_manifest("backend/fixtures/verification.py"),
+    )
+
+
+def hand_source_manifest(entrypoint: str) -> dict[str, object]:
+    """手造源码清单。摘要是占位十六进制，不对应仓库里的真实文件。"""
+    digest = "11" * 32
+    require_source_manifest(
+        {
+            "schema": "source-manifest-v1",
+            "entrypoints": [entrypoint],
+            "python_version": "3.12.0",
+            "files": [_manifest_row(entrypoint, digest)],
+            "dependency_files": [
+                _manifest_row("backend/pyproject.toml", "22" * 32),
+                _manifest_row("backend/uv.lock", "33" * 32),
+            ],
+        }
+    )
     return {
-        name: [(f"{name}-entry", f"{name}-value")] for name in EXECUTION_IDENTITY_CATEGORIES
+        "schema": "source-manifest-v1",
+        "entrypoints": [entrypoint],
+        "python_version": "3.12.0",
+        "files": [_manifest_row(entrypoint, digest)],
+        "dependency_files": [
+            _manifest_row("backend/pyproject.toml", "22" * 32),
+            _manifest_row("backend/uv.lock", "33" * 32),
+        ],
+    }
+
+
+def identity_categories() -> dict[str, list[tuple[str, str]]]:
+    """六类封闭条目。实例化口径里的两份摘要是占位值，因此不能当作当前口径。"""
+    algorithm = DIGEST_ALGORITHMS[0]
+    placeholder = "ab" * 32
+    return {
+        "runner": list(
+            runner_category_entries(
+                hand_source_manifest("backend/app/verification/runner.py"),
+                algorithm=algorithm,
+            )
+        ),
+        "randomization-protocol": [
+            ("randomization-protocol-version", "1"),
+            ("randomization-protocol-digest", placeholder),
+            ("source-interface-id", "python-os-urandom@1"),
+            ("environment-record", "local-single-process-no-parallel@1"),
+            ("supplied-materials-digest", placeholder),
+            ("material-manifest-digest", placeholder),
+            ("audit-transcript-digest", placeholder),
+            ("audit-read-record-digest", placeholder),
+            ("audit-commitment-digest", placeholder),
+            ("generator-code-digest", placeholder),
+        ],
+        INSTANTIATION_CALIBER_CATEGORY: [
+            ("baseline-identifier", BASELINE_IDENTIFIER),
+            ("under-test-identifier", UNDER_TEST_IDENTIFIER),
+            ("baseline-interface", "registry-seed"),
+            ("under-test-interface", "material-key"),
+            ("baseline-requires-public-summary", "false"),
+            ("under-test-requires-public-summary", "true"),
+            ("baseline-seat-scope", "none"),
+            ("under-test-seat-scope", "probed-seat-only"),
+            ("baseline-registry-location", "app.strategy.registry.create_strategy"),
+            ("baseline-entry-point", "app.strategy.heuristic.HeuristicStrategy.__init__"),
+            ("baseline-parameter-layout", '["self","seed","samples","bluff_freq"]'),
+            ("baseline-effective-seed", "per-hand-arm_b-material"),
+            ("baseline-effective-samples", "500"),
+            ("baseline-effective-bluff-freq", "0.1"),
+            ("baseline-entry-code-digest", "cd" * 32),
+            ("construction-plan-digest", "ef" * 32),
+        ],
+        "injection-precheck": list(injection_precheck_category_entries(algorithm)),
+        "input-mapping": [
+            ("input-mapping-version", "1"),
+            ("campaign-configuration-digest", CONFIGURATION),
+            ("deal-mapping-digest", deal_mapping_digest(algorithm=algorithm)),
+            ("purpose-index-mapping-digest", purpose_index_mapping_digest(algorithm=algorithm)),
+            ("schedule-digest", placeholder),
+            (
+                "public-summary-mapping-digest",
+                public_summary_mapping_digest(algorithm=algorithm),
+            ),
+        ],
+        "engine-and-strategy-code": [
+            ("engine-code-manifest-digest", placeholder),
+            ("baseline-strategy-code-manifest-digest", placeholder),
+            ("under-test-strategy-code-manifest-digest", placeholder),
+            ("verification-code-manifest-digest", placeholder),
+        ],
     }
 
 
@@ -222,31 +377,106 @@ def caliber_categories(
     caliber: ConstructionCaliber,
     spec: DomainRunSpec,
     bundle: tuple[HandMaterials, ...],
+    audit: AuditedMaterials,
+    material_manifest: MaterialManifest,
+    manifests: SourceManifestSet,
 ) -> dict[str, list[tuple[str, str]]]:
-    """覆盖清单的六类条目：实例化口径一类取当前构造口径与重算计划的规范条目。"""
-    categories = identity_categories()
-    categories[INSTANTIATION_CALIBER_CATEGORY] = [
-        (name, value)
-        for name, value in instantiation_caliber_entries(
-            spec=spec,
-            caliber=caliber,
-            bundle=bundle,
-            algorithm=spec.protocol.digest_algorithm,
-        )
-    ]
-    return categories
+    """六类条目都按当前规格、材料、审计和手造清单重算，不保留占位摘要。"""
+    algorithm = spec.protocol.digest_algorithm
+    generator_digest = source_manifest_digest(manifests.generator, algorithm=algorithm)
+    campaign = campaign_configuration_digest(
+        num_players=spec.num_players,
+        starting_stack=spec.starting_stack,
+        small_blind=spec.small_blind,
+        big_blind=spec.big_blind,
+        baseline_identifier=spec.baseline_identifier,
+        under_test_identifier=spec.under_test_identifier,
+        lock_versions=spec.campaign_configuration.lock_versions,
+    )
+    return {
+        "runner": list(runner_category_entries(manifests.runner, algorithm=algorithm)),
+        "randomization-protocol": [
+            ("randomization-protocol-version", "1"),
+            ("randomization-protocol-digest", protocol_digest(spec.protocol)),
+            ("source-interface-id", spec.protocol.source_interface_id),
+            ("environment-record", spec.protocol.environment_record),
+            ("supplied-materials-digest", materials_digest(bundle, spec=spec, algorithm=algorithm)),
+            (
+                "material-manifest-digest",
+                manifest_digest(material_manifest, algorithm=algorithm),
+            ),
+            (
+                "audit-transcript-digest",
+                bytes_digest(audit.transcript, algorithm=algorithm),
+            ),
+            (
+                "audit-read-record-digest",
+                read_record_digest(
+                    audit.reads,
+                    encoding=spec.protocol.read_record_encoding,
+                    algorithm=algorithm,
+                ),
+            ),
+            ("audit-commitment-digest", commitment_digest(audit.commitment)),
+            ("generator-code-digest", generator_digest),
+        ],
+        INSTANTIATION_CALIBER_CATEGORY: [
+            (name, value)
+            for name, value in instantiation_caliber_entries(
+                spec=spec, caliber=caliber, bundle=bundle, algorithm=algorithm
+            )
+        ],
+        "injection-precheck": list(injection_precheck_category_entries(algorithm)),
+        "input-mapping": [
+            ("input-mapping-version", "1"),
+            ("campaign-configuration-digest", campaign),
+            ("deal-mapping-digest", deal_mapping_digest(algorithm=algorithm)),
+            (
+                "purpose-index-mapping-digest",
+                purpose_index_mapping_digest(algorithm=algorithm),
+            ),
+            ("schedule-digest", schedule_digest(spec)),
+            (
+                "public-summary-mapping-digest",
+                public_summary_mapping_digest(algorithm=algorithm),
+            ),
+        ],
+        "engine-and-strategy-code": [
+            (
+                "engine-code-manifest-digest",
+                source_manifest_digest(manifests.engine, algorithm=algorithm),
+            ),
+            (
+                "baseline-strategy-code-manifest-digest",
+                source_manifest_digest(manifests.baseline_strategy, algorithm=algorithm),
+            ),
+            (
+                "under-test-strategy-code-manifest-digest",
+                source_manifest_digest(manifests.under_test_strategy, algorithm=algorithm),
+            ),
+            (
+                "verification-code-manifest-digest",
+                source_manifest_digest(manifests.verification, algorithm=algorithm),
+            ),
+        ],
+    }
 
 
 def forged_caliber_categories(
     caliber: ConstructionCaliber,
     spec: DomainRunSpec,
     bundle: tuple[HandMaterials, ...],
+    audit: AuditedMaterials,
+    material_manifest: MaterialManifest,
+    manifests: SourceManifestSet,
     *,
     name: str,
     value: str,
 ) -> dict[str, list[tuple[str, str]]]:
     """把实例化口径类别中某一条取值换成别的值，供构造「记录与当前口径不一致」的反例。"""
-    categories = caliber_categories(caliber, spec, bundle)
+    categories = caliber_categories(
+        caliber, spec, bundle, audit, material_manifest, manifests
+    )
     categories[INSTANTIATION_CALIBER_CATEGORY] = [
         (entry_name, value if entry_name == name else entry_value)
         for entry_name, entry_value in categories[INSTANTIATION_CALIBER_CATEGORY]
@@ -384,6 +614,7 @@ def audit_from_plan(
     plan: _ReadPlan,
     *,
     manifest_digest_value: str = "generated-manifest-digest",
+    generator_code_digest: str = "ab" * 32,
 ) -> AuditedMaterials:
     """按读取计划拼出一份自洽的审计凭据。"""
     transcript = bytearray()
@@ -419,8 +650,8 @@ def audit_from_plan(
     commitment = TranscriptCommitment(
         source_interface_id=protocol.source_interface_id,
         environment_record=protocol.environment_record,
-        generation_started_at="2026-09-29T00:00:00Z",
-        generation_finished_at="2026-09-29T00:00:01Z",
+        generation_started_at="2026-09-29T00:00:00.000000Z",
+        generation_finished_at="2026-09-29T00:00:01.000000Z",
         traversal_order=protocol.traversal_order,
         entry_counts=tuple(
             (purpose.label, accepted[purpose.label]) for purpose in protocol.purposes
@@ -433,7 +664,7 @@ def audit_from_plan(
             reads, encoding=protocol.read_record_encoding, algorithm=protocol.digest_algorithm
         ),
         manifest_digest=manifest_digest_value,
-        generator_code_digest="generator-code-digest",
+        generator_code_digest=generator_code_digest,
         digest_algorithm=protocol.digest_algorithm,
         read_record_encoding=protocol.read_record_encoding,
         audit_format_version=protocol.audit_format_version,
@@ -453,6 +684,7 @@ class Fixture:
     audit: AuditedMaterials
     identity: ExecutionIdentityRecord
     material_manifest: MaterialManifest
+    source_manifests: SourceManifestSet
     manifest: FrozenRunManifest
 
 
@@ -477,13 +709,21 @@ def build_fixture(
         spec.protocol, scheme, num_players, under_test_value
     )
     algorithm = spec.protocol.digest_algorithm
+    manifests = fixture_source_manifests()
     audit = audit_from_plan(
         spec.protocol,
         read_plan(spec.protocol, scheme, num_players, under_test_value),
         manifest_digest_value=manifest_digest(material_manifest, algorithm=algorithm),
+        generator_code_digest=source_manifest_digest(
+            manifests.generator, algorithm=algorithm
+        ),
     )
     bundle = materials_bundle(scheme, num_players, under_test_value)
-    identity = build_execution_identity_record(caliber_categories(caliber, spec, bundle))
+    identity = build_execution_identity_record(
+        caliber_categories(
+            caliber, spec, bundle, audit, material_manifest, manifests
+        )
+    )
     return Fixture(
         spec=spec,
         caliber=caliber,
@@ -491,6 +731,7 @@ def build_fixture(
         audit=audit,
         identity=identity,
         material_manifest=material_manifest,
+        source_manifests=manifests,
         manifest=build_frozen_manifest(
             spec=spec,
             caliber=caliber,

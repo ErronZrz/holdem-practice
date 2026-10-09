@@ -54,3 +54,7 @@ class IdentityMappingError(VerificationError):
 
 class MaterialKeyError(IdentityMappingError):
     """主键材料不是恰好 32 字节的字节串。"""
+
+
+class SourceManifestError(VerificationError):
+    """源码清单的结构、路径或摘要不符合封闭规格。"""

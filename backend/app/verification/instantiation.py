@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import json
+import math
 import types
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -26,7 +28,7 @@ from app.strategy.heuristic import HeuristicStrategy
 from app.strategy.mixed_strategy import seat_style_map
 
 from .config import BASELINE_IDENTIFIER, DomainRunSpec, HandPlan
-from .digests import content_digest
+from .digests import bytes_digest, content_digest
 from .errors import IdentityMappingError, SpecIncompleteError
 from .execution_identity import INSTANTIATION_CALIBER_CATEGORY, ExecutionIdentityRecord
 from .identity import (
@@ -39,7 +41,12 @@ from .identity import (
     require_explicit_seed,
     require_identifier_match,
 )
-from .materials import HandMaterials, MaterialEntry, bundle_payload
+from .materials import (
+    HandMaterials,
+    MaterialEntry,
+    bundle_payload,
+    require_supplied_materials_order,
+)
 from .protocol import PurposeRole, RandomizationProtocolSpec
 
 # 基线身份的受控注册表构造位置：只作位置绑定与记录，本包不导入也不调用该模块。
@@ -48,6 +55,11 @@ BASELINE_REGISTRY_LOCATION = "app.strategy.registry.create_strategy"
 BASELINE_ENTRY_POINT = "HeuristicStrategy.__init__"
 # 基线执行口径必须携带的位置默认值：缺少任一项即失败，避免上游改动被静默记成空值。
 BASELINE_REQUIRED_DEFAULTS: tuple[str, ...] = ("seed", "samples", "bluff_freq")
+# 基线入口的固定文本与参数布局。实际种子不写在这条文本里。
+_BASELINE_ENTRY_LOCATION = "app.strategy.heuristic.HeuristicStrategy.__init__"
+_BASELINE_PARAMETER_LAYOUT = '["self","seed","samples","bluff_freq"]'
+_BASELINE_EFFECTIVE_SEED = "per-hand-arm_b-material"
+_PLAN_VALUE_UPPER_BOUND = 1 << 256
 
 
 class Arm(StrEnum):
@@ -132,14 +144,35 @@ def scope_seats(scope: SeatScope, *, num_players: int, probed_seat: int) -> tupl
     return tuple(range(num_players))
 
 
+def public_summary_mapping_payload() -> dict[str, object]:
+    """公开摘要映射的封闭载荷：被测座位、风格循环与被测座位风格。"""
+    return {
+        "schema": "public-summary-mapping-v1",
+        "requires_public_summary": True,
+        "seat_scope": "probed-seat-only",
+        "summary_seat_rule": "probed-seat-only",
+        "style_assignment": "ascending-seat-cyclic",
+        "style_cycle": ["tight", "aggressive", "calling"],
+        "probed_seat_style": "tight",
+    }
+
+
+def public_summary_mapping_digest(*, algorithm: str) -> str:
+    """按封闭载荷重算公开摘要映射的摘要。"""
+    return content_digest(public_summary_mapping_payload(), algorithm=algorithm)
+
+
 def probed_seat_style(scope: SeatScope, *, num_players: int, probed_seat: int) -> str:
     """给出该口径下被测座位实际得到的风格名，供记录实例化口径。"""
     seats = scope_seats(scope, num_players=num_players, probed_seat=probed_seat)
     return seat_style_map(seats)[probed_seat].value
 
 
-def materials_digest(bundle: Sequence[HandMaterials], *, algorithm: str) -> str:
-    """由材料束内容重算摘要：材料内容不同即摘要不同。"""
+def materials_digest(
+    bundle: Sequence[HandMaterials], *, spec: DomainRunSpec, algorithm: str
+) -> str:
+    """由材料束内容重算摘要。编码前先核对送交材料的次序与索引。"""
+    require_supplied_materials_order(spec, bundle)
     return content_digest(bundle_payload(bundle), algorithm=algorithm)
 
 
@@ -167,6 +200,7 @@ def _material_for_seat(
 
 def require_materials(spec: DomainRunSpec, bundle: Sequence[HandMaterials]) -> None:
     """校验材料束与规格一致：手数、逐手完整性、座位覆盖、取值域与协议声明。"""
+    require_supplied_materials_order(spec, bundle)
     if len(bundle) != len(spec.schedule):
         raise SpecIncompleteError("材料束必须与手序计划一一对应")
     protocol = spec.protocol
@@ -331,28 +365,85 @@ def plan_by_seat(plan: ArmConstructionPlan) -> Mapping[int, SeatConstructionEntr
     return {entry.seat: entry for entry in sorted(plan.entries, key=lambda item: item.seat)}
 
 
-def _value_token(value: object) -> str:
-    """把默认取值渲染成稳定的字符串表示：空值、布尔、整数与其余取值分开处理。"""
-    if value is None:
-        return "none"
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, int):
-        return str(value)
-    return repr(value)
+def _require_bluff_freq(value: object) -> None:
+    """诈唬频率只接受内建浮点 0.1：拒绝子类、非有限值、负零和其他数值类型。"""
+    if type(value) is not float:
+        raise IdentityMappingError("诈唬频率的类型必须是内建浮点")
+    if not math.isfinite(value):
+        raise IdentityMappingError("诈唬频率必须是有限值")
+    if value == 0.0 and math.copysign(1.0, value) < 0:
+        raise IdentityMappingError("诈唬频率不得为负零")
+    if value != 0.1:
+        raise IdentityMappingError("诈唬频率必须等于约定值")
 
 
 def _constant_payload(value: object) -> object:
-    """把代码对象常量转成可规范序列化的表示；嵌套代码对象递归展开。"""
-    if value is None or isinstance(value, bool | int | float | str):
+    """把代码对象常量转成可规范序列化的表示。浮点和未列明类型直接失败。"""
+    if value is None or isinstance(value, str):
         return value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        raise IdentityMappingError("代码常量不得包含浮点")
     if isinstance(value, bytes):
         return {"bytes": value.hex()}
     if isinstance(value, tuple):
         return [_constant_payload(item) for item in value]
     if isinstance(value, types.CodeType):
         return _code_payload(value)
-    return {"type": type(value).__name__}
+    raise IdentityMappingError("代码常量的类型不在允许范围内")
+
+
+def _encode_json(value: object, *, path: tuple[str, ...]) -> str:
+    """紧凑 JSON。走到诈唬频率时直接写入词法 0.1，不把该浮点交给通用编码器。"""
+    if path == ("positional_defaults",):
+        if not isinstance(value, dict):
+            raise IdentityMappingError("位置默认值必须是封闭映射")
+        _require_expected_defaults(value)
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for key in sorted(value):
+            if not isinstance(key, str):
+                raise IdentityMappingError("载荷映射的键必须是字符串")
+            child = (*path, key)
+            if child == ("positional_defaults", "bluff_freq"):
+                _require_bluff_freq(value[key])
+                encoded = "0.1"
+            else:
+                encoded = _encode_json(value[key], path=child)
+            parts.append(_json_text(key) + ":" + encoded)
+        separator = ","
+        return "{" + separator.join(parts) + "}"
+    if isinstance(value, list):
+        separator = ","
+        encoded_items = [_encode_json(item, path=path) for item in value]
+        return "[" + separator.join(encoded_items) + "]"
+    if isinstance(value, tuple):
+        return _encode_json(list(value), path=path)
+    return _json_text(value)
+
+
+def _json_text(value: object) -> str:
+    """标量的紧凑 JSON。浮点在这里失败，避免依赖运行时转换。"""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=True)
+    if isinstance(value, float):
+        raise IdentityMappingError("载荷中出现了未单独编码的浮点")
+    raise IdentityMappingError("载荷中出现了未列明的类型")
+
+
+def encode_baseline_entry_payload(payload: Mapping[str, object]) -> bytes:
+    """把基线入口载荷编成字节。诈唬频率固定写成词法 0.1。"""
+    text = _encode_json(dict(payload), path=())
+    return text.encode("utf-8")
 
 
 def _code_payload(code: types.CodeType) -> dict[str, object]:
@@ -387,7 +478,12 @@ def _positional_defaults(function: types.FunctionType) -> tuple[tuple[str, objec
 def _entry_point_payload() -> dict[str, object]:
     """基线实现入口的规范载荷：模块、限定名、参数布局、默认值与代码对象载荷。"""
     function = HeuristicStrategy.__init__
-    defaults = {name: _constant_payload(value) for name, value in _positional_defaults(function)}
+    raw = {name: value for name, value in _positional_defaults(function)}
+    _require_expected_defaults(raw)
+    defaults = {
+        name: value if name == "bluff_freq" else _constant_payload(value)
+        for name, value in raw.items()
+    }
     return {
         "module": function.__module__,
         "qualname": function.__qualname__,
@@ -396,11 +492,19 @@ def _entry_point_payload() -> dict[str, object]:
     }
 
 
-def _require_expected_defaults(defaults: dict[str, object]) -> None:
-    """基线入口必须带有预期的位置默认值：上游改动导致参数缺失即失败，不静默记成空值。"""
-    for name in BASELINE_REQUIRED_DEFAULTS:
-        if name not in defaults:
-            raise IdentityMappingError(f"基线入口的位置默认值缺少参数：{name!r}")
+def _require_expected_defaults(defaults: Mapping[str, object]) -> None:
+    """位置默认值只允许种子、采样数与诈唬频率，并且取值固定。
+
+    多一个参数、少一个参数，或把种子、采样数改成别的值，都不能再生成这一版载荷。
+    """
+    if set(defaults) != set(BASELINE_REQUIRED_DEFAULTS):
+        raise IdentityMappingError("基线入口的位置默认值字段不封闭")
+    if defaults["seed"] is not None:
+        raise IdentityMappingError("基线入口的种子默认值必须为空")
+    samples = defaults["samples"]
+    if type(samples) is not int or samples != 500:
+        raise IdentityMappingError("基线入口的采样数默认值必须是 500")
+    _require_bluff_freq(defaults["bluff_freq"])
 
 
 def _baseline_execution_payload(algorithm: str) -> dict[str, object]:
@@ -414,7 +518,7 @@ def _baseline_execution_payload(algorithm: str) -> dict[str, object]:
         "identifier": BASELINE_IDENTIFIER,
         "registry_location": BASELINE_REGISTRY_LOCATION,
         "entry_point": entry,
-        "entry_digest": content_digest(entry, algorithm=algorithm),
+        "entry_digest": bytes_digest(encode_baseline_entry_payload(entry), algorithm=algorithm),
     }
 
 
@@ -425,23 +529,35 @@ def _baseline_execution_entries(algorithm: str) -> tuple[tuple[str, str], ...]:
     defaults = {name: value for name, value in _positional_defaults(function)}
     _require_expected_defaults(defaults)
     location = f"{function.__module__}.{function.__qualname__}"
-    if not location.endswith(BASELINE_ENTRY_POINT):
+    if location != _BASELINE_ENTRY_LOCATION:
         raise IdentityMappingError(f"基线入口的位置与预期不符：{location!r}")
-    layout = code.co_varnames[: code.co_argcount + code.co_kwonlyargcount]
-    separator = ","
-    layout_text = separator.join(layout)
+    layout = list(code.co_varnames[: code.co_argcount + code.co_kwonlyargcount])
+    layout_text = json.dumps(layout, separators=(",", ":"), ensure_ascii=True)
+    if layout_text != _BASELINE_PARAMETER_LAYOUT:
+        raise IdentityMappingError("基线参数布局与锁定值不一致")
     return (
         ("baseline-registry-location", BASELINE_REGISTRY_LOCATION),
         ("baseline-entry-point", location),
         ("baseline-parameter-layout", layout_text),
-        ("baseline-effective-seed", _value_token(defaults["seed"])),
-        ("baseline-effective-samples", _value_token(defaults["samples"])),
-        ("baseline-effective-bluff-freq", _value_token(defaults["bluff_freq"])),
+        ("baseline-effective-seed", _BASELINE_EFFECTIVE_SEED),
+        ("baseline-effective-samples", "500"),
+        ("baseline-effective-bluff-freq", "0.1"),
         (
             "baseline-entry-code-digest",
-            content_digest(_entry_point_payload(), algorithm=algorithm),
+            bytes_digest(
+                encode_baseline_entry_payload(_entry_point_payload()), algorithm=algorithm
+            ),
         ),
     )
+
+
+def _require_plan_material_value(value: object) -> int:
+    """构造计划里的材料取值必须是取值范围内的整数，空值、布尔和非整数都拒绝。"""
+    if value is None or isinstance(value, bool) or not isinstance(value, int):
+        raise IdentityMappingError("构造计划中的材料取值必须是整数")
+    if not 0 <= value < _PLAN_VALUE_UPPER_BOUND:
+        raise IdentityMappingError("构造计划中的材料取值超出范围")
+    return value
 
 
 def _seat_payload(entry: SeatConstructionEntry) -> dict[str, object]:
@@ -456,7 +572,7 @@ def _seat_payload(entry: SeatConstructionEntry) -> dict[str, object]:
         "material": {
             "purpose_label": entry.material.purpose_label,
             "index_key": list(entry.material.index_key),
-            "value": entry.material.value,
+            "value": _require_plan_material_value(entry.material.value),
         },
     }
 

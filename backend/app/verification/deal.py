@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.poker.cards import Card, Rank, Suit, card_from_str
 
+from .digests import content_digest
 from .errors import DealMaterialError
 
 # 一副牌的张数、每座位底牌张数与公共牌张数；三者共同决定一手牌所需的抽取次数。
@@ -69,8 +70,12 @@ class HandDeal:
 
 
 def _require_player_count(num_players: int) -> None:
-    if isinstance(num_players, bool) or not isinstance(num_players, int) or num_players < 2:
-        raise DealMaterialError("人数必须是不小于 2 的整数")
+    if (
+        isinstance(num_players, bool)
+        or not isinstance(num_players, int)
+        or not 2 <= num_players <= 23
+    ):
+        raise DealMaterialError("人数必须是 2 到 23 的整数")
 
 
 def draw_order(spec: DealMappingSpec, steps: Sequence[int]) -> tuple[Card, ...]:
@@ -113,3 +118,33 @@ def deal_for_hand(
         hole_cards=hole_cards,
         board=drawn[HOLE_CARDS_PER_SEAT * num_players :],
     )
+
+
+# 发牌映射摘要的封闭牌序：规范位置 0…51，与映射载荷一起重算，不读取调用方牌序。
+_LOCKED_DECK_ORDER: tuple[str, ...] = (
+    "2c", "3c", "4c", "5c", "6c", "7c", "8c", "9c", "Tc", "Jc", "Qc", "Kc", "Ac",
+    "2d", "3d", "4d", "5d", "6d", "7d", "8d", "9d", "Td", "Jd", "Qd", "Kd", "Ad",
+    "2h", "3h", "4h", "5h", "6h", "7h", "8h", "9h", "Th", "Jh", "Qh", "Kh", "Ah",
+    "2s", "3s", "4s", "5s", "6s", "7s", "8s", "9s", "Ts", "Js", "Qs", "Ks", "As",
+)
+
+
+def deal_mapping_payload() -> dict[str, object]:
+    """发牌映射的封闭载荷：牌序、人数边界与分配规则，不含某次运行的实际人数。"""
+    return {
+        "schema": "deal-mapping-v1",
+        "deck_order": list(_LOCKED_DECK_ORDER),
+        "player_count_min": 2,
+        "player_count_max": 23,
+        "deck_size": DECK_SIZE,
+        "hole_cards_per_seat": HOLE_CARDS_PER_SEAT,
+        "board_size": BOARD_SIZE,
+        "draw_rule": "swap-without-replacement-v1",
+        "hole_card_allocation": "seat-ascending-consecutive-v1",
+        "board_order": ["flop", "flop", "flop", "turn", "river"],
+    }
+
+
+def deal_mapping_digest(*, algorithm: str) -> str:
+    """按封闭载荷重算发牌映射摘要。"""
+    return content_digest(deal_mapping_payload(), algorithm=algorithm)

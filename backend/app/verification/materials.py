@@ -10,9 +10,13 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .digests import content_digest
-from .errors import SpecIncompleteError
+from .errors import ProtocolAuditError, ProtocolSpecError, SpecIncompleteError
+
+if TYPE_CHECKING:
+    from .config import DomainRunSpec
 
 
 @dataclass(frozen=True)
@@ -80,6 +84,40 @@ class HandMaterials:
 def bundle_payload(bundle: Sequence[HandMaterials]) -> list[dict[str, object]]:
     """材料束的规范编码：按给定次序逐手展开。"""
     return [hand.canonical_payload() for hand in bundle]
+
+
+def require_supplied_materials_order(
+    spec: DomainRunSpec, bundle: Sequence[HandMaterials]
+) -> None:
+    """送交材料必须逐手对应计划，手内按用途次序和完整索引升序，每手条数固定。"""
+    protocol = spec.protocol
+    if len(bundle) != len(spec.schedule):
+        raise SpecIncompleteError("材料束必须与手序计划一一对应")
+    expected_count = 3 * spec.num_players + 6
+    purpose_order = {label: index for index, label in enumerate(protocol.traversal_order)}
+    for plan, hand in zip(spec.schedule, bundle, strict=True):
+        if hand.hand_ordinal != plan.hand_ordinal:
+            raise SpecIncompleteError("材料束的块内手序必须与手序计划一致")
+        if len(hand.entries) != expected_count:
+            raise SpecIncompleteError("每手材料条数与人数不符")
+        positions: list[tuple[int, tuple[int | str, ...]]] = []
+        for entry in hand.entries:
+            try:
+                purpose = protocol.purpose_for_label(entry.purpose_label)
+                if purpose.field_text(entry.index_key, "campaign") != spec.campaign:
+                    raise SpecIncompleteError("索引中的 campaign 与规格不一致")
+                if purpose.field_integer(entry.index_key, "block") != spec.block:
+                    raise SpecIncompleteError("索引中的 block 与规格不一致")
+                hand_number = purpose.field_integer(entry.index_key, "hand")
+                if hand_number != plan.hand_ordinal or hand_number != hand.hand_ordinal:
+                    raise SpecIncompleteError("索引中的 hand 必须与两处手序一致")
+                positions.append(
+                    (purpose_order[entry.purpose_label], purpose.index_order_key(entry.index_key))
+                )
+            except (ProtocolSpecError, ProtocolAuditError) as error:
+                raise SpecIncompleteError(f"材料索引不合规：{error}") from error
+        if len(positions) != len(set(positions)) or positions != sorted(positions):
+            raise SpecIncompleteError("手内材料必须按用途遍历顺序与索引升序排列")
 
 
 @dataclass(frozen=True)
