@@ -603,6 +603,9 @@ def test_baseline_execution_caliber_comes_from_strategy_code() -> None:
     assert entries["baseline-effective-samples"] == "500"
     assert entries["baseline-effective-bluff-freq"] == "0.1"
     assert entries["baseline-effective-seed"] == "per-hand-arm_b-material"
+    assert entries["arm-b-seed-scope-conflict"] == (
+        "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material"
+    )
     assert len(entries["baseline-entry-code-digest"]) == 64
     assert entries["baseline-requires-public-summary"] == "false"
     assert entries["baseline-seat-scope"] == "none"

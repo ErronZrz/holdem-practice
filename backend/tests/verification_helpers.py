@@ -359,7 +359,7 @@ def identity_categories() -> dict[str, list[tuple[str, str]]]:
             ("baseline-effective-seed", "per-hand-arm_b-material"),
             (
                 "arm-b-seed-scope-conflict",
-                "pending:per-hand-arm_b-material-vs-per-kappa-arm_b",
+                "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material",
             ),
             ("baseline-effective-samples", "500"),
             ("baseline-effective-bluff-freq", "0.1"),
@@ -418,7 +418,12 @@ def caliber_categories(
             ("randomization-protocol-digest", protocol_digest(spec.protocol)),
             ("source-interface-id", spec.protocol.source_interface_id),
             ("environment-record", spec.protocol.environment_record),
-            ("supplied-materials-digest", materials_digest(bundle, spec=spec, algorithm=algorithm)),
+            (
+                "supplied-materials-digest",
+                materials_digest(
+                    bundle, spec=spec, algorithm=algorithm, closed_entries=closed_entries
+                ),
+            ),
             (
                 "material-manifest-digest",
                 manifest_digest(material_manifest, algorithm=algorithm),
@@ -450,7 +455,11 @@ def caliber_categories(
         INSTANTIATION_CALIBER_CATEGORY: [
             (name, value)
             for name, value in instantiation_caliber_entries(
-                spec=spec, caliber=caliber, bundle=bundle, algorithm=algorithm
+                spec=spec,
+                caliber=caliber,
+                bundle=bundle,
+                algorithm=algorithm,
+                closed_entries=closed_entries,
             )
         ],
         "injection-precheck": list(injection_precheck_category_entries(algorithm)),
@@ -1089,6 +1098,7 @@ def build_v2_frozen_fixture(
             audit=audit,
             execution_identity=identity,
             material_manifest=material_manifest,
+            closed_entries=rows,
         ),
     )
     return fixture, rows

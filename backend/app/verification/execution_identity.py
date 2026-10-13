@@ -21,7 +21,26 @@ from .errors import SpecIncompleteError
 from .identity import ConstructionInterface, SeatScope
 
 _DIGEST_ALGORITHM = "sha256"
-ARM_B_SCOPE_CONFLICT = "pending:per-hand-arm_b-material-vs-per-kappa-arm_b"
+SEED_SENTENCE_V1 = "per-hand-arm_b-material"
+SEED_SENTENCE_V2 = "per-kappa-arm_b-material"
+ARM_B_SCOPE_CONFLICT = (
+    "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material"
+)
+# 两种协议都能读到的普通文本。来源句仍按协议分开，不在这里合成一句。
+KNOWN_PLAIN_TEXTS: frozenset[str] = frozenset(
+    {
+        "heuristic@1",
+        "mixed-local@9",
+        "app.strategy.registry.create_strategy",
+        "app.strategy.heuristic.HeuristicStrategy.__init__",
+        "python-os-urandom@1",
+        "local-single-process-no-parallel@1",
+        SEED_SENTENCE_V1,
+        SEED_SENTENCE_V2,
+        ARM_B_SCOPE_CONFLICT,
+    }
+)
+_SEED_SENTENCES = frozenset({SEED_SENTENCE_V1, SEED_SENTENCE_V2})
 _RUNNER_ENTRIES: tuple[str, ...] = (
     "runner-flow-version",
     "runner-flow-digest",
@@ -94,7 +113,6 @@ _FIXED_TEXT: dict[str, str] = {
     "baseline-entry-point": "app.strategy.heuristic.HeuristicStrategy.__init__",
     "source-interface-id": "python-os-urandom@1",
     "environment-record": "local-single-process-no-parallel@1",
-    "baseline-effective-seed": "per-hand-arm_b-material",
     "arm-b-seed-scope-conflict": ARM_B_SCOPE_CONFLICT,
 }
 _VERSION_ENTRIES: frozenset[str] = frozenset(
@@ -239,6 +257,11 @@ def _determined_digest(name: str) -> str:
 
 def _require_entry_value(name: str, value: str) -> None:
     """按条目种类核对渲染：固定文本、版本、布尔、枚举、整数、摘要与两个可重算摘要。"""
+    if name == "baseline-effective-seed":
+        _require_visible_ascii(value)
+        if value not in _SEED_SENTENCES:
+            raise SpecIncompleteError(f"固定文本与锁定值不符：{name}")
+        return
     if name in _FIXED_TEXT:
         _require_visible_ascii(value)
         if value != _FIXED_TEXT[name]:

@@ -33,7 +33,7 @@ from app.verification import (
     require_explicit_seed,
 )
 from app.verification.deal import _require_player_count
-from app.verification.execution_identity import _CLOSED_ENTRIES
+from app.verification.execution_identity import _CLOSED_ENTRIES, KNOWN_PLAIN_TEXTS
 from app.verification.instantiation import (
     _constant_payload,
     _require_bluff_freq,
@@ -167,6 +167,11 @@ def test_closed_categories_contain_forty_five_entries() -> None:
     record = build_execution_identity_record(identity_categories())
     assert [name for name, _ in record.categories] == list(_CLOSED_ENTRIES)
     assert sum(len(entries) for _, entries in record.categories) == 45
+    assert "per-hand-arm_b-material" in KNOWN_PLAIN_TEXTS
+    assert "per-kappa-arm_b-material" in KNOWN_PLAIN_TEXTS
+    assert "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material" in KNOWN_PLAIN_TEXTS
+    assert "pending:per-hand-arm_b-material-vs-per-kappa-arm_b" not in KNOWN_PLAIN_TEXTS
+    assert len(KNOWN_PLAIN_TEXTS) == 9
 
 
 def test_bluff_freq_encoding_rejects_other_numeric_forms() -> None:

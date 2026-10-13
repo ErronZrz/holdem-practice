@@ -916,6 +916,7 @@ def verify_manifest_binding(
     bundle: Sequence[HandMaterials],
     commitment: TranscriptCommitment,
     spec: DomainRunSpec,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> None:
     """三步链：材料清单 ↔ 审计中被接受的取值 ↔ 送交材料，并与承诺里的清单摘要比对。
 
@@ -925,7 +926,7 @@ def verify_manifest_binding(
     """
     if protocol is not spec.protocol:
         raise MaterialBindingError("绑定的协议必须就是规格上的协议")
-    require_supplied_materials_order(spec, bundle)
+    require_supplied_materials_order(spec, bundle, closed_entries=closed_entries)
     require_manifest_consistent(protocol, manifest)
     declared = manifest.entry_map()
     if commitment.manifest_digest != manifest_digest(

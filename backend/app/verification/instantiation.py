@@ -33,6 +33,8 @@ from .errors import IdentityMappingError, SpecIncompleteError
 from .execution_identity import (
     ARM_B_SCOPE_CONFLICT,
     INSTANTIATION_CALIBER_CATEGORY,
+    SEED_SENTENCE_V1,
+    SEED_SENTENCE_V2,
     ExecutionIdentityRecord,
 )
 from .identity import (
@@ -51,7 +53,7 @@ from .materials import (
     bundle_payload,
     require_supplied_materials_order,
 )
-from .protocol import PurposeRole, RandomizationProtocolSpec
+from .protocol import PROTOCOL_SCHEMA_V2, PurposeRole, RandomizationProtocolSpec
 
 # 基线身份的受控注册表构造位置：只作位置绑定与记录，本包不导入也不调用该模块。
 BASELINE_REGISTRY_LOCATION = "app.strategy.registry.create_strategy"
@@ -62,7 +64,6 @@ BASELINE_REQUIRED_DEFAULTS: tuple[str, ...] = ("seed", "samples", "bluff_freq")
 # 基线入口的固定文本与参数布局。实际种子不写在这条文本里。
 _BASELINE_ENTRY_LOCATION = "app.strategy.heuristic.HeuristicStrategy.__init__"
 _BASELINE_PARAMETER_LAYOUT = '["self","seed","samples","bluff_freq"]'
-_BASELINE_EFFECTIVE_SEED = "per-hand-arm_b-material"
 _PLAN_VALUE_UPPER_BOUND = 1 << 256
 
 
@@ -111,7 +112,11 @@ def require_material_format(mapping: ConstructionMapping, value: int) -> None:
 
 
 def require_construction_calibers(
-    spec: DomainRunSpec, caliber: ConstructionCaliber, bundle: Sequence[HandMaterials]
+    spec: DomainRunSpec,
+    caliber: ConstructionCaliber,
+    bundle: Sequence[HandMaterials],
+    *,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> None:
     """身份相关硬校验，全部纳入冻结输入主链。
 
@@ -119,6 +124,9 @@ def require_construction_calibers(
     并为每个臂、每一手构造座位计划（计划同时校验材料与座位的对应关系）。
     """
     require_caliber_matches_spec(spec, caliber)
+    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+        _require_v2_construction(spec, caliber, bundle, closed_entries)
+        return
     protocol = spec.protocol
     baseline = require_registry_seed_mapping(caliber.baseline)
     under_test = caliber.under_test
@@ -173,10 +181,14 @@ def probed_seat_style(scope: SeatScope, *, num_players: int, probed_seat: int) -
 
 
 def materials_digest(
-    bundle: Sequence[HandMaterials], *, spec: DomainRunSpec, algorithm: str
+    bundle: Sequence[HandMaterials],
+    *,
+    spec: DomainRunSpec,
+    algorithm: str,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> str:
     """由材料束内容重算摘要。编码前先核对送交材料的次序与索引。"""
-    require_supplied_materials_order(spec, bundle)
+    require_supplied_materials_order(spec, bundle, closed_entries=closed_entries)
     return content_digest(bundle_payload(bundle), algorithm=algorithm)
 
 
@@ -202,9 +214,16 @@ def _material_for_seat(
     raise SpecIncompleteError(f"座位 {seat} 缺少非被测材料")
 
 
-def require_materials(spec: DomainRunSpec, bundle: Sequence[HandMaterials]) -> None:
+def require_materials(
+    spec: DomainRunSpec,
+    bundle: Sequence[HandMaterials],
+    *,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
+) -> None:
     """校验材料束与规格一致：手数、逐手完整性、座位覆盖、取值域与协议声明。"""
-    require_supplied_materials_order(spec, bundle)
+    require_supplied_materials_order(spec, bundle, closed_entries=closed_entries)
+    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+        return
     if len(bundle) != len(spec.schedule):
         raise SpecIncompleteError("材料束必须与手序计划一一对应")
     protocol = spec.protocol
@@ -264,6 +283,8 @@ class SeatConstructionEntry:
     requires_public_summary: bool
     seat_scope: SeatScope | None
     material: MaterialEntry
+    # 多条材料时按决策序号的整数值排列。空元组表示该座位仍是单条材料。
+    materials: tuple[MaterialEntry, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -287,12 +308,195 @@ class ArmConstructionPlan:
         raise SpecIncompleteError(f"构造计划不含该座位：{seat}")
 
 
+def _ordered_slice(
+    materials: HandMaterials,
+    protocol: RandomizationProtocolSpec,
+    label: str,
+    *,
+    seat: int | None,
+) -> tuple[MaterialEntry, ...]:
+    """取出一个用途在该座位上的全部材料，并按完整键的整数序排列。"""
+    purpose = protocol.purpose_for_label(label)
+    chosen = [
+        entry
+        for entry in materials.entries_for(label)
+        if seat is None or purpose.seat_index_of(entry.index_key) == seat
+    ]
+    chosen.sort(key=lambda item: purpose.index_order_key(item.index_key))
+    if not chosen:
+        raise SpecIncompleteError("该座位缺少材料")
+    return tuple(chosen)
+
+
+def _closed_keys(
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]],
+    protocol: RandomizationProtocolSpec,
+    *,
+    hand_ordinal: int,
+    label: str,
+    seat: int | None,
+) -> set[tuple[str, ...]]:
+    purpose = protocol.purpose_for_label(label)
+    keys: set[tuple[str, ...]] = set()
+    for item_label, index_key in closed_entries:
+        if item_label != label:
+            continue
+        if purpose.field_integer(index_key, "hand") != hand_ordinal:
+            continue
+        if seat is not None and purpose.seat_index_of(index_key) != seat:
+            continue
+        keys.add(index_key)
+    return keys
+
+
+def _require_slice(
+    chosen: Sequence[MaterialEntry],
+    expected: set[tuple[str, ...]],
+) -> None:
+    actual = {entry.index_key for entry in chosen}
+    if actual != expected:
+        raise SpecIncompleteError("座位材料与闭合集切片不一致")
+
+
+def _v2_arm_plan(
+    spec: DomainRunSpec,
+    caliber: ConstructionCaliber,
+    arm: Arm,
+    plan: HandPlan,
+    materials: HandMaterials,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None,
+) -> ArmConstructionPlan:
+    """逐座位放入闭合集切片。两臂的非被测座位使用同一组材料。"""
+    if closed_entries is None:
+        raise SpecIncompleteError("这一版构造计划必须对照闭合集")
+    protocol = spec.protocol
+    baseline = require_registry_seed_mapping(caliber.baseline)
+    under_test = caliber.under_test
+    entries: list[SeatConstructionEntry] = []
+    summary_seats: list[int] = []
+    summary_scope: tuple[int, ...] = ()
+    style: str | None = None
+    for seat in range(spec.num_players):
+        if seat != plan.probed_seat:
+            chosen = _ordered_slice(
+                materials, protocol, "non_probed", seat=seat
+            )
+            _require_slice(
+                chosen,
+                _closed_keys(
+                    closed_entries,
+                    protocol,
+                    hand_ordinal=plan.hand_ordinal,
+                    label="non_probed",
+                    seat=seat,
+                ),
+            )
+            entries.append(
+                SeatConstructionEntry(
+                    seat=seat,
+                    role=SeatRole.NON_PROBED,
+                    identifier=baseline.identifier,
+                    interface=baseline.interface,
+                    requires_public_summary=baseline.requires_public_summary,
+                    seat_scope=baseline.seat_scope,
+                    material=chosen[0],
+                    materials=chosen,
+                )
+            )
+            continue
+        if arm is Arm.BASELINE:
+            chosen = _ordered_slice(materials, protocol, "arm_b", seat=seat)
+            _require_slice(
+                chosen,
+                _closed_keys(
+                    closed_entries,
+                    protocol,
+                    hand_ordinal=plan.hand_ordinal,
+                    label="arm_b",
+                    seat=seat,
+                ),
+            )
+            entries.append(
+                SeatConstructionEntry(
+                    seat=seat,
+                    role=SeatRole.PROBED_BASELINE,
+                    identifier=baseline.identifier,
+                    interface=baseline.interface,
+                    requires_public_summary=baseline.requires_public_summary,
+                    seat_scope=baseline.seat_scope,
+                    material=chosen[0],
+                    materials=chosen,
+                )
+            )
+            continue
+        chosen = _ordered_slice(materials, protocol, "arm_m", seat=None)
+        _require_slice(
+            chosen,
+            _closed_keys(
+                closed_entries,
+                protocol,
+                hand_ordinal=plan.hand_ordinal,
+                label="arm_m",
+                seat=None,
+            ),
+        )
+        scope: SeatScope | None = None
+        if under_test.requires_public_summary:
+            if under_test.seat_scope is None:
+                raise IdentityMappingError("依赖公开摘要的身份必须给出座位集合口径")
+            scope = under_test.seat_scope
+            summary_seats.append(seat)
+            summary_scope = scope_seats(scope, num_players=spec.num_players, probed_seat=seat)
+            style = probed_seat_style(scope, num_players=spec.num_players, probed_seat=seat)
+        entries.append(
+            SeatConstructionEntry(
+                seat=seat,
+                role=SeatRole.PROBED_UNDER_TEST,
+                identifier=under_test.identifier,
+                interface=under_test.interface,
+                requires_public_summary=under_test.requires_public_summary,
+                seat_scope=scope,
+                material=chosen[0],
+                materials=chosen,
+            )
+        )
+    return ArmConstructionPlan(
+        arm=arm,
+        entries=tuple(entries),
+        summary_seats=tuple(summary_seats),
+        summary_scope=summary_scope,
+        probed_seat_style=style,
+    )
+
+
+def _require_v2_construction(
+    spec: DomainRunSpec,
+    caliber: ConstructionCaliber,
+    bundle: Sequence[HandMaterials],
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None,
+) -> None:
+    """逐条核对切片里的整数，不把多条材料收成一条。"""
+    baseline = require_registry_seed_mapping(caliber.baseline)
+    under_test = caliber.under_test
+    for plan, materials in zip(spec.schedule, bundle, strict=True):
+        for arm in (Arm.UNDER_TEST, Arm.BASELINE):
+            arm_plan = build_arm_construction_plan(
+                spec, caliber, arm, plan, materials, closed_entries=closed_entries
+            )
+            for entry in arm_plan.entries:
+                mapping = under_test if entry.role is SeatRole.PROBED_UNDER_TEST else baseline
+                for item in entry.materials:
+                    require_material_format(mapping, item.value)
+
+
 def build_arm_construction_plan(
     spec: DomainRunSpec,
     caliber: ConstructionCaliber,
     arm: Arm,
     plan: HandPlan,
     materials: HandMaterials,
+    *,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> ArmConstructionPlan:
     """按显式构造口径给出一个臂在本手的逐座位构造计划。
 
@@ -300,6 +504,8 @@ def build_arm_construction_plan(
     在候选一臂用候选侧的构造映射与其材料。本函数不构造任何实例。
     """
     require_caliber_matches_spec(spec, caliber)
+    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+        return _v2_arm_plan(spec, caliber, arm, plan, materials, closed_entries)
     protocol = spec.protocol
     baseline = require_registry_seed_mapping(caliber.baseline)
     under_test = caliber.under_test
@@ -526,7 +732,16 @@ def _baseline_execution_payload(algorithm: str) -> dict[str, object]:
     }
 
 
-def _baseline_execution_entries(algorithm: str) -> tuple[tuple[str, str], ...]:
+def _seed_sentence(spec: DomainRunSpec) -> str:
+    """按协议选择基线种子的来源句。两句不能互换。"""
+    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+        return SEED_SENTENCE_V2
+    return SEED_SENTENCE_V1
+
+
+def _baseline_execution_entries(
+    algorithm: str, spec: DomainRunSpec
+) -> tuple[tuple[str, str], ...]:
     """基线执行口径的规范条目：位置、参数布局、有效取值与代码对象载荷摘要。"""
     function = HeuristicStrategy.__init__
     code = function.__code__
@@ -543,7 +758,7 @@ def _baseline_execution_entries(algorithm: str) -> tuple[tuple[str, str], ...]:
         ("baseline-registry-location", BASELINE_REGISTRY_LOCATION),
         ("baseline-entry-point", location),
         ("baseline-parameter-layout", layout_text),
-        ("baseline-effective-seed", _BASELINE_EFFECTIVE_SEED),
+        ("baseline-effective-seed", _seed_sentence(spec)),
         (
             "arm-b-seed-scope-conflict",
             ARM_B_SCOPE_CONFLICT,
@@ -568,33 +783,51 @@ def _require_plan_material_value(value: object) -> int:
     return value
 
 
-def _seat_payload(entry: SeatConstructionEntry) -> dict[str, object]:
-    """一个座位的构造口径规范编码。"""
+def _material_record(entry: MaterialEntry) -> dict[str, object]:
+    """摘要只记录用途、索引和整数，不抄采样数或诈唬频率。"""
     return {
+        "purpose_label": entry.purpose_label,
+        "index_key": list(entry.index_key),
+        "value": _require_plan_material_value(entry.value),
+    }
+
+
+def _seat_payload(entry: SeatConstructionEntry, *, multiple: bool) -> dict[str, object]:
+    """一个座位的构造口径规范编码。"""
+    payload: dict[str, object] = {
         "seat": entry.seat,
         "role": entry.role.value,
         "identifier": entry.identifier,
         "interface": entry.interface.value,
         "requires_public_summary": entry.requires_public_summary,
         "seat_scope": None if entry.seat_scope is None else entry.seat_scope.value,
-        "material": {
-            "purpose_label": entry.material.purpose_label,
-            "index_key": list(entry.material.index_key),
-            "value": _require_plan_material_value(entry.material.value),
-        },
     }
+    if multiple:
+        payload["materials"] = [_material_record(item) for item in entry.materials]
+    else:
+        payload["material"] = _material_record(entry.material)
+    return payload
 
 
 def plan_payload(
-    *, spec: DomainRunSpec, caliber: ConstructionCaliber, bundle: Sequence[HandMaterials]
-) -> list[dict[str, object]]:
+    *,
+    spec: DomainRunSpec,
+    caliber: ConstructionCaliber,
+    bundle: Sequence[HandMaterials],
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
+) -> list[dict[str, object]] | dict[str, object]:
     """逐手逐臂逐座位的构造计划规范编码：由显式构造口径唯一确定。"""
     if len(bundle) != len(spec.schedule):
         raise SpecIncompleteError("材料束必须与手序计划一一对应")
+    multiple = spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2
+    if multiple:
+        require_supplied_materials_order(spec, bundle, closed_entries=closed_entries)
     payload: list[dict[str, object]] = []
     for plan, materials in zip(spec.schedule, bundle, strict=True):
         for arm in (Arm.UNDER_TEST, Arm.BASELINE):
-            arm_plan = build_arm_construction_plan(spec, caliber, arm, plan, materials)
+            arm_plan = build_arm_construction_plan(
+                spec, caliber, arm, plan, materials, closed_entries=closed_entries
+            )
             payload.append(
                 {
                     "hand_ordinal": plan.hand_ordinal,
@@ -604,9 +837,13 @@ def plan_payload(
                     "summary_seats": list(arm_plan.summary_seats),
                     "summary_scope": list(arm_plan.summary_scope),
                     "probed_seat_style": arm_plan.probed_seat_style,
-                    "seats": [_seat_payload(entry) for entry in arm_plan.entries],
+                    "seats": [
+                        _seat_payload(entry, multiple=multiple) for entry in arm_plan.entries
+                    ],
                 }
             )
+    if multiple:
+        return {"schema": "construction-plan-v2", "hands": payload}
     return payload
 
 
@@ -616,6 +853,7 @@ def construction_caliber_payload(
     caliber: ConstructionCaliber,
     bundle: Sequence[HandMaterials],
     algorithm: str,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> dict[str, object]:
     """构造口径的完整规范载荷：两侧口径、基线约束与执行口径、规格标识、构造计划。"""
     return {
@@ -632,7 +870,9 @@ def construction_caliber_payload(
             "baseline": spec.baseline_identifier,
             "under_test": spec.under_test_identifier,
         },
-        "plan": plan_payload(spec=spec, caliber=caliber, bundle=bundle),
+        "plan": plan_payload(
+            spec=spec, caliber=caliber, bundle=bundle, closed_entries=closed_entries
+        ),
     }
 
 
@@ -642,11 +882,16 @@ def construction_caliber_digest(
     caliber: ConstructionCaliber,
     bundle: Sequence[HandMaterials],
     algorithm: str,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> str:
     """由构造口径内容、基线执行口径与由它唯一确定的构造计划重算摘要。"""
     return content_digest(
         construction_caliber_payload(
-            spec=spec, caliber=caliber, bundle=bundle, algorithm=algorithm
+            spec=spec,
+            caliber=caliber,
+            bundle=bundle,
+            algorithm=algorithm,
+            closed_entries=closed_entries,
         ),
         algorithm=algorithm,
     )
@@ -663,10 +908,13 @@ def instantiation_caliber_entries(
     caliber: ConstructionCaliber,
     bundle: Sequence[HandMaterials],
     algorithm: str,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> tuple[tuple[str, str], ...]:
     """实例化口径类别的规范条目：逐项由当前显式构造口径、基线执行口径与重算的构造计划得出。"""
     require_caliber_matches_spec(spec, caliber)
-    plan = plan_payload(spec=spec, caliber=caliber, bundle=bundle)
+    plan = plan_payload(
+        spec=spec, caliber=caliber, bundle=bundle, closed_entries=closed_entries
+    )
     scope = caliber.under_test.seat_scope
     baseline_scope = caliber.baseline.seat_scope
     return (
@@ -684,7 +932,7 @@ def instantiation_caliber_entries(
         ),
         ("baseline-seat-scope", "none" if baseline_scope is None else baseline_scope.value),
         ("under-test-seat-scope", "none" if scope is None else scope.value),
-        *_baseline_execution_entries(algorithm),
+        *_baseline_execution_entries(algorithm, spec),
         ("construction-plan-digest", content_digest(plan, algorithm=algorithm)),
     )
 
@@ -696,11 +944,16 @@ def require_instantiation_caliber(
     caliber: ConstructionCaliber,
     bundle: Sequence[HandMaterials],
     algorithm: str,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> None:
     """执行身份里的实例化口径必须与当前显式构造口径及重算的构造计划逐项一致。"""
     expected = dict(
         instantiation_caliber_entries(
-            spec=spec, caliber=caliber, bundle=bundle, algorithm=algorithm
+            spec=spec,
+            caliber=caliber,
+            bundle=bundle,
+            algorithm=algorithm,
+            closed_entries=closed_entries,
         )
     )
     reported = {entry.name: entry.value for entry in record.entries_for(

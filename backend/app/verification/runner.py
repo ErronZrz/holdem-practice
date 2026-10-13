@@ -186,6 +186,7 @@ def build_frozen_manifest(
     audit: AuditedMaterials,
     execution_identity: ExecutionIdentityRecord,
     material_manifest: MaterialManifest,
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> FrozenRunManifest:
     """由本次输入重算全部摘要，得到一份冻结清单。
 
@@ -199,7 +200,9 @@ def build_frozen_manifest(
         spec_digest=spec_digest(spec),
         schedule_digest=schedule_digest(spec),
         protocol_digest=protocol_digest(spec.protocol),
-        supplied_materials_digest=materials_digest(bundle, spec=spec, algorithm=algorithm),
+        supplied_materials_digest=materials_digest(
+            bundle, spec=spec, algorithm=algorithm, closed_entries=closed_entries
+        ),
         material_manifest_digest=manifest_digest(material_manifest, algorithm=algorithm),
         audit_transcript_digest=bytes_digest(audit.transcript, algorithm=algorithm),
         audit_read_record_digest=read_record_digest(
@@ -209,7 +212,11 @@ def build_frozen_manifest(
         ),
         audit_commitment_digest=commitment_digest(audit.commitment),
         construction_caliber_digest=construction_caliber_digest(
-            spec=spec, caliber=caliber, bundle=bundle, algorithm=algorithm
+            spec=spec,
+            caliber=caliber,
+            bundle=bundle,
+            algorithm=algorithm,
+            closed_entries=closed_entries,
         ),
         execution_identity_digest=execution_identity_digest(
             execution_identity, algorithm=algorithm
@@ -340,7 +347,9 @@ def _require_bound_execution_identity(
     _require_identity_value(
         "supplied-materials-digest",
         protocol_entries["supplied-materials-digest"],
-        materials_digest(bundle, spec=spec, algorithm=algorithm),
+        materials_digest(
+            bundle, spec=spec, algorithm=algorithm, closed_entries=closed_entries
+        ),
     )
     _require_identity_value(
         "material-manifest-digest",
@@ -507,10 +516,11 @@ def verify_frozen_inputs(
         bundle=bundle,
         commitment=audit.commitment,
         spec=spec,
+        closed_entries=closed_entries,
     )
-    require_materials(spec, bundle)
-    require_supplied_materials_order(spec, bundle)
-    require_construction_calibers(spec, caliber, bundle)
+    require_materials(spec, bundle, closed_entries=closed_entries)
+    require_supplied_materials_order(spec, bundle, closed_entries=closed_entries)
+    require_construction_calibers(spec, caliber, bundle, closed_entries=closed_entries)
 
     algorithm = protocol.digest_algorithm
     require_instantiation_caliber(
@@ -519,6 +529,7 @@ def verify_frozen_inputs(
         caliber=caliber,
         bundle=bundle,
         algorithm=algorithm,
+        closed_entries=closed_entries,
     )
     _require_bound_execution_identity(
         spec=spec,
@@ -540,7 +551,9 @@ def verify_frozen_inputs(
     _compare(
         "supplied-materials-digest",
         manifest.supplied_materials_digest,
-        materials_digest(bundle, spec=spec, algorithm=algorithm),
+        materials_digest(
+            bundle, spec=spec, algorithm=algorithm, closed_entries=closed_entries
+        ),
     )
     _compare(
         "material-manifest-digest",
@@ -570,7 +583,11 @@ def verify_frozen_inputs(
         "construction-caliber-digest",
         manifest.construction_caliber_digest,
         construction_caliber_digest(
-            spec=spec, caliber=caliber, bundle=bundle, algorithm=algorithm
+            spec=spec,
+            caliber=caliber,
+            bundle=bundle,
+            algorithm=algorithm,
+            closed_entries=closed_entries,
         ),
     )
     _compare(
