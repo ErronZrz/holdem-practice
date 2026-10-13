@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from .deal import DealMappingSpec
 from .digests import content_digest
 from .errors import SpecIncompleteError
-from .protocol import RandomizationProtocolSpec
+from .protocol import PROTOCOL_SCHEMA_V2, RandomizationProtocolSpec
 
 StrictInt = Annotated[int, Field(strict=True)]
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
@@ -113,6 +113,7 @@ class DomainRunSpec(BaseModel):
             baseline_identifier=self.baseline_identifier,
             under_test_identifier=self.under_test_identifier,
             lock_versions=self.campaign_configuration.lock_versions,
+            randomization_protocol=randomization_protocol_version(self.protocol),
         )
         if self.campaign != expected:
             raise SpecIncompleteError("campaign 与配置摘要不一致")
@@ -145,6 +146,13 @@ def _is_lower_hex64(value: str) -> bool:
     return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
 
 
+def randomization_protocol_version(protocol: RandomizationProtocolSpec) -> int:
+    """v2 规格与材料键共用版本 2 的配置摘要；v1 规格保持版本 1。"""
+    if protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+        return 2
+    return 1
+
+
 def _require_game_count(name: str, value: int, *, minimum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise SpecIncompleteError(f"配置项不合法：{name}")
@@ -160,10 +168,13 @@ def campaign_configuration_payload(
     baseline_identifier: str,
     under_test_identifier: str,
     lock_versions: CampaignLockVersions,
+    randomization_protocol: int = 1,
 ) -> dict[str, object]:
     """由组成字段组装配置载荷。载荷不含自身摘要，也不接受整份运行规格。"""
     if baseline_identifier != BASELINE_IDENTIFIER or under_test_identifier != UNDER_TEST_IDENTIFIER:
         raise SpecIncompleteError("身份标识与锁定常数不符")
+    if isinstance(randomization_protocol, bool) or randomization_protocol not in (1, 2):
+        raise SpecIncompleteError("随机化协议版本只能是 1 或 2")
     _require_game_count("num_players", num_players, minimum=2)
     if num_players > 23:
         raise SpecIncompleteError("人数不得超过 23")
@@ -171,6 +182,7 @@ def campaign_configuration_payload(
     _require_game_count("small_blind", small_blind, minimum=1)
     _require_game_count("big_blind", big_blind, minimum=1)
     versions: dict[str, int] = dict(_LOCKED_VERSIONS)
+    versions["randomization_protocol"] = randomization_protocol
     versions.update(
         {
             "pairing_and_reset": lock_versions.pairing_and_reset,
@@ -206,6 +218,7 @@ def campaign_configuration_digest(
     baseline_identifier: str,
     under_test_identifier: str,
     lock_versions: CampaignLockVersions,
+    randomization_protocol: int = 1,
 ) -> str:
     """由组成字段重算配置摘要。调用时还不需要一份已经构造好的运行规格。"""
     payload = campaign_configuration_payload(
@@ -216,6 +229,7 @@ def campaign_configuration_digest(
         baseline_identifier=baseline_identifier,
         under_test_identifier=under_test_identifier,
         lock_versions=lock_versions,
+        randomization_protocol=randomization_protocol,
     )
     if "campaign" in payload or "block" in payload:
         raise SpecIncompleteError("配置载荷不得包含自身摘要或块序号")
@@ -246,6 +260,7 @@ def build_domain_run_spec(
         baseline_identifier=baseline_identifier,
         under_test_identifier=under_test_identifier,
         lock_versions=campaign_configuration.lock_versions,
+        randomization_protocol=randomization_protocol_version(protocol),
     )
     return DomainRunSpec(
         num_players=num_players,

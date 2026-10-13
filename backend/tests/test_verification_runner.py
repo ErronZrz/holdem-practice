@@ -81,6 +81,7 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
             "schedule_payload",
             "campaign_configuration_payload",
             "campaign_configuration_digest",
+            "randomization_protocol_version",
             "build_domain_run_spec",
         }
     ),
@@ -113,6 +114,7 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
             "same_deal",
             "require_same_deal",
             "deal_seat_mapping",
+            "require_verification_sources_non_executable",
         }
     ),
     f"{PACKAGE_NAME}.identity": frozenset(
@@ -143,6 +145,7 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
             "construction_caliber_digest",
             "instantiation_caliber_entries",
             "build_arm_construction_plan",
+            "build_kappa_decision_plan",
             "plan_by_seat",
         }
     ),
@@ -158,11 +161,20 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
             "purpose_index_mapping_digest",
             "resolve_read",
             "commitment_digest",
+            "closed_keyset_binding_digest",
             "read_record_digest",
             "require_manifest_consistent",
             "verify_audit",
             "verify_manifest_binding",
             "verify_material_binding",
+            "purpose_index_mapping_v2_payload",
+            "purpose_index_mapping_v2_digest",
+            "protocol_declares_v2_keys",
+            "randomization_protocol_v2_payload",
+            "validate_explicit_v2_keyset",
+            "verify_v2_closed_binding",
+            "require_v2_schedule_anchors",
+            "v2_record_sort_key",
         }
     ),
     f"{PACKAGE_NAME}.runner": frozenset(
@@ -172,6 +184,7 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
             "runner_category_entries",
             "build_frozen_manifest",
             "verify_frozen_inputs",
+            "verify_v2_frozen_records",
             "build_run_metadata",
         }
     ),

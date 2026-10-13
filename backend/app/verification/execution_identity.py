@@ -21,6 +21,7 @@ from .errors import SpecIncompleteError
 from .identity import ConstructionInterface, SeatScope
 
 _DIGEST_ALGORITHM = "sha256"
+ARM_B_SCOPE_CONFLICT = "pending:per-hand-arm_b-material-vs-per-kappa-arm_b"
 _RUNNER_ENTRIES: tuple[str, ...] = (
     "runner-flow-version",
     "runner-flow-digest",
@@ -37,6 +38,9 @@ _PROTOCOL_ENTRIES: tuple[str, ...] = (
     "audit-read-record-digest",
     "audit-commitment-digest",
     "generator-code-digest",
+    "randomization-protocol-schema",
+    "kappa-key-rules-digest",
+    "closed-keyset-digest",
 )
 _CALIBER_ENTRIES: tuple[str, ...] = (
     "baseline-identifier",
@@ -51,6 +55,7 @@ _CALIBER_ENTRIES: tuple[str, ...] = (
     "baseline-entry-point",
     "baseline-parameter-layout",
     "baseline-effective-seed",
+    "arm-b-seed-scope-conflict",
     "baseline-effective-samples",
     "baseline-effective-bluff-freq",
     "baseline-entry-code-digest",
@@ -90,6 +95,7 @@ _FIXED_TEXT: dict[str, str] = {
     "source-interface-id": "python-os-urandom@1",
     "environment-record": "local-single-process-no-parallel@1",
     "baseline-effective-seed": "per-hand-arm_b-material",
+    "arm-b-seed-scope-conflict": ARM_B_SCOPE_CONFLICT,
 }
 _VERSION_ENTRIES: frozenset[str] = frozenset(
     {
@@ -116,6 +122,7 @@ _HEX_ENTRIES: frozenset[str] = frozenset(
         "audit-read-record-digest",
         "audit-commitment-digest",
         "generator-code-digest",
+        "closed-keyset-digest",
         "campaign-configuration-digest",
         "schedule-digest",
         "baseline-entry-code-digest",
@@ -219,6 +226,10 @@ def _determined_digest(name: str) -> str:
         from .protocol import purpose_index_mapping_digest
 
         return purpose_index_mapping_digest(algorithm=_DIGEST_ALGORITHM)
+    if name == "kappa-key-rules-digest":
+        from .protocol import purpose_index_mapping_v2_digest
+
+        return purpose_index_mapping_v2_digest(algorithm=_DIGEST_ALGORITHM)
     if name == "public-summary-mapping-digest":
         from .instantiation import public_summary_mapping_digest
 
@@ -232,6 +243,14 @@ def _require_entry_value(name: str, value: str) -> None:
         _require_visible_ascii(value)
         if value != _FIXED_TEXT[name]:
             raise SpecIncompleteError(f"固定文本与锁定值不符：{name}")
+        return
+    if name == "randomization-protocol-version":
+        if value not in {"1", "2"}:
+            raise SpecIncompleteError("随机化协议版本只能是 1 或 2")
+        return
+    if name == "randomization-protocol-schema":
+        if value not in {"randomization-protocol-v1", "randomization-protocol-v2"}:
+            raise SpecIncompleteError("协议 schema 必须是 v1 或 v2")
         return
     if name in _VERSION_ENTRIES:
         if value != "1":
@@ -265,6 +284,7 @@ def _require_entry_value(name: str, value: str) -> None:
     if name in {"runner-flow-digest", "injection-precheck-rules-digest"} or name in {
         "deal-mapping-digest",
         "purpose-index-mapping-digest",
+        "kappa-key-rules-digest",
         "public-summary-mapping-digest",
     }:
         if value != _determined_digest(name):

@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .deal import DECK_SIZE
 from .digests import DIGEST_ALGORITHMS, bytes_digest, content_digest
 from .errors import MaterialBindingError, ProtocolAuditError, ProtocolSpecError
 from .materials import (
@@ -33,6 +34,10 @@ from .materials import (
 
 # 本模块已实现的逐读取记录编码；其余取值一律显式失败，不静默替代。
 READ_RECORD_ENCODINGS: tuple[str, ...] = ("compact-json-v1",)
+PROTOCOL_SCHEMA_V1 = "randomization-protocol-v1"
+PROTOCOL_SCHEMA_V2 = "randomization-protocol-v2"
+LOCKED_SOURCE_INTERFACE = "python-os-urandom@1"
+LOCKED_ENVIRONMENT_RECORD = "local-single-process-no-parallel@1"
 # 拒绝规则的规范标识：标识不变则规则内容不得变化。
 REJECTION_RULE_ID = "rejection-whole-multiple-truncation-v1"
 _DOMAIN_SIZE_2_256 = 1 << 256
@@ -171,6 +176,18 @@ class PurposeSpec(BaseModel):
             if self.role is PurposeRole.NON_PROBED_SEED:
                 if self.seat_index_field is None:
                     raise ProtocolSpecError("非被测座位用途必须声明座位号字段")
+            elif self.role is PurposeRole.BASELINE_SEED and self.index_fields == (
+                "campaign",
+                "block",
+                "hand",
+                "seat",
+                "event_index",
+                "sigma_public",
+            ):
+                if self.seat_index_field != "seat":
+                    raise ProtocolSpecError("基线逐决策键必须声明座位号字段")
+                if self.integer_fields != ("block", "hand", "seat", "event_index"):
+                    raise ProtocolSpecError("基线逐决策键的整数字段不符")
             elif self.seat_index_field is not None:
                 raise ProtocolSpecError("该用途不得声明座位号字段")
         if self.bit_width % 8 != 0:
@@ -259,6 +276,7 @@ class RandomizationProtocolSpec(BaseModel):
     audit_format_version: PositiveInt
     digest_algorithm: str
     read_record_encoding: str
+    protocol_schema: Literal[PROTOCOL_SCHEMA_V1, PROTOCOL_SCHEMA_V2] = PROTOCOL_SCHEMA_V1
 
     @model_validator(mode="after")
     def _require_well_formed(self) -> Self:
@@ -284,6 +302,15 @@ class RandomizationProtocolSpec(BaseModel):
             raise ProtocolSpecError(f"摘要算法未实现：{self.digest_algorithm!r}")
         if self.read_record_encoding not in READ_RECORD_ENCODINGS:
             raise ProtocolSpecError(f"逐读取记录编码未实现：{self.read_record_encoding!r}")
+        if self.protocol_schema == PROTOCOL_SCHEMA_V2:
+            if not protocol_declares_v2_keys(self):
+                raise ProtocolSpecError("v2 协议必须使用完整 κ 键形")
+            if self.source_interface_id != LOCKED_SOURCE_INTERFACE:
+                raise ProtocolSpecError("v2 协议的来源必须是锁定的随机源接口")
+            if self.environment_record != LOCKED_ENVIRONMENT_RECORD:
+                raise ProtocolSpecError("v2 协议的环境必须是锁定的单进程记录")
+        elif protocol_declares_v2_keys(self):
+            raise ProtocolSpecError("v1 schema 不得承载 v2 键形")
         return self
 
     def purpose_for_role(self, role: PurposeRole) -> PurposeSpec:
@@ -330,7 +357,7 @@ def _purpose_protocol_payload(purpose: PurposeSpec) -> dict[str, object]:
 def protocol_payload(protocol: RandomizationProtocolSpec) -> dict[str, object]:
     """随机化协议的封闭载荷。摘要只覆盖这些字段，不覆盖模型上的其他属性。"""
     return {
-        "schema": "randomization-protocol-v1",
+        "schema": protocol.protocol_schema,
         "source_interface_id": protocol.source_interface_id,
         "environment_record": protocol.environment_record,
         "rejection_rule": protocol.rejection_rule,
@@ -907,6 +934,531 @@ def verify_manifest_binding(
         raise MaterialBindingError("承诺里的清单摘要与清单内容不符")
     _require_same_locations("清单", "审计", declared, _accepted_map(protocol, reads))
     _require_same_locations("清单", "送交材料", declared, _supplied_map(protocol, bundle))
+
+
+V2_TRAVERSAL: tuple[str, ...] = ("deal", "non_probed", "arm_m", "arm_b")
+_V2_FIELDS: dict[str, tuple[str, ...]] = {
+    "deal": ("campaign", "block", "hand", "draw"),
+    "non_probed": ("campaign", "block", "hand", "seat", "event_index", "sigma_public"),
+    "arm_m": ("campaign", "block", "hand"),
+    "arm_b": ("campaign", "block", "hand", "seat", "event_index", "sigma_public"),
+}
+_V2_INTEGER_FIELDS = frozenset({"block", "hand", "seat", "event_index", "draw"})
+_KAPPA_LABELS = frozenset({"non_probed", "arm_b"})
+_COMMITMENT_FIELD_NAMES: tuple[str, ...] = (
+    "source_interface_id",
+    "environment_record",
+    "generation_started_at",
+    "generation_finished_at",
+    "traversal_order",
+    "entry_counts",
+    "rejection_counts",
+    "transcript_digest",
+    "read_record_digest",
+    "manifest_digest",
+    "generator_code_digest",
+    "digest_algorithm",
+    "read_record_encoding",
+    "audit_format_version",
+)
+
+
+def purpose_index_mapping_v2_payload() -> dict[str, object]:
+    """v2 用途与索引的封闭载荷。不替换仍供既有身份使用的 v1 载荷。"""
+    fixed = {"kind": "fixed", "size": _DOMAIN_SIZE_2_256}
+    shrinking = {"kind": "shrinking", "initial_size": DECK_SIZE}
+
+    def row(label: str, role: PurposeRole, domain: dict[str, object], bit_width: int) -> dict:
+        fields = _V2_FIELDS[label]
+        integers = [name for name in fields if name in _V2_INTEGER_FIELDS]
+        return {
+            "label": label,
+            "role": role.value,
+            "index_fields": list(fields),
+            "integer_fields": integers,
+            "domain": domain,
+            "bit_width": bit_width,
+        }
+
+    return {
+        "schema": "purpose-index-mapping-v2",
+        "purposes": [
+            row("deal", PurposeRole.DEAL, shrinking, 8),
+            row("non_probed", PurposeRole.NON_PROBED_SEED, fixed, 256),
+            row("arm_m", PurposeRole.UNDER_TEST_MATERIAL, fixed, 256),
+            row("arm_b", PurposeRole.BASELINE_SEED, fixed, 256),
+        ],
+        "traversal_order": list(V2_TRAVERSAL),
+    }
+
+
+def randomization_protocol_v2_payload() -> dict[str, object]:
+    """v2 协议载荷的字段表。拒绝标识与承诺字段名保持原样。"""
+    mapping = purpose_index_mapping_v2_payload()
+    return {
+        "schema": "randomization-protocol-v2",
+        "rejection_rule": REJECTION_RULE_ID,
+        "purposes": mapping["purposes"],
+        "traversal_order": list(V2_TRAVERSAL),
+        "digest_algorithm": "sha256",
+        "read_record_encoding": "compact-json-v1",
+        "audit_format_version": 1,
+        "commitment_fields": list(_COMMITMENT_FIELD_NAMES),
+    }
+
+
+def purpose_index_mapping_v2_digest(*, algorithm: str) -> str:
+    """重算 v2 完整 κ 键规则的摘要。这是执行身份的输入，不是某次战役摘要。"""
+    return content_digest(purpose_index_mapping_v2_payload(), algorithm=algorithm)
+
+
+def closed_keyset_binding_digest(
+    entries: Sequence[tuple[str, tuple[str, ...]]] | None,
+    *,
+    algorithm: str,
+) -> str:
+    """闭合集绑定摘要。v1 没有 κ 闭合集时使用固定缺席标记。"""
+    if entries is None:
+        payload: object = {"closed_keyset": "v1-absent"}
+    else:
+        payload = [
+            {"purpose_label": label, "index_key": list(key)} for label, key in entries
+        ]
+    return content_digest(payload, algorithm=algorithm)
+
+
+def validate_explicit_v2_keyset(
+    entries: Sequence[tuple[str, tuple[str, ...]]],
+    *,
+    probed_by_hand: Mapping[int, int],
+    num_players: int,
+) -> None:
+    """检查逐条预注册的完整键。不读取随机字节，也不补键。"""
+    if isinstance(entries, (str, bytes)) or not isinstance(entries, Sequence):
+        raise ProtocolSpecError("条目必须是有限序列")
+    if (
+        isinstance(num_players, bool)
+        or not isinstance(num_players, int)
+        or not 2 <= num_players <= 23
+    ):
+        raise ProtocolSpecError("人数必须是 2 到 23 的整数")
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    sigma_slots: dict[tuple[str, str, int, int, int, int], str] = {}
+    campaigns: set[str] = set()
+    for label, index_key in entries:
+        fields = _V2_FIELDS.get(label)
+        if fields is None or len(index_key) != len(fields):
+            raise ProtocolSpecError("完整键的用途或字段数不符")
+        parsed = _parsed_v2_fields(fields, index_key)
+        campaign = index_key[0]
+        _require_campaign_text(campaign)
+        campaigns.add(campaign)
+        if label in _KAPPA_LABELS:
+            _require_sigma_public_text(index_key[fields.index("sigma_public")])
+            slot = (
+                label,
+                campaign,
+                parsed["block"],
+                parsed["hand"],
+                parsed["seat"],
+                parsed["event_index"],
+            )
+            sigma = index_key[fields.index("sigma_public")]
+            previous = sigma_slots.get(slot)
+            if previous is not None and previous != sigma:
+                raise ProtocolSpecError("同一决策序号不得对应两条公开投影")
+            sigma_slots[slot] = sigma
+        _require_v2_ranges(label, parsed, probed_by_hand=probed_by_hand, num_players=num_players)
+        location = (label, index_key)
+        if location in seen:
+            raise ProtocolSpecError("闭合集出现重复的完整键")
+        seen.add(location)
+    if len(campaigns) > 1:
+        raise ProtocolSpecError("同一闭合集的 campaign 必须相同")
+
+
+def verify_v2_closed_binding(
+    entries: Sequence[tuple[str, tuple[str, ...]]],
+    manifest: MaterialManifest,
+    reads: Sequence[ReadRecord],
+    transcript: bytes,
+    *,
+    probed_by_hand: Mapping[int, int],
+    num_players: int,
+    campaign_v1: str,
+    campaign_v2: str,
+) -> None:
+    """核对已提交的闭合集、清单与审计。不创建引擎，也不补读。"""
+    validate_explicit_v2_keyset(entries, probed_by_hand=probed_by_hand, num_players=num_players)
+    ordered = sorted(entries, key=lambda item: v2_record_sort_key(item[0], item[1]))
+    for _label, index_key in ordered:
+        campaign = index_key[0]
+        if campaign == campaign_v1 or campaign != campaign_v2:
+            raise ProtocolSpecError("v2 材料键的 campaign 必须等于协议版本 2 的配置摘要")
+    accepted = _require_v2_read_sequence(reads, ordered, transcript)
+    locations = [(entry.purpose_label, entry.index_key) for entry in manifest.entries]
+    if locations != ordered:
+        raise MaterialBindingError("材料清单的键或次序与闭合集不符")
+    for entry in manifest.entries:
+        location = (entry.purpose_label, entry.index_key)
+        if accepted[location] != entry.value:
+            raise MaterialBindingError("材料清单的取值与审计接受值不符")
+        if entry.purpose_label != "deal":
+            _require_seed_octets(entry.value)
+
+
+def v2_record_sort_key(label: str, index_key: tuple[str, ...]) -> tuple[int | str, ...]:
+    """用途次序之后，按完整键的整数或字符串升序。"""
+    fields = _V2_FIELDS[label]
+    parsed: list[int | str] = [V2_TRAVERSAL.index(label)]
+    for name, raw in zip(fields, index_key, strict=True):
+        if name in _V2_INTEGER_FIELDS:
+            parsed.append(_parse_canonical_integer(name, raw))
+        else:
+            parsed.append(raw)
+    return tuple(parsed)
+
+
+def _parsed_v2_fields(fields: tuple[str, ...], index_key: tuple[str, ...]) -> dict[str, int]:
+    parsed: dict[str, int] = {}
+    for name, raw in zip(fields, index_key, strict=True):
+        if name in _V2_INTEGER_FIELDS:
+            parsed[name] = _parse_canonical_integer(name, raw)
+    return parsed
+
+
+def _require_campaign_text(text: str) -> None:
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise ProtocolSpecError("campaign 必须是小写 64 位十六进制")
+
+
+_V2_INTEGERS: dict[str, tuple[str, ...]] = {
+    "deal": ("block", "hand", "draw"),
+    "non_probed": ("block", "hand", "seat", "event_index"),
+    "arm_m": ("block", "hand"),
+    "arm_b": ("block", "hand", "seat", "event_index"),
+}
+_PROJECTION_SCHEMA = "k2-public-projection-v1"
+_PROJECTION_FLAGS = frozenset(
+    {
+        "hand_over",
+        "legal.can_fold",
+        "legal.can_check",
+        "legal.can_call",
+        "legal.is_short_all_in_call",
+        "legal.can_bet",
+        "legal.can_raise",
+    }
+)
+_PROJECTION_LEGAL = (
+    "legal.can_fold",
+    "legal.can_check",
+    "legal.can_call",
+    "legal.call_amount",
+    "legal.actual_call_amount",
+    "legal.is_short_all_in_call",
+    "legal.can_bet",
+    "legal.min_bet",
+    "legal.max_bet",
+    "legal.can_raise",
+    "legal.min_raise_to",
+    "legal.max_raise_to",
+)
+
+
+def protocol_declares_v2_keys(protocol: RandomizationProtocolSpec) -> bool:
+    """协议的用途键形是否已经是 v2。v1 四字段键不会被当成 v2。"""
+    roles = {
+        "deal": PurposeRole.DEAL,
+        "non_probed": PurposeRole.NON_PROBED_SEED,
+        "arm_m": PurposeRole.UNDER_TEST_MATERIAL,
+        "arm_b": PurposeRole.BASELINE_SEED,
+    }
+    if tuple(purpose.label for purpose in protocol.purposes) != V2_TRAVERSAL:
+        return False
+    if tuple(protocol.traversal_order) != V2_TRAVERSAL:
+        return False
+    for purpose in protocol.purposes:
+        if purpose.role is not roles[purpose.label]:
+            return False
+        if purpose.index_fields != _V2_FIELDS[purpose.label]:
+            return False
+        if purpose.integer_fields != _V2_INTEGERS[purpose.label]:
+            return False
+        if purpose.label == "deal":
+            if (
+                not isinstance(purpose.domain, ShrinkingDomain)
+                or purpose.domain.initial_size != DECK_SIZE
+                or purpose.bit_width != 8
+                or purpose.draw_index_field != "draw"
+            ):
+                return False
+            continue
+        if (
+            not isinstance(purpose.domain, FixedDomain)
+            or purpose.domain.size != _DOMAIN_SIZE_2_256
+            or purpose.bit_width != 256
+        ):
+            return False
+        if purpose.label in _KAPPA_LABELS and purpose.seat_index_field != "seat":
+            return False
+    return True
+
+
+def require_v2_schedule_anchors(
+    entries: Sequence[tuple[str, tuple[str, ...]]],
+    *,
+    campaign: str,
+    block: int,
+    draw_count: int,
+    num_players: int,
+    probed_by_hand: Mapping[int, int],
+) -> None:
+    """闭合集必须盖住每个手序上的四种用途锚点。缺任一条即失败，不补键。"""
+    block_text = str(block)
+    deal: set[tuple[int, int]] = set()
+    arm_m: set[int] = set()
+    non_probed: dict[int, set[int]] = {hand: set() for hand in probed_by_hand}
+    arm_b: dict[int, set[int]] = {hand: set() for hand in probed_by_hand}
+    for label, index_key in entries:
+        if index_key[0] != campaign or index_key[1] != block_text:
+            raise ProtocolSpecError("闭合集的 campaign 或 block 与规格不符")
+        hand = _parse_canonical_integer("hand", index_key[2])
+        if hand not in probed_by_hand:
+            raise ProtocolSpecError("闭合集含有手序计划之外的手")
+        if label == "deal":
+            deal.add((hand, _parse_canonical_integer("draw", index_key[3])))
+        elif label == "arm_m":
+            arm_m.add(hand)
+        elif label == "non_probed":
+            seats = non_probed[hand]
+            seats.add(_parse_canonical_integer("seat", index_key[3]))
+        elif label == "arm_b":
+            seats = arm_b[hand]
+            seats.add(_parse_canonical_integer("seat", index_key[3]))
+        else:
+            raise ProtocolSpecError("闭合集含有未声明的用途")
+    required_deal = {
+        (hand, draw)
+        for hand in probed_by_hand
+        for draw in range(draw_count)
+    }
+    if deal != required_deal:
+        raise ProtocolSpecError("闭合集的发牌键与手序所需抽取不符")
+    for hand, probed in probed_by_hand.items():
+        if hand not in arm_m:
+            raise ProtocolSpecError("闭合集缺少 arm_m")
+        expected = {seat for seat in range(num_players) if seat != probed}
+        if not expected <= non_probed[hand]:
+            raise ProtocolSpecError("闭合集缺少 non_probed")
+        if probed not in arm_b[hand]:
+            raise ProtocolSpecError("闭合集缺少 arm_b")
+
+
+def _require_sigma_public_text(text: str) -> None:
+    if (
+        len(text) < 2
+        or len(text) % 2 != 0
+        or any(character not in "0123456789abcdef" for character in text)
+    ):
+        raise ProtocolSpecError("sigma_public 必须是规范投影的 UTF-8 字节")
+    raw = bytes.fromhex(text)
+    if raw.hex() != text:
+        raise ProtocolSpecError("sigma_public 必须是规范投影的 UTF-8 字节")
+    try:
+        decoded = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ProtocolSpecError("sigma_public 必须是规范投影的 UTF-8 字节") from error
+    encoded = decoded.encode("utf-8")
+    if encoded.hex() != text:
+        raise ProtocolSpecError("sigma_public 必须是规范投影的 UTF-8 字节")
+    _require_projection_text(decoded)
+
+
+def _projection_names(num_players: int, board_len: int) -> list[str]:
+    names = [
+        "schema",
+        "street",
+        "hand_over",
+        "button",
+        "current_seat",
+        "pot",
+        "n_players",
+        "board_len",
+    ]
+    names.extend(f"board.{index}" for index in range(board_len))
+    for seat in range(num_players):
+        prefix = f"player.{seat}"
+        names.extend(
+            (
+                f"{prefix}.stack",
+                f"{prefix}.folded",
+                f"{prefix}.all_in",
+                f"{prefix}.street_bet",
+                f"{prefix}.total_committed",
+                f"{prefix}.has_acted_since_full_raise",
+            )
+        )
+    names.extend(_PROJECTION_LEGAL)
+    return names
+
+
+def _require_projection_text(text: str) -> None:
+    if not text or text.endswith("\n"):
+        raise ProtocolSpecError("公开投影行格式不符")
+    rows: list[tuple[str, str]] = []
+    for line in text.split("\n"):
+        if line.count("=") != 1:
+            raise ProtocolSpecError("公开投影行格式不符")
+        name, value = line.split("=", 1)
+        rows.append((name, value))
+    names = [name for name, _value in rows]
+    if len(set(names)) != len(names):
+        raise ProtocolSpecError("公开投影字段重复")
+    values = dict(rows)
+    if values.get("schema") != _PROJECTION_SCHEMA:
+        raise ProtocolSpecError("公开投影的模式标识不符")
+    if "n_players" not in values or "board_len" not in values or "street" not in values:
+        raise ProtocolSpecError("公开投影字段与规范串不符")
+    _require_projection_flag("street", values["street"], low=0, high=4)
+    num_players = _require_projection_integer("n_players", values["n_players"], low=2, high=23)
+    board_len = _require_projection_integer("board_len", values["board_len"], low=0, high=52)
+    if names != _projection_names(num_players, board_len):
+        raise ProtocolSpecError("公开投影字段与规范串不符")
+    for name, value in rows:
+        if name == "schema":
+            continue
+        if name == "street":
+            continue
+        if name.startswith("board."):
+            _require_projection_card(value)
+        elif name in _PROJECTION_FLAGS or name.endswith(
+            (".folded", ".all_in", ".has_acted_since_full_raise")
+        ):
+            _require_projection_flag(name, value)
+        else:
+            _require_projection_integer(name, value, low=0)
+
+
+def _require_projection_integer(
+    name: str, raw: str, *, low: int, high: int | None = None
+) -> int:
+    if not raw.isdigit() or (len(raw) > 1 and raw.startswith("0")):
+        raise ProtocolSpecError(f"公开投影的整数格式不符：{name}")
+    value = int(raw)
+    if value < low or (high is not None and value > high):
+        raise ProtocolSpecError(f"公开投影的整数超出范围：{name}")
+    return value
+
+
+def _require_projection_flag(
+    name: str, raw: str, *, low: int = 0, high: int = 1
+) -> None:
+    if raw not in {str(item) for item in range(low, high + 1)}:
+        raise ProtocolSpecError(f"公开投影的标志不符：{name}")
+
+
+def _require_projection_card(raw: str) -> None:
+    if len(raw) != 2 or raw[0] not in "23456789TJQKA" or raw[1] not in "cdhs":
+        raise ProtocolSpecError("公开投影的牌面不符")
+
+
+def _require_v2_ranges(
+    label: str,
+    parsed: Mapping[str, int],
+    *,
+    probed_by_hand: Mapping[int, int],
+    num_players: int,
+) -> None:
+    hand = parsed["hand"]
+    if hand < 1:
+        raise ProtocolSpecError("hand 必须是正整数")
+    if hand not in probed_by_hand:
+        raise ProtocolSpecError("键上的 hand 不在已登记的手序中")
+    probed = probed_by_hand[hand]
+    if isinstance(probed, bool) or not isinstance(probed, int) or not 0 <= probed < num_players:
+        raise ProtocolSpecError("被测座位超出人数范围")
+    if label == "deal":
+        draw = parsed["draw"]
+        if draw >= DECK_SIZE:
+            raise ProtocolSpecError("发牌抽取次序超出牌堆")
+        return
+    if label not in _KAPPA_LABELS:
+        return
+    seat = parsed["seat"]
+    if label == "non_probed" and (seat == probed or not 0 <= seat < num_players):
+        raise ProtocolSpecError("non_probed 的座位必须是该手的非被测座位")
+    if label == "arm_b" and seat != probed:
+        raise ProtocolSpecError("arm_b 的座位必须是该手的被测座位")
+
+
+def _require_seed_octets(seed: int) -> bytes:
+    if isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed < _DOMAIN_SIZE_2_256:
+        raise ProtocolSpecError("seed 必须落在 [0, 2^256)")
+    octets = seed.to_bytes(32, "big")
+    if int.from_bytes(octets, "big") != seed:
+        raise ProtocolSpecError("seed 的 32 字节大端与整数不一致")
+    return octets
+
+
+def _require_v2_read_sequence(
+    reads: Sequence[ReadRecord],
+    ordered: Sequence[tuple[str, tuple[str, ...]]],
+    transcript: bytes,
+) -> dict[tuple[str, tuple[str, ...]], int]:
+    if [record.read_index for record in reads] != list(range(len(reads))):
+        raise ProtocolAuditError("逐读取记录的序号必须从零起连续")
+    accepted: dict[tuple[str, tuple[str, ...]], int] = {}
+    cursor = 0
+    accepted_current = False
+    offset = 0
+    for record in reads:
+        location = (record.purpose_label, record.index_key)
+        if cursor < len(ordered) and location == ordered[cursor]:
+            pass
+        elif (
+            accepted_current
+            and cursor + 1 < len(ordered)
+            and location == ordered[cursor + 1]
+        ):
+            cursor += 1
+            accepted_current = False
+        else:
+            raise ProtocolAuditError("逐读取记录偏离已闭合键集的规范次序，或出现集外键")
+        width = 8 if record.purpose_label == "deal" else 256
+        if record.bit_width != width:
+            raise ProtocolAuditError("读取位宽与用途不符")
+        nbytes = width // 8
+        if record.raw_offset != offset or offset + nbytes > len(transcript):
+            raise ProtocolAuditError("读取偏移与转录不符")
+        chunk = transcript[offset : offset + nbytes]
+        if int.from_bytes(chunk, "big") != record.raw_value:
+            raise ProtocolAuditError("转录字节与原始值不符")
+        offset += nbytes
+        if record.purpose_label == "deal":
+            draw = _parse_canonical_integer("draw", record.index_key[3])
+            domain = DECK_SIZE - draw
+        else:
+            domain = _DOMAIN_SIZE_2_256
+        expected = resolve_read(record.raw_value, bit_width=width, domain_size=domain)
+        if record.accepted:
+            if expected is None or record.output != expected or accepted_current:
+                raise ProtocolAuditError("接受判定与拒绝规则不符")
+            accepted_current = True
+            accepted[location] = record.output
+        elif expected is not None or record.output is not None or accepted_current:
+            raise ProtocolAuditError("拒绝判定与拒绝规则不符")
+    if offset != len(transcript):
+        raise ProtocolAuditError("转录尚有未入账的字节")
+    if not ordered:
+        if reads:
+            raise ProtocolAuditError("空键集不得有读取记录")
+        return accepted
+    if cursor != len(ordered) - 1 or not accepted_current:
+        raise ProtocolAuditError("闭合集中仍有键未被接受")
+    if set(accepted) != set(ordered):
+        raise ProtocolAuditError("审计接受键与闭合集不相等")
+    return accepted
 
 
 def _require_draw_order_matches(

@@ -18,8 +18,10 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .config import (
+    CampaignLockVersions,
     DomainRunSpec,
     campaign_configuration_digest,
+    randomization_protocol_version,
     schedule_digest,
     spec_digest,
 )
@@ -48,14 +50,22 @@ from .materials import (
     require_supplied_materials_order,
 )
 from .protocol import (
+    LOCKED_ENVIRONMENT_RECORD,
+    LOCKED_SOURCE_INTERFACE,
+    PROTOCOL_SCHEMA_V2,
     AuditedMaterials,
+    ReadRecord,
+    closed_keyset_binding_digest,
     commitment_digest,
     protocol_digest,
     purpose_index_mapping_digest,
+    purpose_index_mapping_v2_digest,
     read_record_digest,
+    require_v2_schedule_anchors,
     verify_audit,
     verify_manifest_binding,
     verify_material_binding,
+    verify_v2_closed_binding,
 )
 from .source_manifest import require_source_manifest, source_manifest_digest
 
@@ -225,6 +235,13 @@ def _require_identity_value(name: str, recorded: str, expected: str) -> None:
         raise IdentityMappingError(f"执行身份与当前输入不一致：{name}")
 
 
+def _bound_value(entries: Mapping[str, str], name: str) -> str:
+    """取出已经写入身份的条目。缺项按身份失败，避免变成键查找错误。"""
+    if name not in entries:
+        raise IdentityMappingError(f"执行身份缺少与当前输入绑定的条目：{name}")
+    return entries[name]
+
+
 def _require_category_values(
     recorded: Mapping[str, str], expected: Sequence[tuple[str, str]]
 ) -> None:
@@ -258,6 +275,7 @@ def _require_bound_execution_identity(
     baseline_strategy_manifest: Mapping[str, object],
     under_test_strategy_manifest: Mapping[str, object],
     verification_manifest: Mapping[str, object],
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None,
 ) -> None:
     """把其余类别中依赖本次输入的条目逐项重算并核对。
 
@@ -281,6 +299,34 @@ def _require_bound_execution_identity(
         protocol_entries["randomization-protocol-digest"],
         protocol_digest(spec.protocol),
     )
+    schema = spec.protocol.protocol_schema
+    expected_version = "2" if schema == PROTOCOL_SCHEMA_V2 else "1"
+    _require_identity_value(
+        "randomization-protocol-version",
+        protocol_entries["randomization-protocol-version"],
+        expected_version,
+    )
+    _require_identity_value(
+        "randomization-protocol-schema",
+        _bound_value(protocol_entries, "randomization-protocol-schema"),
+        schema,
+    )
+    _require_identity_value(
+        "kappa-key-rules-digest",
+        _bound_value(protocol_entries, "kappa-key-rules-digest"),
+        purpose_index_mapping_v2_digest(algorithm=algorithm),
+    )
+    bound_entries = closed_entries if schema == PROTOCOL_SCHEMA_V2 else None
+    _require_identity_value(
+        "closed-keyset-digest",
+        _bound_value(protocol_entries, "closed-keyset-digest"),
+        closed_keyset_binding_digest(bound_entries, algorithm=algorithm),
+    )
+    if schema == PROTOCOL_SCHEMA_V2:
+        if spec.protocol.source_interface_id != LOCKED_SOURCE_INTERFACE:
+            raise FreezeBindingError("v2 协议的来源与锁定值不符")
+        if spec.protocol.environment_record != LOCKED_ENVIRONMENT_RECORD:
+            raise FreezeBindingError("v2 协议的环境与锁定值不符")
     _require_identity_value(
         "source-interface-id",
         protocol_entries["source-interface-id"],
@@ -335,11 +381,14 @@ def _require_bound_execution_identity(
         baseline_identifier=spec.baseline_identifier,
         under_test_identifier=spec.under_test_identifier,
         lock_versions=spec.campaign_configuration.lock_versions,
+        randomization_protocol=randomization_protocol_version(spec.protocol),
     )
+    if spec.campaign != campaign:
+        raise IdentityMappingError("规格上的 campaign 与重算的配置摘要不一致")
     mapping_entries = _recorded_entries(execution_identity, "input-mapping")
     _require_identity_value(
         "campaign-configuration-digest",
-        mapping_entries["campaign-configuration-digest"],
+        _bound_value(mapping_entries, "campaign-configuration-digest"),
         campaign,
     )
     _require_identity_value(
@@ -390,11 +439,14 @@ def verify_frozen_inputs(
     baseline_strategy_manifest: Mapping[str, object],
     under_test_strategy_manifest: Mapping[str, object],
     verification_manifest: Mapping[str, object],
+    closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> None:
     """核验本次输入就是冻结清单所指的那一份，并核验材料来源可复核。
 
-    校验顺序：先复核审计材料本身，再确认材料与审计逐项配对，再走清单三步链
-    （清单 ↔ 审计 ↔ 送交材料 ↔ 承诺里的清单摘要），再校验材料与规格的结构一致，
+    校验顺序：v2 协议先核对闭合集、材料清单与审计的三方相等及手序锚点；
+    缺少闭合集即失败，不能绕过。规格上的 campaign 必须等于协议版本 2 的配置摘要。
+    其后复核审计材料本身，再确认材料与审计逐项配对，
+    再走清单三步链（清单 ↔ 审计 ↔ 送交材料 ↔ 承诺里的清单摘要），再校验材料与规格的结构一致，
     再走身份口径主链（显式构造口径与规格标识的逐字比对、基线一侧接口与公开摘要及座位范围
     三项硬限制、材料格式、逐手逐臂逐座位构造计划、执行身份里的实例化口径一致性），
     再把执行身份里依赖本次输入的条目与规格、材料、审计和显式传入的源码清单逐项重算比对，
@@ -403,6 +455,44 @@ def verify_frozen_inputs(
     protocol = spec.protocol
     if manifest.digest_algorithm != protocol.digest_algorithm:
         raise FreezeBindingError("冻结清单的摘要算法与协议不一致")
+    if protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+        if closed_entries is None:
+            raise FreezeBindingError("v2 冻结输入缺少闭合集，三方相等未执行")
+        probed_by_hand = {plan.hand_ordinal: plan.probed_seat for plan in spec.schedule}
+        verify_v2_frozen_records(
+            closed_entries,
+            material_manifest,
+            audit.reads,
+            audit.transcript,
+            probed_by_hand=probed_by_hand,
+            num_players=spec.num_players,
+            starting_stack=spec.starting_stack,
+            small_blind=spec.small_blind,
+            big_blind=spec.big_blind,
+            baseline_identifier=spec.baseline_identifier,
+            under_test_identifier=spec.under_test_identifier,
+            lock_versions=spec.campaign_configuration.lock_versions,
+        )
+        campaign_v2 = campaign_configuration_digest(
+            num_players=spec.num_players,
+            starting_stack=spec.starting_stack,
+            small_blind=spec.small_blind,
+            big_blind=spec.big_blind,
+            baseline_identifier=spec.baseline_identifier,
+            under_test_identifier=spec.under_test_identifier,
+            lock_versions=spec.campaign_configuration.lock_versions,
+            randomization_protocol=2,
+        )
+        if spec.campaign != campaign_v2:
+            raise FreezeBindingError("规格上的 campaign 必须是协议版本 2 的配置摘要")
+        require_v2_schedule_anchors(
+            closed_entries,
+            campaign=campaign_v2,
+            block=spec.block,
+            draw_count=spec.deal.draw_count(spec.num_players),
+            num_players=spec.num_players,
+            probed_by_hand=probed_by_hand,
+        )
     verify_audit(
         protocol=protocol,
         transcript=audit.transcript,
@@ -442,6 +532,7 @@ def verify_frozen_inputs(
         baseline_strategy_manifest=baseline_strategy_manifest,
         under_test_strategy_manifest=under_test_strategy_manifest,
         verification_manifest=verification_manifest,
+        closed_entries=closed_entries,
     )
     _compare("spec-digest", manifest.spec_digest, spec_digest(spec))
     _compare("schedule-digest", manifest.schedule_digest, schedule_digest(spec))
@@ -560,4 +651,43 @@ def build_run_metadata(
         material_manifest_digest=manifest.material_manifest_digest,
         execution_identity=execution_identity,
         reference_snapshot=reference_snapshot(),
+    )
+
+
+def verify_v2_frozen_records(
+    entries: Sequence[tuple[str, tuple[str, ...]]],
+    manifest: MaterialManifest,
+    reads: Sequence[ReadRecord],
+    transcript: bytes,
+    *,
+    probed_by_hand: Mapping[int, int],
+    num_players: int,
+    starting_stack: int,
+    small_blind: int,
+    big_blind: int,
+    baseline_identifier: str,
+    under_test_identifier: str,
+    lock_versions: CampaignLockVersions,
+) -> None:
+    """重算两个协议版本的配置摘要，并核对已提交的 v2 记录。不推进牌局。"""
+    common = {
+        "num_players": num_players,
+        "starting_stack": starting_stack,
+        "small_blind": small_blind,
+        "big_blind": big_blind,
+        "baseline_identifier": baseline_identifier,
+        "under_test_identifier": under_test_identifier,
+        "lock_versions": lock_versions,
+    }
+    campaign_v1 = campaign_configuration_digest(**common, randomization_protocol=1)
+    campaign_v2 = campaign_configuration_digest(**common, randomization_protocol=2)
+    verify_v2_closed_binding(
+        entries,
+        manifest,
+        reads,
+        transcript,
+        probed_by_hand=probed_by_hand,
+        num_players=num_players,
+        campaign_v1=campaign_v1,
+        campaign_v2=campaign_v2,
     )

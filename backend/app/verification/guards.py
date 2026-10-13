@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from app.poker.cards import Card
 
@@ -109,3 +109,39 @@ def require_same_deal(left: HandDeal, right: HandDeal) -> None:
 def deal_seat_mapping(deal: HandDeal) -> Mapping[int, tuple[Card, ...]]:
     """按座位号升序返回底牌映射，供注入前构造引擎入参。"""
     return dict(sorted(deal.hole_cards.items()))
+
+
+# 校验包不得导入这些模块或调用这些名字。调用方提交已经扫出的名字，本函数不读文件。
+_FORBIDDEN_VERIFICATION_MODULES = frozenset(
+    {
+        "app.poker.engine",
+        "app.poker.k2_public_projection",
+        "app.strategy.registry",
+        "os",
+    }
+)
+_FORBIDDEN_VERIFICATION_CALLS = frozenset(
+    {
+        "encode_k2_public_v1",
+        "sigma_public_hex",
+        "generate_from_closed_keyset",
+        "generate_materials",
+        "create_strategy",
+        "urandom",
+        "apply_action",
+        "start_hand",
+        "start_hand_with",
+    }
+)
+
+
+def require_verification_sources_non_executable(
+    *,
+    imported_modules: Sequence[str],
+    called_names: Sequence[str],
+) -> None:
+    """已提交的导入与调用名不得把推进、编码决策或生成带进校验包。"""
+    modules = set(imported_modules)
+    calls = set(called_names)
+    if modules & _FORBIDDEN_VERIFICATION_MODULES or calls & _FORBIDDEN_VERIFICATION_CALLS:
+        _fail("verification_imports", "校验包不得导入可推进牌局或生成材料的路径")

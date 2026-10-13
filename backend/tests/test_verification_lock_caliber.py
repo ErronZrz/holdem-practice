@@ -162,11 +162,11 @@ def test_generation_timestamps_reject_offsets_and_reversed_order() -> None:
             TranscriptCommitment.model_validate(fields)
 
 
-def test_closed_categories_contain_forty_one_entries() -> None:
-    assert sum(len(names) for names in _CLOSED_ENTRIES.values()) == 41
+def test_closed_categories_contain_forty_five_entries() -> None:
+    assert sum(len(names) for names in _CLOSED_ENTRIES.values()) == 45
     record = build_execution_identity_record(identity_categories())
     assert [name for name, _ in record.categories] == list(_CLOSED_ENTRIES)
-    assert sum(len(entries) for _, entries in record.categories) == 41
+    assert sum(len(entries) for _, entries in record.categories) == 45
 
 
 def test_bluff_freq_encoding_rejects_other_numeric_forms() -> None:

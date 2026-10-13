@@ -30,7 +30,11 @@ from app.strategy.mixed_strategy import seat_style_map
 from .config import BASELINE_IDENTIFIER, DomainRunSpec, HandPlan
 from .digests import bytes_digest, content_digest
 from .errors import IdentityMappingError, SpecIncompleteError
-from .execution_identity import INSTANTIATION_CALIBER_CATEGORY, ExecutionIdentityRecord
+from .execution_identity import (
+    ARM_B_SCOPE_CONFLICT,
+    INSTANTIATION_CALIBER_CATEGORY,
+    ExecutionIdentityRecord,
+)
 from .identity import (
     ConstructionCaliber,
     ConstructionInterface,
@@ -540,6 +544,10 @@ def _baseline_execution_entries(algorithm: str) -> tuple[tuple[str, str], ...]:
         ("baseline-entry-point", location),
         ("baseline-parameter-layout", layout_text),
         ("baseline-effective-seed", _BASELINE_EFFECTIVE_SEED),
+        (
+            "arm-b-seed-scope-conflict",
+            ARM_B_SCOPE_CONFLICT,
+        ),
         ("baseline-effective-samples", "500"),
         ("baseline-effective-bluff-freq", "0.1"),
         (
@@ -710,3 +718,43 @@ def require_instantiation_caliber(
             raise IdentityMappingError(
                 f"执行身份的实例化口径与当前构造口径不一致：{name}"
             )
+
+
+@dataclass(frozen=True)
+class KappaDecisionPlan:
+    """一次基线决策的构造计划。只描述标识、接口与材料引用，不构造策略。"""
+
+    identifier: str
+    interface: str
+    purpose_label: str
+    index_key: tuple[str, ...]
+    seed: int
+    samples: int
+    bluff_freq: str
+
+
+def build_kappa_decision_plan(
+    purpose_label: str,
+    index_key: tuple[str, ...],
+    seed: int,
+) -> KappaDecisionPlan:
+    """记录逐 κ 的构造口径。samples 与 bluff_freq 保持类默认，不随 κ 改变。"""
+    if purpose_label not in ("non_probed", "arm_b"):
+        raise SpecIncompleteError("逐 κ 构造计划只描述基线成员的决策")
+    if len(index_key) != 6:
+        raise SpecIncompleteError("κ 键必须是六字段")
+    if (
+        isinstance(seed, bool)
+        or not isinstance(seed, int)
+        or not 0 <= seed < _PLAN_VALUE_UPPER_BOUND
+    ):
+        raise IdentityMappingError("不得传入空种子或越界种子")
+    return KappaDecisionPlan(
+        identifier=BASELINE_IDENTIFIER,
+        interface="registry-seed",
+        purpose_label=purpose_label,
+        index_key=index_key,
+        seed=seed,
+        samples=500,
+        bluff_freq="0.10",
+    )
