@@ -169,9 +169,13 @@ def test_closed_categories_contain_forty_five_entries() -> None:
     assert sum(len(entries) for _, entries in record.categories) == 45
     assert "per-hand-arm_b-material" in KNOWN_PLAIN_TEXTS
     assert "per-kappa-arm_b-material" in KNOWN_PLAIN_TEXTS
-    assert "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material" in KNOWN_PLAIN_TEXTS
+    assert "per-kappa-derived-arm_b-material" in KNOWN_PLAIN_TEXTS
+    assert (
+        "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material/"
+        "v3-per-kappa-derived-arm_b-material"
+    ) in KNOWN_PLAIN_TEXTS
     assert "pending:per-hand-arm_b-material-vs-per-kappa-arm_b" not in KNOWN_PLAIN_TEXTS
-    assert len(KNOWN_PLAIN_TEXTS) == 9
+    assert len(KNOWN_PLAIN_TEXTS) == 10
 
 
 def test_bluff_freq_encoding_rejects_other_numeric_forms() -> None:

@@ -64,7 +64,12 @@ from app.verification import (
     schedule_digest,
     source_manifest_digest,
 )
-from app.verification.protocol import PROTOCOL_SCHEMA_V2, v2_record_sort_key
+from app.verification.config import randomization_protocol_version
+from app.verification.protocol import (
+    PROTOCOL_SCHEMA_V3,
+    kappa_key_rules_v3_digest,
+    v2_record_sort_key,
+)
 
 # 测试自建的牌规范序：先点数后花色，共一副牌。
 DECK_ORDER: tuple[str, ...] = tuple(
@@ -359,7 +364,7 @@ def identity_categories() -> dict[str, list[tuple[str, str]]]:
             ("baseline-effective-seed", "per-hand-arm_b-material"),
             (
                 "arm-b-seed-scope-conflict",
-                "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material",
+                "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material/v3-per-kappa-derived-arm_b-material",
             ),
             ("baseline-effective-samples", "500"),
             ("baseline-effective-bluff-freq", "0.1"),
@@ -400,7 +405,12 @@ def caliber_categories(
     """六类条目都按当前规格、材料、审计和手造清单重算，不保留占位摘要。"""
     algorithm = spec.protocol.digest_algorithm
     generator_digest = source_manifest_digest(manifests.generator, algorithm=algorithm)
-    protocol_version = 2 if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2 else 1
+    protocol_version = randomization_protocol_version(spec.protocol)
+    key_rules = (
+        kappa_key_rules_v3_digest(algorithm=algorithm)
+        if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V3
+        else purpose_index_mapping_v2_digest(algorithm=algorithm)
+    )
     campaign = campaign_configuration_digest(
         num_players=spec.num_players,
         starting_stack=spec.starting_stack,
@@ -443,10 +453,7 @@ def caliber_categories(
             ("audit-commitment-digest", commitment_digest(audit.commitment)),
             ("generator-code-digest", generator_digest),
             ("randomization-protocol-schema", spec.protocol.protocol_schema),
-            (
-                "kappa-key-rules-digest",
-                purpose_index_mapping_v2_digest(algorithm=algorithm),
-            ),
+            ("kappa-key-rules-digest", key_rules),
             (
                 "closed-keyset-digest",
                 closed_keyset_binding_digest(closed_entries, algorithm=algorithm),
@@ -1067,6 +1074,218 @@ def build_v2_frozen_fixture(
     by_hand: dict[int, list[MaterialEntry]] = {}
     for entry in material_entries:
         by_hand.setdefault(int(entry.index_key[2]), []).append(entry)
+    bundle = tuple(
+        HandMaterials(hand_ordinal=plan.hand_ordinal, entries=tuple(by_hand[plan.hand_ordinal]))
+        for plan in spec.schedule
+    )
+    caliber = construction_caliber()
+    identity = build_execution_identity_record(
+        caliber_categories(
+            caliber,
+            spec,
+            bundle,
+            audit,
+            material_manifest,
+            manifests,
+            closed_entries=rows,
+        )
+    )
+    fixture = Fixture(
+        spec=spec,
+        caliber=caliber,
+        bundle=bundle,
+        audit=audit,
+        identity=identity,
+        material_manifest=material_manifest,
+        source_manifests=manifests,
+        manifest=build_frozen_manifest(
+            spec=spec,
+            caliber=caliber,
+            bundle=bundle,
+            audit=audit,
+            execution_identity=identity,
+            material_manifest=material_manifest,
+            closed_entries=rows,
+        ),
+    )
+    return fixture, rows
+
+
+def v3_protocol_spec() -> RandomizationProtocolSpec:
+    """夹具用的版本 3 键形。主值在发牌之前，不是战役协议。"""
+    fixed = FixedDomain(size=1 << 256)
+    kappa = ("campaign", "block", "hand", "seat", "event_index", "sigma_public")
+    kappa_integers = ("block", "hand", "seat", "event_index")
+    return RandomizationProtocolSpec(
+        source_interface_id="python-os-urandom@1",
+        environment_record="local-single-process-no-parallel@1",
+        rejection_rule="rejection-whole-multiple-truncation-v1",
+        purposes=(
+            PurposeSpec(
+                role=PurposeRole.MASTER,
+                label="master",
+                index_fields=("campaign",),
+                domain=fixed,
+                bit_width=256,
+            ),
+            PurposeSpec(
+                role=PurposeRole.DEAL,
+                label="deal",
+                index_fields=("campaign", "block", "hand", DRAW_FIELD),
+                integer_fields=("block", "hand", DRAW_FIELD),
+                draw_index_field=DRAW_FIELD,
+                domain=ShrinkingDomain(initial_size=52),
+                bit_width=8,
+            ),
+            PurposeSpec(
+                role=PurposeRole.NON_PROBED_SEED,
+                label="non_probed",
+                index_fields=kappa,
+                integer_fields=kappa_integers,
+                seat_index_field=SEAT_FIELD,
+                domain=fixed,
+                bit_width=256,
+            ),
+            PurposeSpec(
+                role=PurposeRole.UNDER_TEST_MATERIAL,
+                label="arm_m",
+                index_fields=("campaign", "block", "hand"),
+                integer_fields=("block", "hand"),
+                domain=fixed,
+                bit_width=256,
+            ),
+            PurposeSpec(
+                role=PurposeRole.BASELINE_SEED,
+                label="arm_b",
+                index_fields=kappa,
+                integer_fields=kappa_integers,
+                seat_index_field=SEAT_FIELD,
+                domain=fixed,
+                bit_width=256,
+            ),
+        ),
+        traversal_order=("master", "deal", "non_probed", "arm_m", "arm_b"),
+        commitment_form="single-digest-seal",
+        audit_format_version=1,
+        digest_algorithm=DIGEST_ALGORITHMS[0],
+        read_record_encoding=READ_RECORD_ENCODINGS[0],
+        protocol_schema=PROTOCOL_SCHEMA_V3,
+    )
+
+
+def v3_run_spec(
+    *,
+    num_players: int = 2,
+    probed_seat: int = 1,
+    hands: int = 1,
+) -> DomainRunSpec:
+    """夹具规格使用版本 3 键形，campaign 按协议版本 3 重算。"""
+    base = run_spec(num_players=num_players, probed_seat=probed_seat, hands=hands)
+    campaign = campaign_configuration_digest(
+        num_players=base.num_players,
+        starting_stack=base.starting_stack,
+        small_blind=base.small_blind,
+        big_blind=base.big_blind,
+        baseline_identifier=base.baseline_identifier,
+        under_test_identifier=base.under_test_identifier,
+        lock_versions=base.campaign_configuration.lock_versions,
+        randomization_protocol=3,
+    )
+    return base.model_copy(update={"protocol": v3_protocol_spec(), "campaign": campaign})
+
+
+def _manifest_with_extra_files(
+    manifest: dict[str, object], extra: tuple[str, ...]
+) -> dict[str, object]:
+    """在手造清单上补路径。摘要仍是占位，不读取这些文件。"""
+    files = list(manifest["files"])  # type: ignore[arg-type]
+    digest = files[0]["sha256"]
+    present = {row["path"] for row in files}
+    for path in extra:
+        if path not in present:
+            files.append({"path": path, "sha256": digest})
+    files.sort(key=lambda row: row["path"])
+    updated = dict(manifest)
+    updated["files"] = files
+    return updated
+
+
+def v3_source_manifests() -> SourceManifestSet:
+    """版本 3 主链夹具的清单：派生模块、公开投影和编排器都在文件里。"""
+    base = fixture_source_manifests()
+    derive = "backend/app/verification/kappa_derive.py"
+    projection = "backend/app/poker/k2_public_projection.py"
+    orchestrator = "backend/tools/kappa_orchestrator.py"
+    return SourceManifestSet(
+        runner=base.runner,
+        generator=_manifest_with_extra_files(base.generator, (derive,)),
+        engine=_manifest_with_extra_files(base.engine, (projection, orchestrator)),
+        baseline_strategy=base.baseline_strategy,
+        under_test_strategy=base.under_test_strategy,
+        verification=_manifest_with_extra_files(base.verification, (derive,)),
+    )
+
+
+def _v3_retained_rows(spec: DomainRunSpec) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """发牌与被测材料的闭合键。不含主值，也不含派生用途。"""
+    campaign = spec.campaign
+    block = str(spec.block)
+    rows: list[tuple[str, tuple[str, ...]]] = []
+    draws = spec.deal.draw_count(spec.num_players)
+    for plan in spec.schedule:
+        hand = str(plan.hand_ordinal)
+        for draw in range(draws):
+            rows.append(("deal", (campaign, block, hand, str(draw))))
+        rows.append(("arm_m", (campaign, block, hand)))
+    return tuple(sorted(rows, key=lambda item: v2_record_sort_key(item[0], item[1])))
+
+
+def _v3_fixture_output(label: str, key: tuple[str, ...]) -> int:
+    """给夹具键一个落在输出域内的整数。不是战役材料。"""
+    if label == "deal":
+        return int(key[3])
+    return 1 << 200
+
+
+def build_v3_frozen_fixture(
+    *,
+    num_players: int = 2,
+    probed_seat: int = 1,
+    hands: int = 1,
+) -> tuple[Fixture, tuple[tuple[str, tuple[str, ...]], ...]]:
+    """拼出一份自洽的版本 3 冻结输入。主值、键和摘要都在内存中给定。"""
+    spec = v3_run_spec(num_players=num_players, probed_seat=probed_seat, hands=hands)
+    rows = _v3_retained_rows(spec)
+    master_key = (spec.campaign,)
+    master_value = 7
+    plan = (("master", master_key, master_value, None),) + tuple(
+        (label, key, _v3_fixture_output(label, key), None) for label, key in rows
+    )
+    material_entries = (
+        MaterialEntry(purpose_label="master", index_key=master_key, value=master_value),
+        *(
+            MaterialEntry(
+                purpose_label=label,
+                index_key=key,
+                value=_v3_fixture_output(label, key),
+            )
+            for label, key in rows
+        ),
+    )
+    material_manifest = MaterialManifest(entries=material_entries)
+    algorithm = spec.protocol.digest_algorithm
+    manifests = v3_source_manifests()
+    audit = audit_from_plan(
+        spec.protocol,
+        plan,
+        manifest_digest_value=manifest_digest(material_manifest, algorithm=algorithm),
+        generator_code_digest=source_manifest_digest(manifests.generator, algorithm=algorithm),
+    )
+    by_hand: dict[int, list[MaterialEntry]] = {plan.hand_ordinal: [] for plan in spec.schedule}
+    for entry in material_entries:
+        if entry.purpose_label == "master":
+            continue
+        by_hand[int(entry.index_key[2])].append(entry)
     bundle = tuple(
         HandMaterials(hand_ordinal=plan.hand_ordinal, entries=tuple(by_hand[plan.hand_ordinal]))
         for plan in spec.schedule

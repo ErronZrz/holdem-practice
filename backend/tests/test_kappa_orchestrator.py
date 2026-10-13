@@ -10,10 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from app.poker.actions import Action, ActionType
+from app.poker.actions import Action, ActionType, LegalActions
 from app.poker.cards import card_from_str
 from app.poker.engine import PokerEngine
+from app.poker.state import GameState
 from app.strategy.registry import create_strategy
+from app.verification.errors import ProtocolSpecError
+from app.verification.kappa_derive import require_derived_decision_records
 
 
 def _load_orchestrator():
@@ -157,3 +160,171 @@ def test_under_test_seat_uses_caller_action_not_a_new_identity(
     )
     assert calls == []
     assert engine.hand_over is True
+
+
+def _same_deal() -> PokerEngine:
+    """两臂共用的发牌。底牌固定，公共牌备好，不读取随机源。"""
+    engine = PokerEngine(2, small_blind=1, big_blind=2, starting_stack=200, seed=1)
+    engine.start_hand_with(
+        button=0,
+        hole_cards={
+            0: [card_from_str("As"), card_from_str("Ah")],
+            1: [card_from_str("Kd"), card_from_str("Kh")],
+        },
+        board=[
+            card_from_str("2c"),
+            card_from_str("7d"),
+            card_from_str("9h"),
+            card_from_str("3s"),
+            card_from_str("Jc"),
+        ],
+    )
+    return engine
+
+
+def _different_continuing_action(legal, baseline_action: tuple[str, int]) -> Action:
+    """选一个与基线不同、且不结束本手的动作，使之后的公开投影分叉。"""
+    options: list[Action] = []
+    if legal.can_call:
+        options.append(Action(ActionType.CALL))
+    if legal.can_check:
+        options.append(Action(ActionType.CHECK))
+    if legal.can_raise:
+        options.append(Action(ActionType.RAISE, legal.min_raise_to))
+    if legal.can_bet:
+        options.append(Action(ActionType.BET, legal.min_bet))
+    for action in options:
+        if (action.type.value, action.amount) != baseline_action:
+            return action
+    raise AssertionError("没有与基线不同且能让本手继续的动作")
+
+
+def _slot(record: dict[str, object]) -> tuple[str, str]:
+    key = record["index_key"]
+    assert isinstance(key, tuple)
+    return (key[3], key[4])
+
+
+def _merge_records(groups: list[list[dict[str, object]]]) -> list[dict[str, object]]:
+    """两臂里完整键相同的决策只留一条。"""
+    merged: list[dict[str, object]] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    for records in groups:
+        for record in records:
+            key = record["index_key"]
+            assert isinstance(key, tuple)
+            location = (str(record["purpose_label"]), key)
+            if location in seen:
+                continue
+            seen.add(location)
+            merged.append(record)
+    return merged
+
+
+def test_two_arms_share_seeds_before_the_fork_and_differ_after() -> None:
+    module = _load_orchestrator()
+    campaign = "ab" * 32
+    master = b"\x11" * 32
+    probed_seat = 1
+    table = module.material_table_from_rows((("arm_m", (campaign, "0", "1"), 9),))
+    common = {
+        "campaign": campaign,
+        "block": 0,
+        "hand_ordinal": 1,
+        "probed_seat": probed_seat,
+        "master": master,
+    }
+    baseline_engine = _same_deal()
+    baseline_records = module.play_hand(
+        baseline_engine, table, arm="baseline", **common
+    )
+    assert baseline_records
+    probed_history = [
+        item for item in baseline_engine.history if item["seat"] == probed_seat
+    ]
+    assert probed_history
+    baseline_probed = (probed_history[0]["action"], probed_history[0]["amount"])
+    seen_under_test: list[int] = []
+
+    def choose(state: GameState, legal: LegalActions, seed: int) -> Action:
+        assert seed == 9
+        seen_under_test.append(seed)
+        return _different_continuing_action(legal, baseline_probed)
+
+    under_engine = _same_deal()
+    under_records = module.play_hand(
+        under_engine,
+        table,
+        arm="under-test",
+        under_test_choose=choose,
+        **common,
+    )
+    assert under_records is not None
+    assert seen_under_test
+    assert baseline_engine.hand_over is True
+    assert under_engine.hand_over is True
+    assert any(record["purpose_label"] == "arm_b" for record in baseline_records)
+    assert all(record["purpose_label"] == "non_probed" for record in under_records)
+    assert all(_slot(record)[0] != str(probed_seat) for record in under_records)
+    baseline_by_slot = {_slot(record): record for record in baseline_records}
+    under_by_slot = {_slot(record): record for record in under_records}
+    shared_before = []
+    forked = []
+    for slot in set(baseline_by_slot) & set(under_by_slot):
+        left = baseline_by_slot[slot]
+        right = under_by_slot[slot]
+        left_key = left["index_key"]
+        right_key = right["index_key"]
+        assert isinstance(left_key, tuple) and isinstance(right_key, tuple)
+        if left_key[5] == right_key[5]:
+            assert left["value"] == right["value"]
+            shared_before.append(slot)
+        else:
+            assert left["value"] != right["value"]
+            forked.append(slot)
+            with pytest.raises(module.KappaMaterialMiss, match="没有该键"):
+                table.require("non_probed", right_key)
+    assert shared_before
+    assert forked
+    merged = _merge_records([baseline_records, under_records])
+    require_derived_decision_records(
+        merged,
+        master=master,
+        campaign=campaign,
+        block=0,
+        num_players=2,
+        probed_by_hand={1: probed_seat},
+    )
+    altered_value = dict(merged[0])
+    altered_value["value"] = 0 if merged[0]["value"] != 0 else 1
+    with pytest.raises(ProtocolSpecError, match="不符"):
+        require_derived_decision_records(
+            [altered_value, *merged[1:]],
+            master=master,
+            campaign=campaign,
+            block=0,
+            num_players=2,
+            probed_by_hand={1: probed_seat},
+        )
+    altered_seat = dict(merged[0])
+    key = altered_seat["index_key"]
+    assert isinstance(key, tuple)
+    altered_seat["index_key"] = (*key[:3], "1" if key[3] == "0" else "0", *key[4:])
+    with pytest.raises(ProtocolSpecError):
+        require_derived_decision_records(
+            [altered_seat, *merged[1:]],
+            master=master,
+            campaign=campaign,
+            block=0,
+            num_players=2,
+            probed_by_hand={1: probed_seat},
+        )
+    with pytest.raises(ProtocolSpecError, match="重复"):
+        require_derived_decision_records(
+            [merged[0], *merged],
+            master=master,
+            campaign=campaign,
+            block=0,
+            num_players=2,
+            probed_by_hand={1: probed_seat},
+        )

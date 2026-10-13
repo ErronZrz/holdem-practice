@@ -88,6 +88,7 @@ def bundle_payload(bundle: Sequence[HandMaterials]) -> list[dict[str, object]]:
 
 _VALUE_UPPER_BOUND = 1 << 256
 _PROTOCOL_V2 = "randomization-protocol-v2"
+_PROTOCOL_V3 = "randomization-protocol-v3"
 
 
 def _hand_locations(
@@ -224,6 +225,40 @@ def _require_v2_supplied_order(
                 raise SpecIncompleteError("发牌材料的取值超出该次抽取的输出域")
 
 
+def _require_v3_hand_materials(spec: DomainRunSpec, bundle: Sequence[HandMaterials]) -> None:
+    """送交材料只保留发牌与被测材料，并核对手序、整数字段和值域。不读取主值。"""
+    if len(bundle) != len(spec.schedule):
+        raise SpecIncompleteError("材料束必须与手序计划一一对应")
+    protocol = spec.protocol
+    draw_count = spec.deal.draw_count(spec.num_players)
+    deal_purpose = protocol.purpose_for_label("deal")
+    for plan, hand in zip(spec.schedule, bundle, strict=True):
+        if hand.hand_ordinal != plan.hand_ordinal:
+            raise SpecIncompleteError("材料束的块内手序必须与手序计划一致")
+        labels = [entry.purpose_label for entry in hand.entries]
+        if any(label in {"non_probed", "arm_b", "master"} for label in labels):
+            raise SpecIncompleteError("送交手牌不得列入基线逐决策材料或主值")
+        if labels.count("arm_m") != 1 or labels.count("deal") != draw_count:
+            raise SpecIncompleteError("每手必须有全部发牌材料和一条被测材料")
+        if set(labels) != {"deal", "arm_m"}:
+            raise SpecIncompleteError("送交手牌含有未保留的用途")
+        _require_sorted_positions(_hand_locations(spec, hand, hand_ordinal=plan.hand_ordinal))
+        deal_entries = hand.entries_for("deal")
+        draws = [deal_purpose.draw_index_of(entry.index_key) for entry in deal_entries]
+        if draws != list(range(draw_count)):
+            raise SpecIncompleteError("发牌材料的抽取次序必须从零起连续")
+        for index, entry in enumerate(deal_entries):
+            if not 0 <= entry.value < deal_purpose.domain.domain_size(index):
+                raise SpecIncompleteError("发牌材料的取值超出该次抽取的输出域")
+        probed = hand.entries_for("arm_m")[0]
+        if (
+            isinstance(probed.value, bool)
+            or not isinstance(probed.value, int)
+            or not 0 <= probed.value < _VALUE_UPPER_BOUND
+        ):
+            raise SpecIncompleteError("被测材料的取值超出范围")
+
+
 def require_supplied_materials_order(
     spec: DomainRunSpec,
     bundle: Sequence[HandMaterials],
@@ -231,6 +266,9 @@ def require_supplied_materials_order(
     closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> None:
     """送交材料必须逐手对应计划。旧版按人数固定条数；另一版按闭合集切片。"""
+    if spec.protocol.protocol_schema == _PROTOCOL_V3:
+        _require_v3_hand_materials(spec, bundle)
+        return
     if spec.protocol.protocol_schema == _PROTOCOL_V2:
         _require_v2_supplied_order(spec, bundle, closed_entries)
         return

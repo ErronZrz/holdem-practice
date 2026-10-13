@@ -1,6 +1,7 @@
 """包外编排：决策前编码公开投影，再查已经生成的材料。
 
 对局推进只发生在本模块。查表未命中即停止。本模块没有补料或回呼生成器的参数。
+给出主值时，派生出的每次决策留在内存列表里，不写文件。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from app.poker.engine import PokerEngine
 from app.poker.k2_public_projection import sigma_public_hex
 from app.poker.state import GameState
 from app.strategy.registry import create_strategy
+from app.verification.kappa_derive import derive_kappa_seed
 
 _BASELINE = "heuristic@1"
 
@@ -68,10 +70,23 @@ def play_hand(
     probed_seat: int,
     arm: str,
     under_test_choose: Callable[[GameState, LegalActions, int], Action] | None = None,
-) -> None:
-    """推进一手牌。每次决策新建基线实例；缺键时不提交动作。"""
+    master: bytes | None = None,
+    decisions: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]] | None:
+    """推进一手牌。每次决策新建基线实例；缺键时不提交动作。
+
+    给出主值时，把每次派生决策追加到列表。未给出列表就新建一份并返回。
+    没有主值时不收集，返回空，以免把查表结果写成派生记录。
+    """
     if arm not in ("baseline", "under-test"):
         raise KappaMaterialMiss("臂必须是基线或被测")
+    collected: list[dict[str, object]] | None
+    if master is None:
+        collected = None
+    elif decisions is None:
+        collected = []
+    else:
+        collected = decisions
     next_index: dict[int, int] = {}
     while not engine.hand_over:
         state = engine.snapshot()
@@ -89,9 +104,12 @@ def play_hand(
             arm=arm,
             event_index=event_index,
             under_test_choose=under_test_choose,
+            master=master,
+            decisions=collected,
         )
         engine.apply_action(action)
         next_index[seat] = event_index + 1
+    return collected
 
 
 def _action_for_decision(
@@ -106,6 +124,8 @@ def _action_for_decision(
     arm: str,
     event_index: int,
     under_test_choose: Callable[[GameState, LegalActions, int], Action] | None,
+    master: bytes | None = None,
+    decisions: list[dict[str, object]] | None = None,
 ) -> Action:
     if arm == "under-test" and state.current_seat == probed_seat:
         seed = table.require("arm_m", (campaign, str(block), str(hand_ordinal)))
@@ -114,16 +134,21 @@ def _action_for_decision(
         return under_test_choose(state, legal, seed)
     purpose = "arm_b" if state.current_seat == probed_seat else "non_probed"
     sigma = sigma_public_hex(state, legal)
-    seed = table.require(
-        purpose,
-        (
-            campaign,
-            str(block),
-            str(hand_ordinal),
-            str(state.current_seat),
-            str(event_index),
-            sigma,
-        ),
+    key = (
+        campaign,
+        str(block),
+        str(hand_ordinal),
+        str(state.current_seat),
+        str(event_index),
+        sigma,
     )
+    if master is not None:
+        seed = derive_kappa_seed(master, purpose, key)
+        if decisions is not None:
+            decisions.append(
+                {"purpose_label": purpose, "index_key": key, "value": seed}
+            )
+    else:
+        seed = table.require(purpose, key)
     strategy = create_strategy(_BASELINE, seed=seed)
     return strategy.choose_action(state, legal)

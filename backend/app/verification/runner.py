@@ -53,10 +53,13 @@ from .protocol import (
     LOCKED_ENVIRONMENT_RECORD,
     LOCKED_SOURCE_INTERFACE,
     PROTOCOL_SCHEMA_V2,
+    PROTOCOL_SCHEMA_V3,
     AuditedMaterials,
     ReadRecord,
+    _verify_v3_retained_binding,
     closed_keyset_binding_digest,
     commitment_digest,
+    kappa_key_rules_v3_digest,
     protocol_digest,
     purpose_index_mapping_digest,
     purpose_index_mapping_v2_digest,
@@ -67,7 +70,11 @@ from .protocol import (
     verify_material_binding,
     verify_v2_closed_binding,
 )
-from .source_manifest import require_source_manifest, source_manifest_digest
+from .source_manifest import (
+    require_source_manifest,
+    require_v3_manifest_files,
+    source_manifest_digest,
+)
 
 # 材料生成器清单的唯一入口。摘要必须由显式传入的清单重算，不能只核对十六进制形状。
 _GENERATOR_ENTRYPOINT: tuple[str, ...] = ("backend/tools/material_generator.py",)
@@ -307,10 +314,15 @@ def _require_bound_execution_identity(
         protocol_digest(spec.protocol),
     )
     schema = spec.protocol.protocol_schema
-    expected_version = "2" if schema == PROTOCOL_SCHEMA_V2 else "1"
+    if schema == PROTOCOL_SCHEMA_V3:
+        expected_version = "3"
+    elif schema == PROTOCOL_SCHEMA_V2:
+        expected_version = "2"
+    else:
+        expected_version = "1"
     _require_identity_value(
         "randomization-protocol-version",
-        protocol_entries["randomization-protocol-version"],
+        _bound_value(protocol_entries, "randomization-protocol-version"),
         expected_version,
     )
     _require_identity_value(
@@ -318,22 +330,31 @@ def _require_bound_execution_identity(
         _bound_value(protocol_entries, "randomization-protocol-schema"),
         schema,
     )
+    key_rules = (
+        kappa_key_rules_v3_digest(algorithm=algorithm)
+        if schema == PROTOCOL_SCHEMA_V3
+        else purpose_index_mapping_v2_digest(algorithm=algorithm)
+    )
     _require_identity_value(
         "kappa-key-rules-digest",
         _bound_value(protocol_entries, "kappa-key-rules-digest"),
-        purpose_index_mapping_v2_digest(algorithm=algorithm),
+        key_rules,
     )
-    bound_entries = closed_entries if schema == PROTOCOL_SCHEMA_V2 else None
+    bound_entries = closed_entries if schema in {PROTOCOL_SCHEMA_V2, PROTOCOL_SCHEMA_V3} else None
     _require_identity_value(
         "closed-keyset-digest",
         _bound_value(protocol_entries, "closed-keyset-digest"),
         closed_keyset_binding_digest(bound_entries, algorithm=algorithm),
     )
-    if schema == PROTOCOL_SCHEMA_V2:
+    if schema in {PROTOCOL_SCHEMA_V2, PROTOCOL_SCHEMA_V3}:
         if spec.protocol.source_interface_id != LOCKED_SOURCE_INTERFACE:
-            raise FreezeBindingError("v2 协议的来源与锁定值不符")
+            raise FreezeBindingError("协议的来源与锁定值不符")
         if spec.protocol.environment_record != LOCKED_ENVIRONMENT_RECORD:
-            raise FreezeBindingError("v2 协议的环境与锁定值不符")
+            raise FreezeBindingError("协议的环境与锁定值不符")
+    if schema == PROTOCOL_SCHEMA_V3:
+        require_v3_manifest_files(
+            generator_manifest, engine_manifest, verification_manifest
+        )
     _require_identity_value(
         "source-interface-id",
         protocol_entries["source-interface-id"],
@@ -452,8 +473,9 @@ def verify_frozen_inputs(
 ) -> None:
     """核验本次输入就是冻结清单所指的那一份，并核验材料来源可复核。
 
-    校验顺序：v2 协议先核对闭合集、材料清单与审计的三方相等及手序锚点；
-    缺少闭合集即失败，不能绕过。规格上的 campaign 必须等于协议版本 2 的配置摘要。
+    校验顺序：版本 3 先核对发牌与被测材料在闭合集、清单、读取和送交材料上逐键相等，
+    主值只留在清单与读取里。版本 2 先核对闭合集、材料清单与审计的三方相等及手序锚点。
+    缺少闭合集即失败，不能绕过。规格上的 campaign 必须等于该协议版本的配置摘要。
     其后复核审计材料本身，再确认材料与审计逐项配对，
     再走清单三步链（清单 ↔ 审计 ↔ 送交材料 ↔ 承诺里的清单摘要），再校验材料与规格的结构一致，
     再走身份口径主链（显式构造口径与规格标识的逐字比对、基线一侧接口与公开摘要及座位范围
@@ -464,7 +486,36 @@ def verify_frozen_inputs(
     protocol = spec.protocol
     if manifest.digest_algorithm != protocol.digest_algorithm:
         raise FreezeBindingError("冻结清单的摘要算法与协议不一致")
-    if protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+    if protocol.protocol_schema == PROTOCOL_SCHEMA_V3:
+        if closed_entries is None:
+            raise FreezeBindingError("版本 3 的冻结输入缺少发牌与被测材料的闭合集")
+        probed_by_hand = {plan.hand_ordinal: plan.probed_seat for plan in spec.schedule}
+        digest_fields = {
+            "num_players": spec.num_players,
+            "starting_stack": spec.starting_stack,
+            "small_blind": spec.small_blind,
+            "big_blind": spec.big_blind,
+            "baseline_identifier": spec.baseline_identifier,
+            "under_test_identifier": spec.under_test_identifier,
+            "lock_versions": spec.campaign_configuration.lock_versions,
+        }
+        campaign_v3 = campaign_configuration_digest(**digest_fields, randomization_protocol=3)
+        if spec.campaign != campaign_v3:
+            raise FreezeBindingError("规格上的 campaign 必须是协议版本 3 的配置摘要")
+        _verify_v3_retained_binding(
+            closed_entries,
+            material_manifest,
+            audit.reads,
+            bundle,
+            protocol=protocol,
+            campaign=campaign_v3,
+            campaign_v1=campaign_configuration_digest(**digest_fields, randomization_protocol=1),
+            campaign_v2=campaign_configuration_digest(**digest_fields, randomization_protocol=2),
+            block=spec.block,
+            draw_count=spec.deal.draw_count(spec.num_players),
+            probed_by_hand=probed_by_hand,
+        )
+    elif protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
         if closed_entries is None:
             raise FreezeBindingError("v2 冻结输入缺少闭合集，三方相等未执行")
         probed_by_hand = {plan.hand_ordinal: plan.probed_seat for plan in spec.schedule}

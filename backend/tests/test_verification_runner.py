@@ -170,10 +170,14 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
             "purpose_index_mapping_v2_payload",
             "purpose_index_mapping_v2_digest",
             "protocol_declares_v2_keys",
+            "protocol_declares_v3_keys",
             "randomization_protocol_v2_payload",
+            "randomization_protocol_v3_payload",
+            "kappa_key_rules_v3_digest",
             "validate_explicit_v2_keyset",
             "verify_v2_closed_binding",
             "require_v2_schedule_anchors",
+            "require_v3_schedule_anchors",
             "v2_record_sort_key",
         }
     ),
@@ -189,7 +193,10 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
         }
     ),
     f"{PACKAGE_NAME}.source_manifest": frozenset(
-        {"require_source_manifest", "source_manifest_digest"}
+        {"require_source_manifest", "source_manifest_digest", "require_v3_manifest_files"}
+    ),
+    f"{PACKAGE_NAME}.kappa_derive": frozenset(
+        {"derive_kappa_seed", "require_derived_decision_records"}
     ),
 }
 
@@ -202,6 +209,7 @@ ALLOWED_IMPORTS: frozenset[str] = frozenset(
         "datetime",
         "enum",
         "hashlib",
+        "hmac",
         "json",
         "math",
         "types",

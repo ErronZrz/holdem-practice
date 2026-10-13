@@ -35,6 +35,7 @@ from .execution_identity import (
     INSTANTIATION_CALIBER_CATEGORY,
     SEED_SENTENCE_V1,
     SEED_SENTENCE_V2,
+    SEED_SENTENCE_V3,
     ExecutionIdentityRecord,
 )
 from .identity import (
@@ -47,13 +48,20 @@ from .identity import (
     require_explicit_seed,
     require_identifier_match,
 )
+from .kappa_derive import DERIVATION_ALGORITHM
 from .materials import (
     HandMaterials,
     MaterialEntry,
+    _require_v3_hand_materials,
     bundle_payload,
     require_supplied_materials_order,
 )
-from .protocol import PROTOCOL_SCHEMA_V2, PurposeRole, RandomizationProtocolSpec
+from .protocol import (
+    PROTOCOL_SCHEMA_V2,
+    PROTOCOL_SCHEMA_V3,
+    PurposeRole,
+    RandomizationProtocolSpec,
+)
 
 # 基线身份的受控注册表构造位置：只作位置绑定与记录，本包不导入也不调用该模块。
 BASELINE_REGISTRY_LOCATION = "app.strategy.registry.create_strategy"
@@ -111,6 +119,11 @@ def require_material_format(mapping: ConstructionMapping, value: int) -> None:
     require_explicit_seed(value)
 
 
+def _require_v3_baseline_limits(caliber: ConstructionCaliber) -> None:
+    """基线一侧的接口、公开摘要与座位范围。这一步不读取材料。"""
+    require_baseline_limits(require_registry_seed_mapping(caliber.baseline))
+
+
 def require_construction_calibers(
     spec: DomainRunSpec,
     caliber: ConstructionCaliber,
@@ -124,6 +137,10 @@ def require_construction_calibers(
     并为每个臂、每一手构造座位计划（计划同时校验材料与座位的对应关系）。
     """
     require_caliber_matches_spec(spec, caliber)
+    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V3:
+        _require_v3_baseline_limits(caliber)
+        _require_v3_supplied_materials(spec, bundle)
+        return
     if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
         _require_v2_construction(spec, caliber, bundle, closed_entries)
         return
@@ -187,9 +204,33 @@ def materials_digest(
     algorithm: str,
     closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> str:
-    """由材料束内容重算摘要。编码前先核对送交材料的次序与索引。"""
+    """由材料束内容重算摘要。版本 3 只绑定规则与主值定位，不列入逐键整数。"""
+    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V3:
+        _require_v3_supplied_materials(spec, bundle)
+        return content_digest(
+            _v3_binding_payload("supplied-materials-v3"), algorithm=algorithm
+        )
     require_supplied_materials_order(spec, bundle, closed_entries=closed_entries)
     return content_digest(bundle_payload(bundle), algorithm=algorithm)
+
+
+def _v3_binding_payload(schema: str) -> dict[str, object]:
+    """版本 3 的构造计划或送交材料。两份对象的模式名不同，字段集合相同。"""
+    if schema not in {"construction-plan-v3", "supplied-materials-v3"}:
+        raise IdentityMappingError("版本 3 载荷的模式名不符")
+    return {
+        "schema": schema,
+        "protocol_schema": PROTOCOL_SCHEMA_V3,
+        "master_read_index": 0,
+        "derivation_algorithm": DERIVATION_ALGORITHM,
+    }
+
+
+def _require_v3_supplied_materials(
+    spec: DomainRunSpec, bundle: Sequence[HandMaterials]
+) -> None:
+    """版本 3 的手内材料只保留发牌与被测材料，并核对其键与值域。"""
+    _require_v3_hand_materials(spec, bundle)
 
 
 def _single_material(
@@ -222,7 +263,7 @@ def require_materials(
 ) -> None:
     """校验材料束与规格一致：手数、逐手完整性、座位覆盖、取值域与协议声明。"""
     require_supplied_materials_order(spec, bundle, closed_entries=closed_entries)
-    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+    if spec.protocol.protocol_schema in {PROTOCOL_SCHEMA_V2, PROTOCOL_SCHEMA_V3}:
         return
     if len(bundle) != len(spec.schedule):
         raise SpecIncompleteError("材料束必须与手序计划一一对应")
@@ -733,8 +774,11 @@ def _baseline_execution_payload(algorithm: str) -> dict[str, object]:
 
 
 def _seed_sentence(spec: DomainRunSpec) -> str:
-    """按协议选择基线种子的来源句。两句不能互换。"""
-    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+    """按协议选择基线种子的来源句。三句不能互换。"""
+    schema = spec.protocol.protocol_schema
+    if schema == PROTOCOL_SCHEMA_V3:
+        return SEED_SENTENCE_V3
+    if schema == PROTOCOL_SCHEMA_V2:
         return SEED_SENTENCE_V2
     return SEED_SENTENCE_V1
 
@@ -817,6 +861,10 @@ def plan_payload(
     closed_entries: Sequence[tuple[str, tuple[str, ...]]] | None = None,
 ) -> list[dict[str, object]] | dict[str, object]:
     """逐手逐臂逐座位的构造计划规范编码：由显式构造口径唯一确定。"""
+    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V3:
+        _require_v3_baseline_limits(caliber)
+        _require_v3_supplied_materials(spec, bundle)
+        return _v3_binding_payload("construction-plan-v3")
     if len(bundle) != len(spec.schedule):
         raise SpecIncompleteError("材料束必须与手序计划一一对应")
     multiple = spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V2

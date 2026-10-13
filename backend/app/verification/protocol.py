@@ -36,6 +36,7 @@ from .materials import (
 READ_RECORD_ENCODINGS: tuple[str, ...] = ("compact-json-v1",)
 PROTOCOL_SCHEMA_V1 = "randomization-protocol-v1"
 PROTOCOL_SCHEMA_V2 = "randomization-protocol-v2"
+PROTOCOL_SCHEMA_V3 = "randomization-protocol-v3"
 LOCKED_SOURCE_INTERFACE = "python-os-urandom@1"
 LOCKED_ENVIRONMENT_RECORD = "local-single-process-no-parallel@1"
 # 拒绝规则的规范标识：标识不变则规则内容不得变化。
@@ -60,6 +61,8 @@ class PurposeRole(StrEnum):
     UNDER_TEST_MATERIAL = "under-test-material"
     # 被测座位在基线一臂的材料。
     BASELINE_SEED = "baseline-seed"
+    # 一次生成过程里唯一的主值。它不是逐决策种子。
+    MASTER = "master-entropy"
 
 
 PURPOSE_ROLES: tuple[PurposeRole, ...] = (
@@ -276,7 +279,9 @@ class RandomizationProtocolSpec(BaseModel):
     audit_format_version: PositiveInt
     digest_algorithm: str
     read_record_encoding: str
-    protocol_schema: Literal[PROTOCOL_SCHEMA_V1, PROTOCOL_SCHEMA_V2] = PROTOCOL_SCHEMA_V1
+    protocol_schema: Literal[
+        PROTOCOL_SCHEMA_V1, PROTOCOL_SCHEMA_V2, PROTOCOL_SCHEMA_V3
+    ] = PROTOCOL_SCHEMA_V1
 
     @model_validator(mode="after")
     def _require_well_formed(self) -> Self:
@@ -291,8 +296,6 @@ class RandomizationProtocolSpec(BaseModel):
         if self.rejection_rule != REJECTION_RULE_ID:
             raise ProtocolSpecError("拒绝规则标识与锁定值不符")
         roles = [purpose.role for purpose in self.purposes]
-        if len(set(roles)) != len(roles) or set(roles) != set(PURPOSE_ROLES):
-            raise ProtocolSpecError("用途必须恰好覆盖四种角色各一次")
         labels = [purpose.label for purpose in self.purposes]
         if len(set(labels)) != len(labels):
             raise ProtocolSpecError("用途标签必须互不重复")
@@ -302,15 +305,28 @@ class RandomizationProtocolSpec(BaseModel):
             raise ProtocolSpecError(f"摘要算法未实现：{self.digest_algorithm!r}")
         if self.read_record_encoding not in READ_RECORD_ENCODINGS:
             raise ProtocolSpecError(f"逐读取记录编码未实现：{self.read_record_encoding!r}")
-        if self.protocol_schema == PROTOCOL_SCHEMA_V2:
-            if not protocol_declares_v2_keys(self):
-                raise ProtocolSpecError("v2 协议必须使用完整 κ 键形")
+        if self.protocol_schema == PROTOCOL_SCHEMA_V3:
+            expected = set(PURPOSE_ROLES) | {PurposeRole.MASTER}
+            if len(roles) != len(expected) or set(roles) != expected:
+                raise ProtocolSpecError("版本 3 的用途必须覆盖主值与四种角色各一次")
+            if not protocol_declares_v3_keys(self):
+                raise ProtocolSpecError("版本 3 协议的键形不符")
             if self.source_interface_id != LOCKED_SOURCE_INTERFACE:
-                raise ProtocolSpecError("v2 协议的来源必须是锁定的随机源接口")
+                raise ProtocolSpecError("版本 3 协议的来源必须是锁定的随机源接口")
             if self.environment_record != LOCKED_ENVIRONMENT_RECORD:
-                raise ProtocolSpecError("v2 协议的环境必须是锁定的单进程记录")
-        elif protocol_declares_v2_keys(self):
-            raise ProtocolSpecError("v1 schema 不得承载 v2 键形")
+                raise ProtocolSpecError("版本 3 协议的环境必须是锁定的单进程记录")
+        else:
+            if len(set(roles)) != len(roles) or set(roles) != set(PURPOSE_ROLES):
+                raise ProtocolSpecError("用途必须恰好覆盖四种角色各一次")
+            if self.protocol_schema == PROTOCOL_SCHEMA_V2:
+                if not protocol_declares_v2_keys(self):
+                    raise ProtocolSpecError("v2 协议必须使用完整 κ 键形")
+                if self.source_interface_id != LOCKED_SOURCE_INTERFACE:
+                    raise ProtocolSpecError("v2 协议的来源必须是锁定的随机源接口")
+                if self.environment_record != LOCKED_ENVIRONMENT_RECORD:
+                    raise ProtocolSpecError("v2 协议的环境必须是锁定的单进程记录")
+            elif protocol_declares_v2_keys(self):
+                raise ProtocolSpecError("v1 schema 不得承载 v2 键形")
         return self
 
     def purpose_for_role(self, role: PurposeRole) -> PurposeSpec:
@@ -885,6 +901,12 @@ def verify_material_binding(
     """
     supplied = _supplied_map(protocol, bundle)
     audited = _accepted_map(protocol, reads)
+    if protocol.protocol_schema == PROTOCOL_SCHEMA_V3:
+        audited = {
+            location: value
+            for location, value in audited.items()
+            if location[0] != "master"
+        }
     _require_same_locations("材料", "审计", supplied, audited)
     _require_draw_order_matches(protocol, bundle)
 
@@ -933,8 +955,16 @@ def verify_manifest_binding(
         manifest, algorithm=commitment.digest_algorithm
     ):
         raise MaterialBindingError("承诺里的清单摘要与清单内容不符")
-    _require_same_locations("清单", "审计", declared, _accepted_map(protocol, reads))
-    _require_same_locations("清单", "送交材料", declared, _supplied_map(protocol, bundle))
+    accepted = _accepted_map(protocol, reads)
+    supplied = _supplied_map(protocol, bundle)
+    _require_same_locations("清单", "审计", declared, accepted)
+    if protocol.protocol_schema == PROTOCOL_SCHEMA_V3:
+        declared = {
+            location: value
+            for location, value in declared.items()
+            if location[0] != "master"
+        }
+    _require_same_locations("清单", "送交材料", declared, supplied)
 
 
 V2_TRAVERSAL: tuple[str, ...] = ("deal", "non_probed", "arm_m", "arm_b")
@@ -1006,6 +1036,276 @@ def randomization_protocol_v2_payload() -> dict[str, object]:
         "audit_format_version": 1,
         "commitment_fields": list(_COMMITMENT_FIELD_NAMES),
     }
+
+
+V3_TRAVERSAL: tuple[str, ...] = ("master", "deal", "non_probed", "arm_m", "arm_b")
+_V3_MASTER_FIELDS: tuple[str, ...] = ("campaign",)
+
+
+def randomization_protocol_v3_payload() -> dict[str, object]:
+    """版本 3 协议载荷。主值排在发牌之前，拒绝标识不变。"""
+    mapping = purpose_index_mapping_v2_payload()
+    purposes = list(mapping["purposes"])
+    master = {
+        "label": "master",
+        "role": PurposeRole.MASTER.value,
+        "index_fields": list(_V3_MASTER_FIELDS),
+        "integer_fields": [],
+        "domain": {"kind": "fixed", "size": _DOMAIN_SIZE_2_256},
+        "bit_width": 256,
+    }
+    return {
+        "schema": PROTOCOL_SCHEMA_V3,
+        "rejection_rule": REJECTION_RULE_ID,
+        "purposes": [master, *purposes],
+        "traversal_order": list(V3_TRAVERSAL),
+        "digest_algorithm": "sha256",
+        "read_record_encoding": "compact-json-v1",
+        "audit_format_version": 1,
+        "commitment_fields": list(_COMMITMENT_FIELD_NAMES),
+    }
+
+
+def _kappa_key_rules_v3_payload() -> dict[str, object]:
+    """版本 3 的键规则：六字段键加上派生编码。不计算某次主值。"""
+    return {
+        "schema": "kappa-key-rules-v3",
+        "index_fields": ["campaign", "block", "hand", "seat", "event_index", "sigma_public"],
+        "algorithm": "hmac-sha256-domain-separated-v1",
+        "domain_label": "kappa-seed-derive-v1",
+        "length_prefix": "uint32-be",
+        "message_fields": [
+            "domain",
+            "purpose",
+            "campaign",
+            "block",
+            "hand",
+            "seat",
+            "event_index",
+            "sigma_public",
+        ],
+    }
+
+
+def kappa_key_rules_v3_digest(*, algorithm: str) -> str:
+    """重算版本 3 键规则摘要。"""
+    return content_digest(_kappa_key_rules_v3_payload(), algorithm=algorithm)
+
+
+def protocol_declares_v3_keys(protocol: RandomizationProtocolSpec) -> bool:
+    """版本 3 是否在四种角色之前声明主值，并且基线键仍是六字段。"""
+    if tuple(purpose.label for purpose in protocol.purposes) != V3_TRAVERSAL:
+        return False
+    if tuple(protocol.traversal_order) != V3_TRAVERSAL:
+        return False
+    master = protocol.purposes[0]
+    if (
+        master.role is not PurposeRole.MASTER
+        or master.index_fields != _V3_MASTER_FIELDS
+        or master.integer_fields != ()
+        or master.draw_index_field is not None
+        or master.seat_index_field is not None
+        or not isinstance(master.domain, FixedDomain)
+        or master.domain.size != _DOMAIN_SIZE_2_256
+        or master.bit_width != 256
+    ):
+        return False
+    rest = protocol.model_copy(
+        update={
+            "purposes": protocol.purposes[1:],
+            "traversal_order": V2_TRAVERSAL,
+            "protocol_schema": PROTOCOL_SCHEMA_V2,
+        }
+    )
+    return protocol_declares_v2_keys(rest)
+
+
+def require_v3_schedule_anchors(
+    entries: Sequence[tuple[str, tuple[str, ...]]],
+    *,
+    campaign: str,
+    block: int,
+    draw_count: int,
+    probed_by_hand: Mapping[int, int],
+) -> None:
+    """版本 3 的闭合集只覆盖发牌与被测材料。基线逐决策键不在这份清单里。"""
+    block_text = str(block)
+    deal: set[tuple[int, int]] = set()
+    arm_m: set[int] = set()
+    for label, index_key in entries:
+        if label in _KAPPA_LABELS:
+            raise ProtocolSpecError("版本 3 的闭合集不得列入基线逐决策键")
+        if index_key[0] != campaign or index_key[1] != block_text:
+            raise ProtocolSpecError("闭合集的 campaign 或 block 与规格不符")
+        hand = _parse_canonical_integer("hand", index_key[2])
+        if hand not in probed_by_hand:
+            raise ProtocolSpecError("闭合集含有手序计划之外的手")
+        if label == "deal":
+            deal.add((hand, _parse_canonical_integer("draw", index_key[3])))
+        elif label == "arm_m":
+            arm_m.add(hand)
+        else:
+            raise ProtocolSpecError("闭合集含有未声明的用途")
+    required_deal = {
+        (hand, draw) for hand in probed_by_hand for draw in range(draw_count)
+    }
+    if deal != required_deal:
+        raise ProtocolSpecError("闭合集的发牌键与手序所需抽取不符")
+    for hand in probed_by_hand:
+        if hand not in arm_m:
+            raise ProtocolSpecError("闭合集缺少 arm_m")
+
+
+_RETAINED_LABELS = frozenset({"deal", "arm_m"})
+
+
+def _require_retained_locator(
+    label: str,
+    index_key: tuple[str, ...],
+    *,
+    campaign: str,
+    campaign_v1: str,
+    campaign_v2: str,
+    block: int,
+    probed_by_hand: Mapping[int, int],
+) -> None:
+    """发牌与被测材料的 campaign、block、hand 必须落在当前规格上。"""
+    expected_len = 4 if label == "deal" else 3
+    if label not in _RETAINED_LABELS or len(index_key) != expected_len:
+        raise ProtocolSpecError("发牌或被测材料的键形不符")
+    if index_key[0] in {campaign_v1, campaign_v2} or index_key[0] != campaign:
+        raise ProtocolSpecError("发牌或被测材料的 campaign 必须等于协议版本 3 的配置摘要")
+    if _parse_canonical_integer("block", index_key[1]) != block:
+        raise ProtocolSpecError("发牌或被测材料的 block 与规格不符")
+    hand = _parse_canonical_integer("hand", index_key[2])
+    if hand not in probed_by_hand:
+        raise ProtocolSpecError("发牌或被测材料的 hand 不在手序计划内")
+    if label == "deal":
+        _parse_canonical_integer("draw", index_key[3])
+
+
+def _require_retained_value(
+    protocol: RandomizationProtocolSpec,
+    label: str,
+    index_key: tuple[str, ...],
+    value: int,
+) -> None:
+    """发牌取值落在当次收缩域内，被测材料落在完整种子域内。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ProtocolSpecError("发牌或被测材料的取值必须是整数")
+    if label == "deal":
+        purpose = protocol.purpose_for_label(label)
+        draw = purpose.draw_index_of(index_key)
+        if not 0 <= value < purpose.domain.domain_size(draw):
+            raise ProtocolSpecError("发牌材料的取值超出该次抽取的输出域")
+        return
+    _require_seed_octets(value)
+
+
+def _verify_v3_retained_binding(
+    entries: Sequence[tuple[str, tuple[str, ...]]],
+    manifest: MaterialManifest,
+    reads: Sequence[ReadRecord],
+    bundle: Sequence[HandMaterials],
+    *,
+    protocol: RandomizationProtocolSpec,
+    campaign: str,
+    campaign_v1: str,
+    campaign_v2: str,
+    block: int,
+    draw_count: int,
+    probed_by_hand: Mapping[int, int],
+) -> None:
+    """闭合集、清单、读取与送交材料在发牌和被测材料上逐键相等。主值不进送交材料。"""
+    require_v3_schedule_anchors(
+        entries,
+        campaign=campaign,
+        block=block,
+        draw_count=draw_count,
+        probed_by_hand=probed_by_hand,
+    )
+    ordered = sorted(entries, key=lambda item: v2_record_sort_key(item[0], item[1]))
+    locator = {
+        "campaign": campaign,
+        "campaign_v1": campaign_v1,
+        "campaign_v2": campaign_v2,
+        "block": block,
+        "probed_by_hand": probed_by_hand,
+    }
+    for label, index_key in ordered:
+        _require_retained_locator(label, index_key, **locator)
+    master_rows = [entry for entry in manifest.entries if entry.purpose_label == "master"]
+    if (
+        len(master_rows) != 1
+        or master_rows[0].index_key != (campaign,)
+        or manifest.entries[0].purpose_label != "master"
+    ):
+        raise MaterialBindingError("主值只能是清单的第一行，且键只有 campaign")
+    _require_seed_octets(master_rows[0].value)
+    for entry in manifest.entries:
+        if entry.purpose_label == "master":
+            continue
+        _require_retained_locator(entry.purpose_label, entry.index_key, **locator)
+    retained_manifest = [
+        (entry.purpose_label, entry.index_key)
+        for entry in manifest.entries
+        if entry.purpose_label != "master"
+    ]
+    if retained_manifest != ordered:
+        raise MaterialBindingError("材料清单的发牌与被测材料与闭合集不一致")
+    manifest_values = {
+        (entry.purpose_label, entry.index_key): entry.value
+        for entry in manifest.entries
+        if entry.purpose_label != "master"
+    }
+    master_reads = [record for record in reads if record.purpose_label == "master"]
+    if (
+        len(master_reads) != 1
+        or master_reads[0].read_index != 0
+        or not master_reads[0].accepted
+        or master_reads[0].index_key != (campaign,)
+        or master_reads[0].output != master_rows[0].value
+    ):
+        raise ProtocolAuditError("主值必须是序号为零的唯一接受读取，且与清单一致")
+    accepted: dict[tuple[str, tuple[str, ...]], int] = {}
+    accepted_order: list[tuple[str, tuple[str, ...]]] = []
+    for record in reads:
+        if record.purpose_label == "master":
+            continue
+        if record.purpose_label not in _RETAINED_LABELS:
+            raise ProtocolAuditError("读取记录含有未保留且非主值的用途")
+        _require_retained_locator(record.purpose_label, record.index_key, **locator)
+        if not record.accepted:
+            continue
+        location = (record.purpose_label, record.index_key)
+        if location in accepted or record.output is None:
+            raise MaterialBindingError("已接受的发牌或被测材料读取重复或缺少输出")
+        accepted[location] = record.output
+        accepted_order.append(location)
+    if accepted_order != ordered:
+        raise MaterialBindingError("已接受的发牌与被测材料偏离闭合集")
+    supplied: dict[tuple[str, tuple[str, ...]], int] = {}
+    for hand in bundle:
+        for entry in hand.entries:
+            if entry.purpose_label == "master":
+                raise MaterialBindingError("送交材料不得包含主值")
+            if entry.purpose_label not in _RETAINED_LABELS:
+                raise MaterialBindingError("送交材料含有未保留的用途")
+            location = (entry.purpose_label, entry.index_key)
+            if location in supplied:
+                raise MaterialBindingError("送交材料出现重复的发牌或被测材料键")
+            _require_retained_locator(entry.purpose_label, entry.index_key, **locator)
+            supplied[location] = entry.value
+    if set(supplied) != set(ordered):
+        raise MaterialBindingError("送交材料与闭合集在发牌和被测材料上不一致")
+    for label, index_key in ordered:
+        location = (label, index_key)
+        _require_retained_value(protocol, label, index_key, manifest_values[location])
+        if (
+            manifest_values[location] != accepted[location]
+            or supplied[location] != accepted[location]
+        ):
+            raise MaterialBindingError("发牌或被测材料的取值不一致")
 
 
 def purpose_index_mapping_v2_digest(*, algorithm: str) -> str:

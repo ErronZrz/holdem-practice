@@ -101,6 +101,31 @@ def require_source_manifest(manifest: Mapping[str, object]) -> dict[str, object]
     }
 
 
+_DERIVE_PATH = "backend/app/verification/kappa_derive.py"
+_PROJECTION_PATH = "backend/app/poker/k2_public_projection.py"
+_ORCHESTRATOR_PATH = "backend/tools/kappa_orchestrator.py"
+
+
+def require_v3_manifest_files(
+    generator_manifest: Mapping[str, object],
+    engine_manifest: Mapping[str, object],
+    verification_manifest: Mapping[str, object],
+) -> None:
+    """版本 3 的三份清单必须带上派生模块、公开投影和编排器。只看已提交对象。"""
+    generator = require_source_manifest(generator_manifest)
+    engine = require_source_manifest(engine_manifest)
+    verification = require_source_manifest(verification_manifest)
+    generator_files = {row["path"] for row in generator["files"]}
+    engine_files = {row["path"] for row in engine["files"]}
+    verification_files = {row["path"] for row in verification["files"]}
+    if _DERIVE_PATH not in generator_files or _DERIVE_PATH not in verification_files:
+        raise SourceManifestError("清单缺少派生模块")
+    if _PROJECTION_PATH not in engine_files or _ORCHESTRATOR_PATH not in engine_files:
+        raise SourceManifestError("清单缺少公开投影或编排器")
+    if _ORCHESTRATOR_PATH in engine["entrypoints"]:
+        raise SourceManifestError("编排器不得作为引擎清单的入口")
+
+
 def source_manifest_digest(manifest: Mapping[str, object], *, algorithm: str) -> str:
     """按规范编码重算清单内容摘要。"""
     return content_digest(require_source_manifest(manifest), algorithm=algorithm)

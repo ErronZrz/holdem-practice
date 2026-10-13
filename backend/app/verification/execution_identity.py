@@ -23,8 +23,10 @@ from .identity import ConstructionInterface, SeatScope
 _DIGEST_ALGORITHM = "sha256"
 SEED_SENTENCE_V1 = "per-hand-arm_b-material"
 SEED_SENTENCE_V2 = "per-kappa-arm_b-material"
+SEED_SENTENCE_V3 = "per-kappa-derived-arm_b-material"
 ARM_B_SCOPE_CONFLICT = (
-    "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material"
+    "settled:v1-per-hand-arm_b-material/v2-per-kappa-arm_b-material/"
+    "v3-per-kappa-derived-arm_b-material"
 )
 # 两种协议都能读到的普通文本。来源句仍按协议分开，不在这里合成一句。
 KNOWN_PLAIN_TEXTS: frozenset[str] = frozenset(
@@ -37,10 +39,11 @@ KNOWN_PLAIN_TEXTS: frozenset[str] = frozenset(
         "local-single-process-no-parallel@1",
         SEED_SENTENCE_V1,
         SEED_SENTENCE_V2,
+        SEED_SENTENCE_V3,
         ARM_B_SCOPE_CONFLICT,
     }
 )
-_SEED_SENTENCES = frozenset({SEED_SENTENCE_V1, SEED_SENTENCE_V2})
+_SEED_SENTENCES = frozenset({SEED_SENTENCE_V1, SEED_SENTENCE_V2, SEED_SENTENCE_V3})
 _RUNNER_ENTRIES: tuple[str, ...] = (
     "runner-flow-version",
     "runner-flow-digest",
@@ -201,6 +204,8 @@ class ExecutionIdentityRecord(BaseModel):
                 raise SpecIncompleteError(f"覆盖类别的条目名或次序不正确：{name}")
             for entry in entries:
                 _require_entry_value(entry.name, entry.value)
+            if name == "randomization-protocol":
+                _require_kappa_digest_matches_schema(entries)
         if self.reference_snapshot != reference_snapshot():
             raise SpecIncompleteError("参考与评估版本快照必须取运行时的只读值")
         return self
@@ -244,15 +249,29 @@ def _determined_digest(name: str) -> str:
         from .protocol import purpose_index_mapping_digest
 
         return purpose_index_mapping_digest(algorithm=_DIGEST_ALGORITHM)
-    if name == "kappa-key-rules-digest":
-        from .protocol import purpose_index_mapping_v2_digest
-
-        return purpose_index_mapping_v2_digest(algorithm=_DIGEST_ALGORITHM)
     if name == "public-summary-mapping-digest":
         from .instantiation import public_summary_mapping_digest
 
         return public_summary_mapping_digest(algorithm=_DIGEST_ALGORITHM)
     raise SpecIncompleteError(f"没有可重算的摘要：{name}")
+
+
+def _kappa_rules_digest(schema: str) -> str:
+    """键规则摘要随协议 schema 选择封闭载荷。版本 1 与版本 2 共用同一份。"""
+    from .protocol import kappa_key_rules_v3_digest, purpose_index_mapping_v2_digest
+
+    if schema == "randomization-protocol-v3":
+        return kappa_key_rules_v3_digest(algorithm=_DIGEST_ALGORITHM)
+    return purpose_index_mapping_v2_digest(algorithm=_DIGEST_ALGORITHM)
+
+
+def _require_kappa_digest_matches_schema(entries: tuple[CoverageEntry, ...]) -> None:
+    """已写入的键规则摘要必须就是该协议 schema 的那一份封闭载荷。"""
+    values = {entry.name: entry.value for entry in entries}
+    recorded = values["kappa-key-rules-digest"]
+    expected = _kappa_rules_digest(values["randomization-protocol-schema"])
+    if recorded != expected:
+        raise SpecIncompleteError("摘要与封闭载荷的重算结果不符：kappa-key-rules-digest")
 
 
 def _require_entry_value(name: str, value: str) -> None:
@@ -268,12 +287,16 @@ def _require_entry_value(name: str, value: str) -> None:
             raise SpecIncompleteError(f"固定文本与锁定值不符：{name}")
         return
     if name == "randomization-protocol-version":
-        if value not in {"1", "2"}:
-            raise SpecIncompleteError("随机化协议版本只能是 1 或 2")
+        if value not in {"1", "2", "3"}:
+            raise SpecIncompleteError("随机化协议版本只能是 1、2 或 3")
         return
     if name == "randomization-protocol-schema":
-        if value not in {"randomization-protocol-v1", "randomization-protocol-v2"}:
-            raise SpecIncompleteError("协议 schema 必须是 v1 或 v2")
+        if value not in {
+            "randomization-protocol-v1",
+            "randomization-protocol-v2",
+            "randomization-protocol-v3",
+        }:
+            raise SpecIncompleteError("协议 schema 必须是 v1、v2 或 v3")
         return
     if name in _VERSION_ENTRIES:
         if value != "1":
@@ -304,10 +327,19 @@ def _require_entry_value(name: str, value: str) -> None:
         if value not in allowed:
             raise SpecIncompleteError(f"座位口径必须是 none 或规范枚举值：{name}")
         return
+    if name == "kappa-key-rules-digest":
+        from .protocol import kappa_key_rules_v3_digest, purpose_index_mapping_v2_digest
+
+        allowed = {
+            purpose_index_mapping_v2_digest(algorithm=_DIGEST_ALGORITHM),
+            kappa_key_rules_v3_digest(algorithm=_DIGEST_ALGORITHM),
+        }
+        if value not in allowed:
+            raise SpecIncompleteError(f"摘要与封闭载荷的重算结果不符：{name}")
+        return
     if name in {"runner-flow-digest", "injection-precheck-rules-digest"} or name in {
         "deal-mapping-digest",
         "purpose-index-mapping-digest",
-        "kappa-key-rules-digest",
         "public-summary-mapping-digest",
     }:
         if value != _determined_digest(name):

@@ -21,6 +21,7 @@ from app.verification.materials import (
     manifest_digest,
 )
 from app.verification.protocol import (
+    PROTOCOL_SCHEMA_V3,
     AuditedMaterials,
     PurposeRole,
     PurposeSpec,
@@ -142,6 +143,8 @@ def generate_materials(
     generator_manifest: Mapping[str, object],
 ) -> GeneratedMaterials:
     """按遍历顺序生成材料。只有全部成功才返回；任何较早的失败都不构造结果。"""
+    if spec.protocol.protocol_schema == PROTOCOL_SCHEMA_V3:
+        raise ProtocolSpecError("版本 3 不按逐键读取基线种子")
     manifest = require_source_manifest(generator_manifest)
     if tuple(manifest["entrypoints"]) != (_GENERATOR_ENTRYPOINT,):
         raise ProtocolSpecError("生成器清单的入口必须是材料生成模块")
@@ -309,10 +312,168 @@ def _read_closed_entry(
     rejections: dict[str, int],
 ) -> int:
     """同一完整键连续读取，直到接受。不读取键集以外的位置。"""
+    return _read_supplied(
+        label,
+        key,
+        transcript=transcript,
+        reads=reads,
+        rejections=rejections,
+        read_exact=os.urandom,
+    )
+
+
+def generate_v3_materials(
+    keyset: ClosedKeyset,
+    spec: DomainRunSpec,
+    generator_manifest: Mapping[str, object],
+    *,
+    injected_master: bytes | None = None,
+) -> GeneratedMaterials:
+    """实际生成只读一次主值。传入主值则立即失败，不读取随机源。"""
+    if injected_master is not None:
+        raise ProtocolSpecError("实际生成路径不得传入主值")
+    return _generate_v3(keyset, spec, generator_manifest, master=None, read_exact=os.urandom)
+
+
+def generate_v3_fixture(
+    keyset: ClosedKeyset,
+    spec: DomainRunSpec,
+    generator_manifest: Mapping[str, object],
+    *,
+    master: bytes,
+    entropy: bytes,
+) -> GeneratedMaterials:
+    """夹具用固定字节代替主值和后续读取。不调用随机源。"""
+    if not isinstance(master, bytes) or len(master) != 32:
+        raise ProtocolSpecError("夹具主值必须是 32 字节")
+    cursor = {"at": 0}
+
+    def read_exact(nbytes: int) -> bytes:
+        start = cursor["at"]
+        chunk = entropy[start : start + nbytes]
+        if len(chunk) != nbytes:
+            raise ProtocolAuditError("夹具字节不够覆盖后续读取")
+        cursor["at"] = start + nbytes
+        return chunk
+
+    return _generate_v3(
+        keyset, spec, generator_manifest, master=master, read_exact=read_exact
+    )
+
+
+def _generate_v3(
+    keyset: ClosedKeyset,
+    spec: DomainRunSpec,
+    generator_manifest: Mapping[str, object],
+    *,
+    master: bytes | None,
+    read_exact,
+) -> GeneratedMaterials:
+    """先核对规格、来源、环境、闭合集和生成器清单，通过之后才读取主值。"""
+    validate_closed_keyset(keyset, spec)
+    manifest = require_source_manifest(generator_manifest)
+    if tuple(manifest["entrypoints"]) != (_GENERATOR_ENTRYPOINT,):
+        raise ProtocolSpecError("生成器清单的入口必须是材料生成模块")
+    if master is None:
+        master = read_exact(32)
+    if not isinstance(master, bytes) or len(master) != 32:
+        raise ProtocolAuditError("主值必须是 32 字节")
+    algorithm = spec.protocol.digest_algorithm
+    generator_code_digest = source_manifest_digest(manifest, algorithm=algorithm)
+    started = datetime.now(UTC)
+    protocol = spec.protocol
+    transcript = bytearray()
+    reads: list[ReadRecord] = []
+    accepted: list[MaterialEntry] = []
+    labels = tuple(purpose.label for purpose in protocol.purposes)
+    rejections = {label: 0 for label in labels}
+    accepted_counts = {label: 0 for label in labels}
+    master_key = (spec.campaign,)
+    transcript.extend(master)
+    master_value = int.from_bytes(master, "big", signed=False)
+    reads.append(
+        ReadRecord(
+            read_index=0,
+            purpose_label="master",
+            index_key=master_key,
+            bit_width=256,
+            raw_offset=0,
+            raw_value=master_value,
+            accepted=True,
+            output=master_value,
+        )
+    )
+    accepted.append(
+        MaterialEntry(purpose_label="master", index_key=master_key, value=master_value)
+    )
+    accepted_counts["master"] = 1
+    rows = tuple((entry.purpose_label, entry.index_key) for entry in keyset.entries)
+    ordered = sorted(rows, key=lambda item: v2_record_sort_key(item[0], item[1]))
+    for label, key in ordered:
+        output = _read_supplied(
+            label,
+            key,
+            transcript=transcript,
+            reads=reads,
+            rejections=rejections,
+            read_exact=read_exact,
+        )
+        accepted.append(MaterialEntry(purpose_label=label, index_key=key, value=output))
+        accepted_counts[label] += 1
+    by_hand: dict[int, list[MaterialEntry]] = {
+        plan.hand_ordinal: [] for plan in spec.schedule
+    }
+    for entry in accepted:
+        if entry.purpose_label == "master":
+            continue
+        by_hand[int(entry.index_key[2])].append(entry)
+    bundle = tuple(
+        HandMaterials(
+            hand_ordinal=plan.hand_ordinal, entries=tuple(by_hand[plan.hand_ordinal])
+        )
+        for plan in spec.schedule
+    )
+    material_manifest = MaterialManifest(entries=tuple(accepted))
+    raw = bytes(transcript)
+    finished = datetime.now(UTC)
+    commitment = TranscriptCommitment(
+        source_interface_id=protocol.source_interface_id,
+        environment_record=protocol.environment_record,
+        generation_started_at=_stamp(started),
+        generation_finished_at=_stamp(finished),
+        traversal_order=protocol.traversal_order,
+        entry_counts=tuple((label, accepted_counts[label]) for label in protocol.traversal_order),
+        rejection_counts=tuple((label, rejections[label]) for label in protocol.traversal_order),
+        transcript_digest=bytes_digest(raw, algorithm=algorithm),
+        read_record_digest=read_record_digest(
+            reads, encoding=protocol.read_record_encoding, algorithm=algorithm
+        ),
+        manifest_digest=manifest_digest(material_manifest, algorithm=algorithm),
+        generator_code_digest=generator_code_digest,
+        digest_algorithm=algorithm,
+        read_record_encoding=protocol.read_record_encoding,
+        audit_format_version=protocol.audit_format_version,
+    )
+    return GeneratedMaterials(
+        bundle=bundle,
+        material_manifest=material_manifest,
+        audit=AuditedMaterials(transcript=raw, reads=tuple(reads), commitment=commitment),
+    )
+
+
+def _read_supplied(
+    label: str,
+    key: tuple[str, ...],
+    *,
+    transcript: bytearray,
+    reads: list[ReadRecord],
+    rejections: dict[str, int],
+    read_exact,
+) -> int:
     width = 8 if label == "deal" else 256
     nbytes = width // 8
     while True:
-        raw = os.urandom(nbytes)
+        raw = read_exact(nbytes)
         if len(raw) != nbytes:
             raise ProtocolAuditError("随机源返回的长度不符")
         value = int.from_bytes(raw, "big", signed=False)
