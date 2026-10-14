@@ -426,6 +426,63 @@ def entry_for(identifier: str) -> DistributionObservationEntry:
     return entry
 
 
+def amount_bucket(amount: int) -> str:
+    """把主动投入金额分到开池、小、中、大或其余，供域 B 主判使用。"""
+    if isinstance(amount, bool) or not isinstance(amount, int):
+        raise ObservationSemanticError("金额必须是整数筹码")
+    if amount == 2:
+        return "BKT_OPEN"
+    if 3 <= amount <= 4:
+        return "BKT_SMALL"
+    if 5 <= amount <= 7:
+        return "BKT_MID"
+    if 8 <= amount <= 10:
+        return "BKT_LARGE"
+    return "BKT_OTHER"
+
+
+def marginalized_bucket_units(
+    observation: DistributionObservation,
+    amounts: Sequence[int],
+    bucket: str,
+) -> int:
+    """在合并口径下，把指定金额里落入该桶的单位相加。"""
+    if observation.aggregation != "marginalized" or observation.overridden_mode is not None:
+        raise ObservationSemanticError("主判只接受未指定模式的合并输出")
+    allowed = tuple(amounts)
+    if len(set(allowed)) != len(allowed):
+        raise ObservationSemanticError("金额集合不能重复")
+    accepted = set(allowed)
+    total = 0
+    for candidate in observation.candidates:
+        if candidate.action not in (ActionType.BET, ActionType.RAISE):
+            continue
+        if candidate.amount not in accepted:
+            continue
+        if amount_bucket(candidate.amount) != bucket:
+            continue
+        total += candidate.units
+    return total
+
+
+def bucket_mass_difference(
+    candidate_units: int,
+    baseline_units: int,
+    probability_units: int,
+) -> tuple[int, int]:
+    """返回两身份桶质量之差的分子与共用分母。差值落在 [-1, 1] 的整数单位上。"""
+    if isinstance(probability_units, bool) or not isinstance(probability_units, int):
+        raise ObservationSemanticError("定点单位总和必须是整数")
+    if probability_units <= 0:
+        raise ObservationSemanticError("定点单位总和必须为正")
+    for units in (candidate_units, baseline_units):
+        if isinstance(units, bool) or not isinstance(units, int):
+            raise ObservationSemanticError("桶质量必须是整数单位")
+        if not 0 <= units <= probability_units:
+            raise ObservationSemanticError("桶质量必须落在定点单位总量之内")
+    return candidate_units - baseline_units, probability_units
+
+
 def health_status() -> CapabilityHealth:
     """无状态能力健康读取：不接受任何输入，也不读取对局状态。"""
     return CapabilityHealth.AVAILABLE if _ENTRIES else CapabilityHealth.UNAVAILABLE

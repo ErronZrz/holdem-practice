@@ -198,6 +198,20 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
     f"{PACKAGE_NAME}.kappa_derive": frozenset(
         {"derive_kappa_seed", "require_derived_decision_records"}
     ),
+    f"{PACKAGE_NAME}.structure_checks": frozenset(
+        {"derived_difference_bound", "require_pairing_transcript"}
+    ),
+    f"{PACKAGE_NAME}.domain_registry": frozenset(
+        {
+            "amount_bucket",
+            "require_domain_lock_versions",
+            "require_domain_snapshots",
+            "require_bucket_assignments",
+            "require_layer_selection_keys",
+            "legal_flags",
+            "bucket_mass_in_range",
+        }
+    ),
 }
 
 # 包内允许出现的依赖：标准库与只读引用的应用模块。

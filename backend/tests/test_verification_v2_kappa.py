@@ -232,6 +232,9 @@ def test_direct_v2_construction_uses_protocol_version_two() -> None:
         deal=sample.deal,
         protocol=sample.protocol,
         schedule=sample.schedule,
+        fragments=sample.fragments,
+        weights=sample.weights,
+        k_min_degenerate=sample.k_min_degenerate,
         block=sample.block,
         campaign_configuration=sample.campaign_configuration,
     )

@@ -30,6 +30,7 @@ from app.verification import (
     DomainRunSpec,
     ExecutionIdentityRecord,
     FixedDomain,
+    FragmentSpan,
     FrozenRunManifest,
     HandMaterials,
     HandPlan,
@@ -42,6 +43,7 @@ from app.verification import (
     SeatScope,
     ShrinkingDomain,
     TranscriptCommitment,
+    WeightShare,
     build_domain_run_spec,
     build_execution_identity_record,
     build_frozen_manifest,
@@ -104,6 +106,12 @@ def fixture_lock_versions() -> CampaignLockVersions:
         fragment_template=1,
         weight_class=1,
         seat_rotation=1,
+        domain_ab_node_registry=1,
+        domain_ab_bucket_registry=1,
+        domain_ab_layer_partition=1,
+        domain_ab_layer_weights=1,
+        domain_ab_block_template=1,
+        domain_ab_support_bounds=1,
     )
 
 
@@ -202,6 +210,17 @@ def deal_spec(**overrides: object) -> DealMappingSpec:
     return DealMappingSpec.model_validate(fields)
 
 
+def _fixture_structure(
+    hands: int,
+) -> tuple[tuple[FragmentSpan, ...], tuple[WeightShare, ...], bool]:
+    """夹具用的单片段划分。手数不足两手时登记退化。"""
+    return (
+        (FragmentSpan(start_ordinal=1, end_ordinal=hands),),
+        (WeightShare(numerator=1, denominator=1),),
+        hands < 2,
+    )
+
+
 def run_spec(
     *,
     num_players: int = 3,
@@ -216,6 +235,7 @@ def run_spec(
         HandPlan(hand_ordinal=hand, button=hand % num_players, probed_seat=probed_seat)
         for hand in range(1, hands + 1)
     )
+    fragments, weights, degenerate = _fixture_structure(hands)
     return build_domain_run_spec(
         num_players=num_players,
         starting_stack=200,
@@ -227,6 +247,9 @@ def run_spec(
         deal=deal_spec(),
         protocol=protocol_spec(under_test_bits),
         schedule=schedule,
+        fragments=fragments,
+        weights=weights,
+        k_min_degenerate=degenerate,
         block=0,
         campaign_configuration=CampaignConfiguration(lock_versions=fixture_lock_versions()),
     )

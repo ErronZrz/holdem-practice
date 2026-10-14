@@ -4,7 +4,7 @@
 - 把人数、筹码、盲注、显式引擎种子、两侧身份标识、发牌映射、随机化协议与手序计划
   集中成一份可校验的规格：缺项或取值越界都在构造阶段失败，不进入任何运行结构；
 - 单一基线身份由常量给定并在规格中硬性核对，不接受任意受控标识充当比较基线；
-- 手序计划由调用方逐手显式给出：庄位与轮换规则尚待冻结，本包不代为实现，也不推断。
+- 手序计划由调用方逐手显式给出；本包不从手序推断庄位，也不代替调用方填写片段。
 """
 
 from __future__ import annotations
@@ -45,8 +45,26 @@ class HandPlan(BaseModel):
     probed_seat: NonNegativeInt
 
 
+class FragmentSpan(BaseModel):
+    """块内一个连续手序片段：两端都包含。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    start_ordinal: PositiveInt
+    end_ordinal: PositiveInt
+
+
+class WeightShare(BaseModel):
+    """一个片段的既约有理权重。分子分母都是整数，避免浮点。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    numerator: NonNegativeInt
+    denominator: PositiveInt
+
+
 class CampaignLockVersions(BaseModel):
-    """五个尚未锁定对象的版本号。此模型只承载这些版本，不表示最终运行冻结。"""
+    """第一层锁定版本号。域侧六项必须保持已生效的版本 1。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -55,10 +73,23 @@ class CampaignLockVersions(BaseModel):
     fragment_template: PositiveInt
     weight_class: PositiveInt
     seat_rotation: PositiveInt
+    domain_ab_node_registry: PositiveInt
+    domain_ab_bucket_registry: PositiveInt
+    domain_ab_layer_partition: PositiveInt
+    domain_ab_layer_weights: PositiveInt
+    domain_ab_block_template: PositiveInt
+    domain_ab_support_bounds: PositiveInt
+
+    @model_validator(mode="after")
+    def _require_domain_versions(self) -> Self:
+        for name, value in _domain_version_pairs(self):
+            if value != 1:
+                raise SpecIncompleteError(f"域锁定版本必须为 1：{name}")
+        return self
 
 
 class CampaignConfiguration(BaseModel):
-    """跨块稳定配置中尚未锁定的版本号。摘要由组成字段另行计算。"""
+    """跨块稳定配置中的第一层版本号。摘要由组成字段另行计算。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -82,6 +113,10 @@ class DomainRunSpec(BaseModel):
     deal: DealMappingSpec
     protocol: RandomizationProtocolSpec
     schedule: tuple[HandPlan, ...]
+    fragments: tuple[FragmentSpan, ...]
+    weights: tuple[WeightShare, ...]
+    # 片段最短手数不足两手时必须显式登记，避免把退化块当成非退化上界。
+    k_min_degenerate: bool
     block: NonNegativeInt
     campaign: str
     campaign_configuration: CampaignConfiguration
@@ -125,6 +160,9 @@ class DomainRunSpec(BaseModel):
         for plan in self.schedule:
             if plan.button >= self.num_players or plan.probed_seat >= self.num_players:
                 raise SpecIncompleteError("庄位与被测座位必须落在人数范围内")
+        _require_block_structure(
+            self.schedule, self.fragments, self.weights, self.k_min_degenerate
+        )
         return self
 
     def plan_for(self, hand_ordinal: int) -> HandPlan:
@@ -194,6 +232,8 @@ def campaign_configuration_payload(
             "seat_rotation": lock_versions.seat_rotation,
         }
     )
+    for name, value in _domain_version_pairs(lock_versions):
+        versions[name] = value
     return {
         "schema": "campaign-configuration-v1",
         "campaign_root": _CAMPAIGN_ROOT,
@@ -250,6 +290,9 @@ def build_domain_run_spec(
     deal: DealMappingSpec,
     protocol: RandomizationProtocolSpec,
     schedule: tuple[HandPlan, ...],
+    fragments: tuple[FragmentSpan, ...],
+    weights: tuple[WeightShare, ...],
+    k_min_degenerate: bool,
     block: int,
     campaign_configuration: CampaignConfiguration,
 ) -> DomainRunSpec:
@@ -275,10 +318,68 @@ def build_domain_run_spec(
         deal=deal,
         protocol=protocol,
         schedule=schedule,
+        fragments=fragments,
+        weights=weights,
+        k_min_degenerate=k_min_degenerate,
         block=block,
         campaign=campaign,
         campaign_configuration=campaign_configuration,
     )
+
+
+def _domain_version_pairs(versions: CampaignLockVersions) -> tuple[tuple[str, int], ...]:
+    return (
+        ("domain_ab_node_registry", versions.domain_ab_node_registry),
+        ("domain_ab_bucket_registry", versions.domain_ab_bucket_registry),
+        ("domain_ab_layer_partition", versions.domain_ab_layer_partition),
+        ("domain_ab_layer_weights", versions.domain_ab_layer_weights),
+        ("domain_ab_block_template", versions.domain_ab_block_template),
+        ("domain_ab_support_bounds", versions.domain_ab_support_bounds),
+    )
+
+
+def _gcd(left: int, right: int) -> int:
+    while right:
+        left, right = right, left % right
+    return left
+
+
+def _require_block_structure(
+    schedule: tuple[HandPlan, ...],
+    fragments: tuple[FragmentSpan, ...],
+    weights: tuple[WeightShare, ...],
+    k_min_degenerate: bool,
+) -> None:
+    """片段必须盖满手序，权重必须等于各片段手数占比。"""
+    if not isinstance(k_min_degenerate, bool):
+        raise SpecIncompleteError("退化登记必须是布尔值")
+    if not fragments:
+        raise SpecIncompleteError("片段划分不能为空")
+    if len(weights) != len(fragments):
+        raise SpecIncompleteError("权重必须与片段一一对应")
+    covered: list[int] = []
+    previous_end = 0
+    for span in fragments:
+        if span.end_ordinal < span.start_ordinal:
+            raise SpecIncompleteError("片段的结束手序不能早于开始手序")
+        if previous_end and span.start_ordinal <= previous_end:
+            raise SpecIncompleteError("片段必须按手序递增且互不相交")
+        previous_end = span.end_ordinal
+        covered.extend(range(span.start_ordinal, span.end_ordinal + 1))
+    if covered != [plan.hand_ordinal for plan in schedule]:
+        raise SpecIncompleteError("片段必须恰好覆盖手序计划，且不得留下空洞")
+    total = len(covered)
+    sizes = [span.end_ordinal - span.start_ordinal + 1 for span in fragments]
+    k_min = min(sizes)
+    if k_min < 2 and not k_min_degenerate:
+        raise SpecIncompleteError("最短片段不足两手时必须登记退化")
+    if k_min >= 2 and k_min_degenerate:
+        raise SpecIncompleteError("最短片段至少两手时不能登记退化")
+    for size, weight in zip(sizes, weights, strict=True):
+        if _gcd(weight.numerator, weight.denominator) != 1:
+            raise SpecIncompleteError("片段权重必须是既约分数")
+        if weight.numerator * total != size * weight.denominator:
+            raise SpecIncompleteError("片段权重必须等于该片段手数占块内总手数的比例")
 
 
 def schedule_payload(spec: DomainRunSpec) -> dict[str, object]:

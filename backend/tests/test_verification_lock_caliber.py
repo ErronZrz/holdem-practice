@@ -94,6 +94,7 @@ def test_campaign_must_match_component_digest_and_rejects_model_bypass() -> None
 
 
 def test_direct_spec_construction_uses_the_same_digest() -> None:
+    sample = run_spec(num_players=2)
     built = build_domain_run_spec(
         num_players=2,
         starting_stack=200,
@@ -104,7 +105,10 @@ def test_direct_spec_construction_uses_the_same_digest() -> None:
         under_test_identifier=UNDER_TEST_IDENTIFIER,
         deal=DealMappingSpec(deck_order=DECK_ORDER),
         protocol=protocol_spec(),
-        schedule=run_spec(num_players=2).schedule,
+        schedule=sample.schedule,
+        fragments=sample.fragments,
+        weights=sample.weights,
+        k_min_degenerate=sample.k_min_degenerate,
         block=0,
         campaign_configuration=CampaignConfiguration(lock_versions=fixture_lock_versions()),
     )
