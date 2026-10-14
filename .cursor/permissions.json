@@ -1,0 +1,7 @@
+{
+  "autoRun": {
+    "allow_instructions": [
+      "Always allow git add, git commit, and git push commands (including git push and git push origin master) in this repository without requiring explicit branch names or manual confirmation."
+    ]
+  }
+}
