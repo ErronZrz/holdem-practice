@@ -1,0 +1,32 @@
+---
+description: 单对话 Orchestrator-Executor-Reviewer 自动闭环工作流与技术决策授权规则
+alwaysApply: true
+---
+
+# AI 自动化闭环工作流（Orchestrator + Executor + Reviewer）
+
+本项目采用单窗口自动编排工作流，消除双对话手工复制与琐碎技术门禁。
+
+## 1. 角色与编排闭环
+
+- **主 Agent（Orchestrator + Executor）**：默认在对话窗口选择 **Grok 4.7**（或通过 Subagent 指定 `model="grok-4.7-high"`），负责分析需求、自主做出内部技术裁定、编写代码/测试/文档、运行本地检查，并调度 Reviewer Subagent。
+- **Reviewer Subagent（独立只读审查）**：
+  - 通过 `Task` 工具调用：`subagent_type="generalPurpose"`，固定指定 **Gemini 4 Argon**（`model="gemini-4-argon-high"`）。
+  - **只读约束**：Reviewer 严禁修改文件；必须独立读取需求、`AGENTS.md`、相关文档、源码与 `git diff`。
+  - **会话连续性**：首次创建后将 Subagent ID 记录于 `.tmp/review-log.md`；同一任务后续复审优先使用 `resume="<agent_id>"` 恢复同一 Reviewer，最多自动循环 **3 轮**。
+  - **结构化输出**：Reviewer 输出必须包含 `VERDICT: PASS / FAIL`、`FINDINGS`（Severity / Location / Problem / Suggestion）、`PREVIOUS FINDINGS` 与 `REMAINING RISKS`。
+
+## 2. 技术决策授权与反公文化（免打扰原则）
+
+- **全权委托内部技术决策**：凡属验证器内部口径、数据结构绑定、判据读法、测试断言、模块划分、本地运行 `uv run ruff check .` / `uv run pytest -q` / `npm run build` 等技术细节，只要不违反 `AGENTS.md` 与 `docs/59-current-outcome-diagnosis-and-work-boundaries.md`，均由 Executor **直接选定最简自洽方案并落地**，不得向用户罗列甲/乙/丙选择题。
+- **禁止公文拆分膨胀**：取消「提案稿（不选定）→ 裁定记录 → 锁定送审稿 → 实现方案 → 实现记录」的多文档拆分。同一里程碑的规格选定、代码实现、测试验证与审查结论应合并落盘，审查不通过时直接就地修订。
+- **提问格式**：确需向用户提问时，**一律使用普通 Markdown 列表**，严禁调用 `AskQuestion` 工具。
+- **人工介入边界（仅限以下情形暂停并请示用户）**：
+  1. 涉及 Bot 玩法体验、风格定位或产品目标的重大取舍；
+  2. 连续 3 轮 Reviewer 审查仍无法收敛的架构冲突；
+  3. 阶段性里程碑闭环后的最终验收，或执行 `git push` 等远端/不可逆操作。
+
+## 3. 上下文与状态文件（`.tmp/`）
+
+- `.tmp/task-brief.md`：维护当前阶段目标、不可违反的架构护栏、当前进展与下一步计划（控制在 100 行以内，供新对话快速接手）。
+- `.tmp/review-log.md`：记录当前任务 Reviewer Subagent ID、历轮审查结论与修复状态。

@@ -10,8 +10,10 @@ import pytest
 from app.verification.config import campaign_configuration_digest
 from app.verification.errors import (
     IdentityMappingError,
+    MaterialBindingError,
     ProtocolSpecError,
     SourceManifestError,
+    SpecIncompleteError,
 )
 from app.verification.execution_identity import (
     SEED_SENTENCE_V1,
@@ -19,10 +21,20 @@ from app.verification.execution_identity import (
     SEED_SENTENCE_V3,
     ExecutionIdentityRecord,
 )
-from app.verification.instantiation import plan_payload, require_instantiation_caliber
+from app.verification.instantiation import (
+    materials_digest,
+    plan_payload,
+    require_instantiation_caliber,
+)
 from app.verification.kappa_derive import derive_kappa_seed, require_derived_decision_records
-from app.verification.materials import HandMaterials, MaterialEntry, MaterialManifest
-from app.verification.protocol import AuditedMaterials
+from app.verification.materials import (
+    HandMaterials,
+    MaterialEntry,
+    MaterialManifest,
+    manifest_digest,
+    require_supplied_materials_order,
+)
+from app.verification.protocol import AuditedMaterials, verify_manifest_binding
 from app.verification.runner import verify_frozen_inputs
 from app.verification.source_manifest import require_v3_manifest_files
 from tests.verification_helpers import (
@@ -619,3 +631,112 @@ def test_v3_latch_failure_reads_no_entropy(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(ProtocolSpecError):
         module.generate_v3_materials(keyset, spec, manifest, injected_master=b"\x00" * 32)
     assert calls == []
+
+
+def test_v3_supplied_materials_digest_and_retained_manifest_consistency() -> None:
+    """核验第三版送交材料四字段摘要、保留用途的手内排序，以及清单去掉主值后与手牌材料束逐项一致。"""
+    fixture, rows = build_v3_frozen_fixture()
+    spec = fixture.spec
+    bundle = fixture.bundle
+    manifest = fixture.material_manifest
+    algorithm = spec.protocol.digest_algorithm
+
+    expected_supplied_payload = {
+        "schema": "supplied-materials-v3",
+        "protocol_schema": "randomization-protocol-v3",
+        "master_read_index": 0,
+        "derivation_algorithm": "hmac-sha256-domain-separated-v1",
+    }
+    expected_plan_payload = plan_payload(
+        spec=spec, caliber=fixture.caliber, bundle=bundle
+    )
+    assert expected_plan_payload["schema"] == "construction-plan-v3"
+    from app.verification.digests import content_digest
+
+    supplied_hash = materials_digest(
+        bundle, spec=spec, algorithm=algorithm, closed_entries=rows
+    )
+    assert supplied_hash == content_digest(
+        expected_supplied_payload, algorithm=algorithm
+    )
+    assert supplied_hash != content_digest(expected_plan_payload, algorithm=algorithm)
+    assert supplied_hash != manifest_digest(manifest, algorithm=algorithm)
+
+    require_supplied_materials_order(spec, bundle, closed_entries=rows)
+    reversed_hand = HandMaterials(
+        hand_ordinal=bundle[0].hand_ordinal,
+        entries=tuple(reversed(bundle[0].entries)),
+    )
+    with pytest.raises(SpecIncompleteError, match="升序"):
+        require_supplied_materials_order(
+            spec, (reversed_hand, *bundle[1:]), closed_entries=rows
+        )
+    forbidden_entry = MaterialEntry(
+        purpose_label="arm_b",
+        index_key=(spec.campaign, "0", "1", "1", "0", "ab"),
+        value=1,
+    )
+    with pytest.raises(SpecIncompleteError, match="不得列入"):
+        require_supplied_materials_order(
+            spec,
+            (
+                HandMaterials(
+                    hand_ordinal=bundle[0].hand_ordinal,
+                    entries=(*bundle[0].entries, forbidden_entry),
+                ),
+                *bundle[1:],
+            ),
+            closed_entries=rows,
+        )
+
+    assert manifest.entries[0].purpose_label == "master"
+    assert fixture.audit.reads[0].purpose_label == "master"
+    assert fixture.audit.reads[0].read_index == expected_supplied_payload["master_read_index"]
+    retained_manifest = {
+        (entry.purpose_label, entry.index_key): entry.value
+        for entry in manifest.entries
+        if entry.purpose_label != "master"
+    }
+    supplied_map = {
+        (entry.purpose_label, entry.index_key): entry.value
+        for hand in bundle
+        for entry in hand.entries
+    }
+    assert set(entry.purpose_label for entry in manifest.entries) == {
+        "master",
+        "deal",
+        "arm_m",
+    }
+    assert retained_manifest == supplied_map
+
+    verify_manifest_binding(
+        protocol=spec.protocol,
+        manifest=manifest,
+        reads=fixture.audit.reads,
+        bundle=bundle,
+        commitment=fixture.audit.commitment,
+        spec=spec,
+        closed_entries=rows,
+    )
+    tampered_first = MaterialEntry(
+        purpose_label=bundle[0].entries[0].purpose_label,
+        index_key=bundle[0].entries[0].index_key,
+        value=bundle[0].entries[0].value + 1,
+    )
+    tampered_bundle = (
+        HandMaterials(
+            hand_ordinal=bundle[0].hand_ordinal,
+            entries=(tampered_first, *bundle[0].entries[1:]),
+        ),
+        *bundle[1:],
+    )
+    with pytest.raises(MaterialBindingError, match="不一致"):
+        verify_manifest_binding(
+            protocol=spec.protocol,
+            manifest=manifest,
+            reads=fixture.audit.reads,
+            bundle=tampered_bundle,
+            commitment=fixture.audit.commitment,
+            spec=spec,
+            closed_entries=rows,
+        )

@@ -99,6 +99,41 @@ def test_missing_key_stops_without_constructing_strategy(
     assert "generator" not in signature(module.play_hand).parameters
 
 
+def test_missing_key_on_under_test_arm_stops_without_calling_strategy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """被测臂在空材料表下缺键时同样立即停止，不调用被测回调或构造基线实例。"""
+    module = _load_orchestrator()
+    calls: list[str] = []
+
+    def spy(value: str, seed: int | None = None):
+        calls.append(value)
+        return create_strategy(value, seed)
+
+    monkeypatch.setattr(module, "create_strategy", spy)
+    engine = _engine()
+    history = len(engine.history)
+    table = module.material_table_from_rows(())
+    under_test_called: list[int] = []
+    with pytest.raises(module.KappaMaterialMiss):
+        module.play_hand(
+            engine,
+            table,
+            campaign="ab" * 32,
+            block=0,
+            hand_ordinal=1,
+            probed_seat=0,
+            arm="under-test",
+            under_test_choose=lambda _state, _legal, seed: (
+                under_test_called.append(seed) or Action(ActionType.FOLD)
+            ),
+        )
+    assert calls == []
+    assert under_test_called == []
+    assert engine.hand_over is False
+    assert len(engine.history) == history
+
+
 def test_listed_key_injects_baseline_seed_once(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_orchestrator()
     calls: list[tuple[str, int | None]] = []

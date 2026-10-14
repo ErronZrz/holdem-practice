@@ -7,13 +7,18 @@ import pytest
 from app.verification import (
     ExecutionIdentityRecord,
     IdentityMappingError,
+    MaterialBindingError,
     MaterialEntry,
     SpecIncompleteError,
+    bundle_payload,
     content_digest,
     instantiation_caliber_entries,
+    manifest_digest,
+    materials_digest,
     plan_payload,
     require_instantiation_caliber,
     require_supplied_materials_order,
+    verify_manifest_binding,
 )
 from app.verification.execution_identity import (
     ARM_B_SCOPE_CONFLICT,
@@ -321,5 +326,98 @@ def test_slice_gaps_bad_order_and_illegal_values_fail() -> None:
         require_supplied_materials_order(
             spec,
             (HandMaterials(hand_ordinal=bundle[0].hand_ordinal, entries=replaced),),
+            closed_entries=rows,
+        )
+
+
+def test_version_two_supplied_digest_matches_plan_slices_and_manifest() -> None:
+    """核验第二版送交材料摘要重算、与构造计划同座切片一致、以及与材料清单逐项一致。"""
+    fixture, rows = build_v2_frozen_fixture()
+    spec = fixture.spec
+    bundle = fixture.bundle
+    manifest = fixture.material_manifest
+    algorithm = spec.protocol.digest_algorithm
+
+    raw_bundle = bundle_payload(bundle)
+    assert isinstance(raw_bundle, list)
+    recomputed = materials_digest(
+        bundle, spec=spec, algorithm=algorithm, closed_entries=rows
+    )
+    assert recomputed == content_digest(raw_bundle, algorithm=algorithm)
+    assert recomputed != manifest_digest(manifest, algorithm=algorithm)
+
+    manifest_items = [
+        (entry.purpose_label, entry.index_key, entry.value)
+        for entry in manifest.entries
+    ]
+    bundle_items = [
+        (entry.purpose_label, entry.index_key, entry.value)
+        for hand in bundle
+        for entry in hand.entries
+    ]
+    assert set(manifest_items) == set(bundle_items)
+    assert len(manifest_items) == len(bundle_items)
+
+    plan = plan_payload(
+        spec=spec,
+        caliber=fixture.caliber,
+        bundle=bundle,
+        closed_entries=rows,
+    )
+    by_hand = {hand.hand_ordinal: hand for hand in bundle}
+    for hand_plan in plan["hands"]:
+        hand_materials = by_hand[hand_plan["hand_ordinal"]]
+        probed_seat = hand_plan["probed_seat"]
+        arm = hand_plan["arm"]
+        for seat_entry in hand_plan["seats"]:
+            seat = seat_entry["seat"]
+            if seat == probed_seat and arm == "under-test":
+                expected = [
+                    item.canonical_payload()
+                    for item in hand_materials.entries_for("arm_m")
+                ]
+            elif seat == probed_seat:
+                expected = [
+                    item.canonical_payload()
+                    for item in hand_materials.entries_for("arm_b")
+                    if int(item.index_key[3]) == seat
+                ]
+            else:
+                expected = [
+                    item.canonical_payload()
+                    for item in hand_materials.entries_for("non_probed")
+                    if int(item.index_key[3]) == seat
+                ]
+            assert seat_entry["materials"] == expected
+
+    verify_manifest_binding(
+        protocol=spec.protocol,
+        manifest=manifest,
+        reads=fixture.audit.reads,
+        bundle=bundle,
+        commitment=fixture.audit.commitment,
+        spec=spec,
+        closed_entries=rows,
+    )
+    tampered_entries = (
+        MaterialEntry(
+            purpose_label=bundle[0].entries[0].purpose_label,
+            index_key=bundle[0].entries[0].index_key,
+            value=bundle[0].entries[0].value + 1,
+        ),
+        *bundle[0].entries[1:],
+    )
+    tampered_bundle = (
+        HandMaterials(hand_ordinal=bundle[0].hand_ordinal, entries=tampered_entries),
+        *bundle[1:],
+    )
+    with pytest.raises(MaterialBindingError, match="不一致"):
+        verify_manifest_binding(
+            protocol=spec.protocol,
+            manifest=manifest,
+            reads=fixture.audit.reads,
+            bundle=tampered_bundle,
+            commitment=fixture.audit.commitment,
+            spec=spec,
             closed_entries=rows,
         )
