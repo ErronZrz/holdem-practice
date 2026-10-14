@@ -30,6 +30,7 @@ from .mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V6,
     MIXED_STRATEGY_IDENTIFIER_V7,
     MIXED_STRATEGY_IDENTIFIER_V8,
+    MIXED_STRATEGY_IDENTIFIER_V9,
     MIXED_STRATEGY_RULES,
     MixedLocalStrategy,
 )
@@ -242,7 +243,19 @@ register_strategy(
         description="本地规则型混合对手第八版：翻后主动门槛随公开局面按风格分化，累积第七版口径",
     ),
 )
-# 分布观测能力只登记在研发中的身份上；登记不改变该身份的标识、版本与分布行为。
+# 第九版为累积版：面对下注时听牌进入加注，无人下注时成牌托住主动质量。
+register_strategy(
+    StrategySpec(
+        identifier="mixed-local@9",
+        name="mixed-local",
+        version=9,
+        factory=lambda seed: MixedLocalStrategy(
+            seed=seed, identifier=MIXED_STRATEGY_IDENTIFIER_V9
+        ),
+        description="本地规则型混合对手第九版：面对下注的听牌延续与无人下注的成牌兑现，累积第八版口径",
+    ),
+)
+# 分布观测能力只登记在既有研发身份上；新身份不自动继承该能力声明。
 register_observation_entry(
     MIXED_STRATEGY_IDENTIFIER_V8,
     supported_declaration(),

@@ -62,6 +62,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V6,
     MIXED_STRATEGY_IDENTIFIER_V7,
     MIXED_STRATEGY_IDENTIFIER_V8,
+    MIXED_STRATEGY_IDENTIFIER_V9,
     MixedDistribution,
     MixedLocalStrategy,
     MixedSeatPolicy,
@@ -608,6 +609,20 @@ DIGEST_RULE_FIELDS: dict[str, tuple[str, ...]] = {
         "contender_penalty_cap",
         "continuous_non_value_basis",
         "situational_active_gate",
+    ),
+    # 第九版在第八版的九个字段之上多出听牌延续与成牌兑现两个开关。
+    MIXED_STRATEGY_IDENTIFIER_V9: (
+        "shared_board_chop_caliber",
+        "preflop_price_weight",
+        "preflop_contender_penalty",
+        "preflop_call_bonus",
+        "postflop_call_bonus",
+        "active_scale_percent",
+        "contender_penalty_cap",
+        "continuous_non_value_basis",
+        "situational_active_gate",
+        "facing_draw_continuation",
+        "checked_value_realization",
     ),
 }
 

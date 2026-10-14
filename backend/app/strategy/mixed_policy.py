@@ -58,6 +58,11 @@ _ACTIVE_GATE_INDEX_CAP = 100
 _ACTIVE_GATE_POSITION_SPAN = 60
 # 局面指数里听牌分量的跨度。
 _ACTIVE_GATE_DRAW_SPAN = 40
+# 无人下注时，基础分达到这条下沿才补主动质量。下沿取已记录的顶对档之下、
+# 中对与低口袋对之上，避免把空气和弱对也当成价值下注。
+_CHECKED_VALUE_FLOOR = 600
+# 补上的质量停在两对高出该下沿的跨度，已经越过原门槛的更强牌不再被这条抬高。
+_CHECKED_VALUE_SPAN = 160
 
 
 class MixedPolicyError(ValueError):
@@ -110,6 +115,10 @@ class MixedPolicyRules:
     # 翻后主动门槛是否随公开局面按风格分化：取假沿用与风格无关的门槛。
     # 默认取假，使既有各版身份的分布逐位不变。
     situational_active_gate: bool = False
+    # 面对下注时，是否把听牌分原样并入非价值进攻。默认取假，听牌仍只走既有小额依据。
+    facing_draw_continuation: bool = False
+    # 无人下注时，是否用未加风格偏移的成牌基础分托住主动质量。默认取假。
+    checked_value_realization: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -153,6 +162,13 @@ MIXED_LOCAL_V6_RULES = MixedPolicyRules(
 MIXED_LOCAL_V7_RULES = replace(MIXED_LOCAL_V6_RULES, continuous_non_value_basis=True)
 # 第八版口径：只把翻后主动门槛改成随公开局面按风格分化，其余八个字段与第七版逐字一致。
 MIXED_LOCAL_V8_RULES = replace(MIXED_LOCAL_V7_RULES, situational_active_gate=True)
+# 第九版口径：面对下注时听牌分进入加注，无人下注时成牌基础分托住主动质量。
+# 其余字段与第八版逐字一致，因此两版只在这两处行为上不同。
+MIXED_LOCAL_V9_RULES = replace(
+    MIXED_LOCAL_V8_RULES,
+    facing_draw_continuation=True,
+    checked_value_realization=True,
+)
 
 
 class MixedStyle(StrEnum):
@@ -315,7 +331,9 @@ def build_distribution(
     fold_weight = max(0, call_threshold - passive_score + 160) * parameters.fold_percent
     call_weight = max(0, passive_score - call_threshold + 160) * parameters.call_percent
     gate = _active_gate(features, style, rules)
-    value_quality = max(0, score - value_threshold + _VALUE_GATE_TOLERANCE + gate)
+    threshold_quality = max(0, score - value_threshold + _VALUE_GATE_TOLERANCE + gate)
+    # 托底只抬高没越过原门槛的成牌；已经更高的主动质量保持原值。
+    value_quality = max(threshold_quality, _checked_value_floor(features, rules))
     # 分化只调整已有依据的幅度，不给没有公开依据的场合凭空加依据。
     bluff_raw = _non_value_quality(features, rules)
     bluff_quality = max(0, bluff_raw + gate) if bluff_raw > 0 else 0
@@ -428,8 +446,43 @@ def _non_value_quality(features: MixedFeatures, rules: MixedPolicyRules) -> int:
     elif features.draw <= 0 and not features.has_broadway_blocker:
         return 0
     if rules.continuous_non_value_basis:
-        return _continuous_non_value_quality(features)
-    return _SEAT_COUNT_FOR_U.get(features.contenders, 0)
+        base = _continuous_non_value_quality(features)
+    else:
+        base = _SEAT_COUNT_FOR_U.get(features.contenders, 0)
+    return base + _facing_draw_extra(features, rules)
+
+
+def _facing_draw_extra(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """面对下注且存在听牌时，按与弃牌同阶的量把听牌分并入非价值依据。
+
+    听牌分已经进入弃牌和跟注的评分，但主动一侧原先只留下个位数。
+    没有待跟注、没有听牌或开关关闭时返回 0，过牌局面因此不变。
+    调用方已排除连续进攻和没有对手的场合，这里不再重复放行。
+    """
+    if not rules.facing_draw_continuation:
+        return 0
+    if features.street is Street.PREFLOP or features.actual_call <= 0 or features.draw <= 0:
+        return 0
+    scale = rules.active_scale_percent
+    if scale <= 0:
+        return 0
+    # 主动权重会再乘尺度倍率。先除回去，使一点听牌推动加注的量级与它推动弃牌的量级同阶。
+    return features.draw // scale
+
+
+def _checked_value_floor(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """无人下注时，用未加风格偏移的成牌基础分给出主动质量下限。
+
+    风格扣分会把顶对压到主动门槛之下，主动质量变成 0 后，过牌权重就与牌力无关。
+    下限只在可以免费行动、且基础分达到成牌下沿时出现；面对下注不走这条路径。
+    """
+    if not rules.checked_value_realization:
+        return 0
+    if features.street is Street.PREFLOP or features.actual_call > 0:
+        return 0
+    if features.base < _CHECKED_VALUE_FLOOR:
+        return 0
+    return min(features.base - _CHECKED_VALUE_FLOOR, _CHECKED_VALUE_SPAN)
 
 
 def _active_gate(
