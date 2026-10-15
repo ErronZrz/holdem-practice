@@ -14,5 +14,6 @@ dist/
 .env
 *.db
 
-# 系统
+# 系统与本地临时目录
 .DS_Store
+.tmp/
