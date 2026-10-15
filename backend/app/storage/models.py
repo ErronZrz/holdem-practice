@@ -35,8 +35,8 @@ class SessionModel(Base):
     target_hands: Mapped[int] = mapped_column(Integer, nullable=False)
     hands_played: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     net_chips: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    # 版本化策略标识（受控注册表的规范形态）；旧行保留其历史取值，不做回填。
-    bot_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="heuristic@1")
+    # 新建行未写入身份时的产品默认；已落库的旧行保留原值，不做回填。
+    bot_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="mixed-local@12")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

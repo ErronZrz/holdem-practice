@@ -1,4 +1,4 @@
-"""新 Bot 与对局接口的回归：默认不变、显式可选、逐人数可完成、身份可追溯。
+"""新 Bot 与对局接口的回归：默认身份、显式可选、逐人数可完成、身份可追溯。
 
 只做有界集成回归：不跑性能矩阵、不跑对抗对局、不访问真实库。
 """
@@ -14,6 +14,7 @@ from app.strategy.heuristic import HeuristicStrategy
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER,
     MIXED_STRATEGY_IDENTIFIER_V2,
+    MIXED_STRATEGY_IDENTIFIER_V12,
     MixedLocalStrategy,
     derive_deck_seed,
     derive_root_key,
@@ -84,17 +85,19 @@ def _play_one_hand(client: TestClient, game_id: str, data: dict, max_steps: int 
 # ------------------------------------------------------------------ 默认与可选
 
 
-def test_schema_default_stays_on_the_old_strategy() -> None:
-    assert schemas.CreateGameRequest(num_players=2).bot_strategy == "heuristic@1"
+def test_schema_default_is_twelfth_mixed_identity() -> None:
+    assert schemas.CreateGameRequest(num_players=2).bot_strategy == MIXED_STRATEGY_IDENTIFIER_V12
 
 
-def test_omitting_strategy_still_creates_the_old_bot() -> None:
+def test_omitting_strategy_creates_twelfth_mixed_bot() -> None:
+    """未传身份时，落库与运行时都使用第十二版，旧身份仍须显式传入。"""
     client = TestClient(app)
     data = client.post("/games", json={"num_players": 3, "seed": 11}).json()
-    assert _stored_strategy(data["session_id"]) == "heuristic@1"
+    assert _stored_strategy(data["session_id"]) == MIXED_STRATEGY_IDENTIFIER_V12
     runtime = games._registry[data["session_id"]]
-    assert isinstance(runtime.bot, HeuristicStrategy)
-    assert runtime.summary is None
+    assert isinstance(runtime.bot, MixedLocalStrategy)
+    assert runtime.bot.identifier == MIXED_STRATEGY_IDENTIFIER_V12
+    assert runtime.summary is not None
 
 
 def test_explicit_mixed_strategy_is_selectable() -> None:

@@ -153,8 +153,8 @@ def test_eleventh_version_only_adds_two_switches() -> None:
     )
 
 
-def test_eleventh_identity_is_registered_without_changing_the_default() -> None:
-    """第十一版可构造，且创建对局的默认身份仍是启发式基线。"""
+def test_eleventh_identity_stays_selectable_when_default_is_twelfth() -> None:
+    """第十一版可构造；未指定策略时创建对局使用第十二版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
     eleventh_at = ordered.index(MIXED_STRATEGY_IDENTIFIER_V11)
     assert ordered[eleventh_at - 1] == MIXED_STRATEGY_IDENTIFIER_V10
@@ -163,7 +163,7 @@ def test_eleventh_identity_is_registered_without_changing_the_default() -> None:
         MIXED_STRATEGY_IDENTIFIER_V11
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V11) is MIXED_LOCAL_V11_RULES
-    assert CreateGameRequest().bot_strategy == "heuristic@1"
+    assert CreateGameRequest().bot_strategy == "mixed-local@12"
     selected = CreateGameRequest(bot_strategy=MIXED_STRATEGY_IDENTIFIER_V11)
     assert selected.bot_strategy == MIXED_STRATEGY_IDENTIFIER_V11
 

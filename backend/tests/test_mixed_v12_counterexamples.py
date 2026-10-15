@@ -156,8 +156,8 @@ def test_twelfth_version_only_adds_the_guard() -> None:
     )
 
 
-def test_twelfth_identity_is_registered_without_changing_the_default() -> None:
-    """第十二版可构造，且创建对局的默认身份仍是启发式基线。"""
+def test_twelfth_identity_is_registered_as_the_create_default() -> None:
+    """第十二版可构造，且未指定策略时创建对局使用这一身份。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
     twelfth_at = ordered.index(MIXED_STRATEGY_IDENTIFIER_V12)
     assert ordered[twelfth_at - 1] == MIXED_STRATEGY_IDENTIFIER_V11
@@ -166,7 +166,7 @@ def test_twelfth_identity_is_registered_without_changing_the_default() -> None:
         MIXED_STRATEGY_IDENTIFIER_V12
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V12) is MIXED_LOCAL_V12_RULES
-    assert CreateGameRequest().bot_strategy == "heuristic@1"
+    assert CreateGameRequest().bot_strategy == "mixed-local@12"
     selected = CreateGameRequest(bot_strategy=MIXED_STRATEGY_IDENTIFIER_V12)
     assert selected.bot_strategy == MIXED_STRATEGY_IDENTIFIER_V12
 

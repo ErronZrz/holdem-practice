@@ -22,8 +22,8 @@ class CreateGameRequest(BaseModel):
     seed: int | None = None
     small_blind: int | None = Field(default=None, ge=1)
     target_hands: int | None = Field(default=None, ge=1, le=10000)
-    # 默认取规范标识，并让校验器同样作用于默认值，避免绕过受控注册表。
-    bot_strategy: str = Field(default="heuristic@1", validate_default=True)
+    # 未指定时使用当前产品默认身份，并让校验器同样作用于默认值，避免绕过受控注册表。
+    bot_strategy: str = Field(default="mixed-local@12", validate_default=True)
 
     @field_validator("bot_strategy")
     @classmethod

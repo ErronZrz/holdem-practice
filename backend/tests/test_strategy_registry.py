@@ -139,11 +139,13 @@ def test_create_game_normalizes_legacy_value() -> None:
     assert isinstance(games._registry[session_id].bot, HeuristicStrategy)
 
 
-def test_create_game_defaults_to_canonical_identifier() -> None:
+def test_create_game_defaults_to_twelfth_mixed_identity() -> None:
     client = TestClient(app)
     resp = client.post("/games", json={"num_players": 2})
     assert resp.status_code == 201
-    assert _stored_strategy(resp.json()["session_id"]) == "heuristic@1"
+    session_id = resp.json()["session_id"]
+    assert _stored_strategy(session_id) == "mixed-local@12"
+    assert isinstance(games._registry[session_id].bot, MixedLocalStrategy)
 
 
 def test_create_game_accepts_versioned_identifier() -> None:
