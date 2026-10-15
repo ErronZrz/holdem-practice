@@ -27,6 +27,8 @@ NonNegativeInt = Annotated[int, Field(strict=True, ge=0)]
 BASELINE_IDENTIFIER = "heuristic@1"
 # 被测身份在配置载荷中的规范标识。这里只锁定字符串，不创建该身份。
 UNDER_TEST_IDENTIFIER = "mixed-local@9"
+# 允许写入配置载荷的被测标识。第一项保持原锁定值，因此旧载荷不变。
+UNDER_TEST_IDENTIFIERS = frozenset({UNDER_TEST_IDENTIFIER, "mixed-local@10"})
 _CAMPAIGN_ROOT = "74-domain-c"
 _LOCKED_VERSIONS: tuple[tuple[str, int], ...] = (
     ("deal_mapping", 1),
@@ -217,7 +219,10 @@ def campaign_configuration_payload(
     randomization_protocol: int = 1,
 ) -> dict[str, object]:
     """由组成字段组装配置载荷。载荷不含自身摘要，也不接受整份运行规格。"""
-    if baseline_identifier != BASELINE_IDENTIFIER or under_test_identifier != UNDER_TEST_IDENTIFIER:
+    if (
+        baseline_identifier != BASELINE_IDENTIFIER
+        or under_test_identifier not in UNDER_TEST_IDENTIFIERS
+    ):
         raise SpecIncompleteError("身份标识与锁定常数不符")
     if isinstance(randomization_protocol, bool) or randomization_protocol not in (1, 2, 3):
         raise SpecIncompleteError("随机化协议版本只能是 1、2 或 3")
@@ -251,7 +256,7 @@ def campaign_configuration_payload(
         },
         "identities": {
             "baseline": BASELINE_IDENTIFIER,
-            "under_test": UNDER_TEST_IDENTIFIER,
+            "under_test": under_test_identifier,
         },
         "lock_versions": versions,
     }

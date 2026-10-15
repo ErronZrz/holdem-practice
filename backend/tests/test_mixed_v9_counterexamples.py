@@ -152,10 +152,8 @@ def test_ninth_version_values_are_recorded() -> None:
 
 def test_ninth_identity_is_registered_without_changing_the_default() -> None:
     """第九版可构造，且创建对局的默认身份仍是启发式基线。"""
-    assert MIXED_STRATEGY_IDENTIFIERS[-2:] == (
-        MIXED_STRATEGY_IDENTIFIER_V8,
-        MIXED_STRATEGY_IDENTIFIER_V9,
-    )
+    ninth_at = MIXED_STRATEGY_IDENTIFIERS.index(MIXED_STRATEGY_IDENTIFIER_V9)
+    assert MIXED_STRATEGY_IDENTIFIERS[ninth_at - 1] == MIXED_STRATEGY_IDENTIFIER_V8
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V9).version == 9
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V9, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V9

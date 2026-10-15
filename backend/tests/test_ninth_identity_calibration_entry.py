@@ -7,3 +7,4 @@ from tools.ninth_identity_calibration import main
 
 def test_calibration_refuses_to_run_without_an_explicit_switch() -> None:
     assert main([]) == 2
+    assert main(["--identity", "mixed-local@10"]) == 2

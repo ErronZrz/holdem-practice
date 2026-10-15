@@ -17,7 +17,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from .config import UNDER_TEST_IDENTIFIER
+from .config import UNDER_TEST_IDENTIFIERS
 from .errors import IdentityMappingError, MaterialKeyError, SpecIncompleteError
 
 # 主键材料的固定字节长度：与构造器的直接注入分支一致。
@@ -74,8 +74,8 @@ class ConstructionMapping(BaseModel):
 
 
 def require_locked_under_test_mapping(mapping: ConstructionMapping) -> ConstructionMapping:
-    """被测侧四个字段必须与锁定口径逐项相同，不接受其它标识或座位范围。"""
-    if mapping.identifier != UNDER_TEST_IDENTIFIER:
+    """被测侧四个字段必须与锁定口径逐项相同，标识必须落在白名单内。"""
+    if mapping.identifier not in UNDER_TEST_IDENTIFIERS:
         raise IdentityMappingError("被测侧规范标识与锁定值不符")
     if mapping.interface is not ConstructionInterface.MATERIAL_KEY:
         raise IdentityMappingError("被测侧必须以主键接口构造")

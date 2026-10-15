@@ -1,10 +1,12 @@
-"""第九版身份的开发标定入口。
+"""本地混合身份的开发标定入口。
 
 只在命令行显式带上运行开关时才查询分布或推进对局。默认导入不做任何实测。
+默认被测身份仍是第九版；传入第十版时沿用同一节点集与同一配对排期。
 读数供开发对照，不代替独立验证，也不改默认策略。
 
 用法（在 backend 目录下）：
     uv run python tools/ninth_identity_calibration.py --run
+    uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@10
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ from app.strategy.distribution_observation import (  # noqa: E402
 from app.strategy.mixed_strategy import (  # noqa: E402
     MIXED_STRATEGY_IDENTIFIER_V8,
     MIXED_STRATEGY_IDENTIFIER_V9,
+    MIXED_STRATEGY_IDENTIFIER_V10,
     rules_for_identifier,
 )
 from app.strategy.registry import (  # noqa: E402
@@ -63,11 +66,23 @@ def _candidate_rows(observation: object) -> tuple[tuple[str, int, int], ...]:
     return tuple((item.action.value, item.amount, item.units) for item in candidates)
 
 
-def _observe_frozen_nodes() -> dict[str, object]:
-    """在首套冻结节点上查询第九版分布，并与第八版逐节点对照。"""
-    ninth = observation_entry(MIXED_STRATEGY_IDENTIFIER_V9)
-    eighth = observation_entry(MIXED_STRATEGY_IDENTIFIER_V8)
-    declaration = capability_declaration(MIXED_STRATEGY_IDENTIFIER_V9)
+def _previous_identifier(identifier: str) -> str:
+    """标定对照的上一身份。只接受已经登记分布观测的相邻两版。"""
+    order = (
+        MIXED_STRATEGY_IDENTIFIER_V8,
+        MIXED_STRATEGY_IDENTIFIER_V9,
+        MIXED_STRATEGY_IDENTIFIER_V10,
+    )
+    if identifier not in order[1:]:
+        raise ValueError(f"标定身份必须是已登记分布观测的新身份，收到 {identifier}")
+    return order[order.index(identifier) - 1]
+
+
+def _observe_frozen_nodes(identifier: str) -> dict[str, object]:
+    """在首套冻结节点上查询当前身份的分布，并与上一身份逐节点对照。"""
+    current = observation_entry(identifier)
+    previous = observation_entry(_previous_identifier(identifier))
+    declaration = capability_declaration(identifier)
     nodes = build_frozen_nodes()
     compared = 0
     differed = 0
@@ -79,8 +94,8 @@ def _observe_frozen_nodes() -> dict[str, object]:
         state = applied.actor_state()
         legal = applied.legal_actions()
         category_counts[fixture.category] += 1
-        left = ninth.observe(state, legal)
-        right = eighth.observe(state, legal)
+        left = current.observe(state, legal)
+        right = previous.observe(state, legal)
         compared += 1
         if sum(item.units for item in left.candidates) != PROBABILITY_UNITS:
             unit_failures += 1
@@ -96,7 +111,8 @@ def _observe_frozen_nodes() -> dict[str, object]:
         "nodes": len(nodes),
         "compared": compared,
         "unit_failures": unit_failures,
-        "differed_from_eighth": differed,
+        "compared_with": _previous_identifier(identifier),
+        "differed_from_previous": differed,
         "differed_by_category": dict(sorted(differed_by_category.items())),
         "category_counts": dict(sorted(category_counts.items())),
     }
@@ -115,15 +131,15 @@ def _rates(reading: object) -> dict[str, object]:
     }
 
 
-def _style_gaps() -> dict[str, object]:
-    """按节点等权计算两个身份在翻牌面对下注上的主动率。"""
+def _style_gaps(identifier: str) -> dict[str, object]:
+    """按节点等权计算当前身份与上一身份在翻牌面对下注上的主动率。"""
     payloads: dict[str, object] = {}
     seed_identical = True
-    for identifier in (MIXED_STRATEGY_IDENTIFIER_V8, MIXED_STRATEGY_IDENTIFIER_V9):
+    for subject in (_previous_identifier(identifier), identifier):
         manifest = frozen_manifest(
             code_identity="development-calibration",
             output_dir="not-written",
-            strategy_id=identifier,
+            strategy_id=subject,
         )
         rows = [row.model_dump() for row in _node_rows(manifest)]
         by_key: dict[tuple[str, str, str], dict[int, str]] = defaultdict(dict)
@@ -134,8 +150,8 @@ def _style_gaps() -> dict[str, object]:
             seed_identical = False
         reading, _domains = opportunity_reading(rows)
         flop_nodes = sorted({row["node_id"] for row in rows if row["category"] == "flop-draw"})
-        payloads[identifier] = {
-            "config_digest": config_digest(identifier),
+        payloads[subject] = {
+            "config_digest": config_digest(subject),
             "direct_rows": len(rows),
             "flop_draw_nodes": len(flop_nodes),
             "rates": _rates(reading),
@@ -161,12 +177,12 @@ def _pair_key(row: object) -> tuple[int, str, str, int, int]:
     )
 
 
-def _pairing(schedule_size: int) -> dict[str, object]:
-    """按既有完整轮换，把第九版焦点臂与启发式焦点臂配成对。"""
+def _pairing(schedule_size: int, identifier: str) -> dict[str, object]:
+    """按既有完整轮换，把当前身份的焦点臂与启发式焦点臂配成对。"""
     tally = run_adversarial_batch(
         stage="B",
         allow_matches=True,
-        identifier=MIXED_STRATEGY_IDENTIFIER_V9,
+        identifier=identifier,
         seeds=MIXED_MAIN_SEEDS,
         family_set="iqv",
         observe=True,
@@ -261,12 +277,12 @@ def _pairing(schedule_size: int) -> dict[str, object]:
     }
 
 
-def _replay_sample() -> dict[str, object]:
+def _replay_sample(identifier: str) -> dict[str, object]:
     """用排期开头的一小段重复打两次，核对同输入的净筹码是否一致。"""
     schedule = adversarial_schedule("B", seeds=MIXED_MAIN_SEEDS, family_set="iqv")
     sample = schedule[:16]
     mismatches = 0
-    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V9)
+    rules = rules_for_identifier(identifier)
     for seed, style, opponent, arm, player_count, rotation in sample:
         kwargs = {
             "seed": seed,
@@ -284,17 +300,17 @@ def _replay_sample() -> dict[str, object]:
     return {"hands": len(sample), "mismatches": mismatches}
 
 
-def run() -> dict[str, object]:
+def run(identifier: str = MIXED_STRATEGY_IDENTIFIER_V9) -> dict[str, object]:
     started = time.perf_counter()
-    observation = _observe_frozen_nodes()
-    gaps = _style_gaps()
+    observation = _observe_frozen_nodes(identifier)
+    gaps = _style_gaps(identifier)
     schedule = adversarial_schedule("B", seeds=MIXED_MAIN_SEEDS, family_set="iqv")
-    pairing = _pairing(len(schedule))
-    replay = _replay_sample()
+    pairing = _pairing(len(schedule), identifier)
+    replay = _replay_sample(identifier)
     return {
-        "strategy_id": MIXED_STRATEGY_IDENTIFIER_V9,
+        "strategy_id": identifier,
         "default_bot_strategy": CreateGameRequest().bot_strategy,
-        "ninth_config_digest": config_digest(MIXED_STRATEGY_IDENTIFIER_V9),
+        "config_digest": config_digest(identifier),
         "observation": observation,
         "style_gaps": gaps,
         "pairing": pairing,
@@ -304,13 +320,18 @@ def run() -> dict[str, object]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="第九版身份的开发标定")
+    parser = argparse.ArgumentParser(description="本地混合身份的开发标定")
     parser.add_argument("--run", action="store_true", help="显式允许查询分布并推进对照对局")
+    parser.add_argument(
+        "--identity",
+        default=MIXED_STRATEGY_IDENTIFIER_V9,
+        help="被测身份，默认第九版；第十版沿用同一排期",
+    )
     args = parser.parse_args(argv)
     if not args.run:
         print("须显式传入 --run 才会实测", file=sys.stderr)
         return 2
-    json.dump(run(), sys.stdout, ensure_ascii=False, indent=2)
+    json.dump(run(args.identity), sys.stdout, ensure_ascii=False, indent=2)
     sys.stdout.write("\n")
     return 0
 

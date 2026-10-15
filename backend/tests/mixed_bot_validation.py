@@ -63,6 +63,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V7,
     MIXED_STRATEGY_IDENTIFIER_V8,
     MIXED_STRATEGY_IDENTIFIER_V9,
+    MIXED_STRATEGY_IDENTIFIER_V10,
     MixedDistribution,
     MixedLocalStrategy,
     MixedSeatPolicy,
@@ -623,6 +624,21 @@ DIGEST_RULE_FIELDS: dict[str, tuple[str, ...]] = {
         "situational_active_gate",
         "facing_draw_continuation",
         "checked_value_realization",
+    ),
+    # 第十版在第九版的十一个字段之上多出大额承诺收紧开关。
+    MIXED_STRATEGY_IDENTIFIER_V10: (
+        "shared_board_chop_caliber",
+        "preflop_price_weight",
+        "preflop_contender_penalty",
+        "preflop_call_bonus",
+        "postflop_call_bonus",
+        "active_scale_percent",
+        "contender_penalty_cap",
+        "continuous_non_value_basis",
+        "situational_active_gate",
+        "facing_draw_continuation",
+        "checked_value_realization",
+        "large_pot_defense",
     ),
 }
 

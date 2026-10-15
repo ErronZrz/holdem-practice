@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from app.analysis.reference_identity import reference_identity
 
+from .config import UNDER_TEST_IDENTIFIERS
 from .digests import DIGEST_ALGORITHMS, content_digest
 from .errors import SpecIncompleteError
 from .identity import ConstructionInterface, SeatScope
@@ -33,6 +34,7 @@ KNOWN_PLAIN_TEXTS: frozenset[str] = frozenset(
     {
         "heuristic@1",
         "mixed-local@9",
+        "mixed-local@10",
         "app.strategy.registry.create_strategy",
         "app.strategy.heuristic.HeuristicStrategy.__init__",
         "python-os-urandom@1",
@@ -111,7 +113,6 @@ _CLOSED_ENTRIES: dict[str, tuple[str, ...]] = {
 }
 _FIXED_TEXT: dict[str, str] = {
     "baseline-identifier": "heuristic@1",
-    "under-test-identifier": "mixed-local@9",
     "baseline-registry-location": "app.strategy.registry.create_strategy",
     "baseline-entry-point": "app.strategy.heuristic.HeuristicStrategy.__init__",
     "source-interface-id": "python-os-urandom@1",
@@ -276,6 +277,11 @@ def _require_kappa_digest_matches_schema(entries: tuple[CoverageEntry, ...]) -> 
 
 def _require_entry_value(name: str, value: str) -> None:
     """按条目种类核对渲染：固定文本、版本、布尔、枚举、整数、摘要与两个可重算摘要。"""
+    if name == "under-test-identifier":
+        _require_visible_ascii(value)
+        if value not in UNDER_TEST_IDENTIFIERS:
+            raise SpecIncompleteError(f"固定文本与锁定值不符：{name}")
+        return
     if name == "baseline-effective-seed":
         _require_visible_ascii(value)
         if value not in _SEED_SENTENCES:

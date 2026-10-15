@@ -63,6 +63,16 @@ _ACTIVE_GATE_DRAW_SPAN = 40
 _CHECKED_VALUE_FLOOR = 600
 # 补上的质量停在两对高出该下沿的跨度，已经越过原门槛的更强牌不再被这条抬高。
 _CHECKED_VALUE_SPAN = 160
+# 多人底池里，低于两张底牌都配对的这一档时，不再用成牌下限去打薄价值。
+_THIN_VALUE_BASE = 760
+# 待跟注不少于可争夺底池时，跟注价格达到这条线，视为大尺度。
+_LARGE_PRICE = 500
+# 大额承诺从被动分扣掉的量：两倍跟注缓冲，再抵消跟注型翻后已经加上的偏移。
+_LARGE_COMMIT_PENALTY = 420
+# 除自己以外至少还有两名未弃牌对手，才按多人底池收紧压迫尺度。
+_MULTIWAY_CONTENDERS = 2
+# 价值下限收得更晚：四人及以上才取消中等成牌的主动托底。
+_MULTIWAY_VALUE_CONTENDERS = 3
 
 
 class MixedPolicyError(ValueError):
@@ -119,6 +129,8 @@ class MixedPolicyRules:
     facing_draw_continuation: bool = False
     # 无人下注时，是否用未加风格偏移的成牌基础分托住主动质量。默认取假。
     checked_value_realization: bool = False
+    # 大额承诺与多人底池是否收紧跟注、压迫尺度和薄价值托底。默认取假，旧身份分布不变。
+    large_pot_defense: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -169,6 +181,8 @@ MIXED_LOCAL_V9_RULES = replace(
     facing_draw_continuation=True,
     checked_value_realization=True,
 )
+# 第十版口径：只在第九版上打开大额承诺与多人底池的收紧。其余字段逐字一致。
+MIXED_LOCAL_V10_RULES = replace(MIXED_LOCAL_V9_RULES, large_pot_defense=True)
 
 
 class MixedStyle(StrEnum):
@@ -328,6 +342,9 @@ def build_distribution(
     passive_score = score + (
         _preflop_call_bonus(rules, style) if is_preflop else _postflop_call_bonus(rules, style)
     )
+    # 大额承诺只压低跟注，避免中等牌力在多人底池里把筹码跟光。
+    commit_penalty = _large_commit_penalty(features, rules)
+    passive_score -= commit_penalty
     fold_weight = max(0, call_threshold - passive_score + 160) * parameters.fold_percent
     call_weight = max(0, passive_score - call_threshold + 160) * parameters.call_percent
     gate = _active_gate(features, style, rules)
@@ -337,6 +354,10 @@ def build_distribution(
     # 分化只调整已有依据的幅度，不给没有公开依据的场合凭空加依据。
     bluff_raw = _non_value_quality(features, rules)
     bluff_quality = max(0, bluff_raw + gate) if bluff_raw > 0 else 0
+    if commit_penalty:
+        # 同一大额承诺上不再加注：加注会把本该弃掉的中等牌力打成更大的底池。
+        value_quality = 0
+        bluff_quality = 0
     aggression_scale = Fraction(
         parameters.aggression_percent
         * _MODE_AGGRESSION_PERCENT[mode]
@@ -345,7 +366,13 @@ def build_distribution(
     )
 
     active = _active_candidates(
-        features, legal, score, value_quality, bluff_quality, parameters.size_preferences
+        features,
+        legal,
+        score,
+        value_quality,
+        bluff_quality,
+        parameters.size_preferences,
+        rules,
     )
     total_active_preference = sum(preference for _, preference in active)
 
@@ -482,7 +509,35 @@ def _checked_value_floor(features: MixedFeatures, rules: MixedPolicyRules) -> in
         return 0
     if features.base < _CHECKED_VALUE_FLOOR:
         return 0
+    # 人多时中等成牌不再被托住下注；两对及以上、以及人少的底池仍沿用原下限。
+    if (
+        rules.large_pot_defense
+        and features.contenders >= _MULTIWAY_VALUE_CONTENDERS
+        and features.base < _THIN_VALUE_BASE
+    ):
+        return 0
     return min(features.base - _CHECKED_VALUE_FLOOR, _CHECKED_VALUE_SPAN)
+
+
+def _large_commit_penalty(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """大额承诺上的被动扣分。开关关闭、翻前、或牌力已到成牌下沿时为 0。
+
+    顶对及以上仍按原跟注。只在四人及以上、且待跟注至少吃掉一半剩余筹码或价格已到大尺度时
+    扣分。人少的底池继续跟注，避免把单挑里能跟的牌一并弃掉。
+    """
+    if not rules.large_pot_defense:
+        return 0
+    if features.street is Street.PREFLOP or features.actual_call <= 0:
+        return 0
+    if features.base >= _CHECKED_VALUE_FLOOR:
+        return 0
+    if features.contenders < _MULTIWAY_VALUE_CONTENDERS:
+        return 0
+    committing = features.actual_call * 2 >= features.stack
+    large_price = features.price >= _LARGE_PRICE
+    if not (committing or large_price):
+        return 0
+    return _LARGE_COMMIT_PENALTY
 
 
 def _active_gate(
@@ -534,6 +589,7 @@ def _active_candidates(
     value_quality: int,
     bluff_quality: int,
     size_preferences: tuple[int, int, int, int],
+    rules: MixedPolicyRules = MIXED_LOCAL_V1_RULES,
 ) -> list[tuple[tuple[ActionType, int, int], int]]:
     """生成通过夹紧、合并与危险尺度保护后的主动候选及其质量与偏好。"""
     if legal.can_bet:
@@ -579,10 +635,15 @@ def _active_candidates(
         if dangerous:
             if value_quality <= 0:
                 continue
-            if not (
-                score >= _DANGEROUS_SCORE_STRONG
-                or (features.spr_at_most(1) and score >= _DANGEROUS_SCORE_SHORT)
+            short_ok = features.spr_at_most(1) and score >= _DANGEROUS_SCORE_SHORT
+            # 多人底池里，低于成牌下沿的牌力不能借短码例外打出压迫尺度。
+            if (
+                rules.large_pot_defense
+                and features.contenders >= _MULTIWAY_CONTENDERS
+                and features.base < _CHECKED_VALUE_FLOOR
             ):
+                short_ok = False
+            if not (score >= _DANGEROUS_SCORE_STRONG or short_ok):
                 continue
         # 危险候选一律禁用非价值质量，避免把压迫性尺度用在无价值依据的场合。
         quality = value_quality + (0 if dangerous else bluff_quality)
