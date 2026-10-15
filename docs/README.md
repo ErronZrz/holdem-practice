@@ -62,6 +62,7 @@
 - [phase6/73a 长期·分层·配对质量框架规格](phase6/73a-m8-long-term-stratified-paired-quality-framework-spec.md)：框架规格（路线裁定为「丙」之后的产物）。
 - [phase6/73 v10 后质量框架与路线决策草案](phase6/73-m8-post-v10-quality-framework-and-route-decision-draft.md)：路线决策草案（含甲/乙/丙三选项与后果），已被 `73a` / `73b` / `73c` / `73d` / `73e` / `73f` 承接；该战役已由 `73f` 在未冻结前提下关闭，根编号 `73` 不再续号。
 - [59 当前成果诊断与后续工作边界](59-current-outcome-diagnosis-and-work-boundaries.md)：当前 Bot 路线的判断、证据边界与后续工作护栏。
+- [AI 研发工作流演进与 `mixed-local@12` 交付复盘](ai-workflow-and-v12-delivery-retrospective.md)：总结从双对话人工传话到单对话 Orchestrator-Executor-Reviewer 自动闭环的工程实践、前期慢阶段的四大核心资产，以及 `74az`–`74bh`（`mixed-local@9` → `@12`）四代策略打磨直至切换为默认 Bot 的完整复盘。
 - [项目总说明](../README.md)：项目运行、开发与产品入口。
 
 ## 阶段归档
@@ -167,3 +168,4 @@
 - 2026-10-15：新增 `phase6/74bf`（第十一版强成牌兑现、满员桌收紧与开发重标定），把 `phase6/` 的 `74` 编号范围更新为 `74、74a–74bf`。注册 `mixed-local@11`：两对高档及以上加大中大尺度兑现，八人及以上收紧中等牌力的深跟注和大尺度。全库 Ruff 通过，`2059 passed, 3 skipped`。不改既有历史正文，不替换 `74af`／`74ay` 的已签署结论。战役层 ③ 总体门槛仍不通过，不进入 ④–⑦。不回填提交哈希。该记录不是质量结论，也不是 ③ 总体门槛通过。
 - 2026-10-15：新增 `phase6/74bg`（第十二版强成牌尺度收回与开发重标定），把 `phase6/` 的 `74` 编号范围更新为 `74、74a–74bg`。注册 `mixed-local@12`：翻前强牌不再放大尺度，面对下注且未到同花的强成牌收回小尺度，无人下注的同花及以上才把整叠放回偏好。全库 Ruff 通过，`2071 passed, 3 skipped`。不改既有历史正文，不替换 `74af`／`74ay` 的已签署结论。战役层 ③ 总体门槛仍不通过，不进入 ④–⑦。不回填提交哈希。该记录不是质量结论，也不是 ③ 总体门槛通过。
 - 2026-10-15：新增 `phase6/74bh`（第十二版作为创建对局默认策略的采用记录），把 `phase6/` 的 `74` 编号范围更新为 `74、74a–74bh`。新建对局未指定策略时使用 `mixed-local@12`；配对基线与回退标识仍是 `heuristic@1`。全库 Ruff 通过，`2071 passed, 3 skipped`，前端构建通过。不改既有历史正文，不替换 `74af`／`74ay` 的已签署结论，不重跑 `74bg` 的开发标定。战役层 ③ 总体门槛仍不通过，不进入 ④–⑦。不回填提交哈希。该记录不是质量结论，也不是 ③ 总体门槛通过。
+- 2026-10-15：在 `docs/` 顶层新增 [`ai-workflow-and-v12-delivery-retrospective.md`](ai-workflow-and-v12-delivery-retrospective.md)，系统复盘单窗口 Orchestrator-Executor-Reviewer 自动闭环工作流、前期慢阶段沉淀的四大核心工程资产、Cursor 权限与沙箱配置经验，以及 `mixed-local@9` → `@12` 四代策略演进与切换默认 Bot 的全过程（不占用战役整数根编号）。
