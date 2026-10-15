@@ -17,6 +17,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from .config import UNDER_TEST_IDENTIFIER
 from .errors import IdentityMappingError, MaterialKeyError, SpecIncompleteError
 
 # 主键材料的固定字节长度：与构造器的直接注入分支一致。
@@ -72,6 +73,19 @@ class ConstructionMapping(BaseModel):
         }
 
 
+def require_locked_under_test_mapping(mapping: ConstructionMapping) -> ConstructionMapping:
+    """被测侧四个字段必须与锁定口径逐项相同，不接受其它标识或座位范围。"""
+    if mapping.identifier != UNDER_TEST_IDENTIFIER:
+        raise IdentityMappingError("被测侧规范标识与锁定值不符")
+    if mapping.interface is not ConstructionInterface.MATERIAL_KEY:
+        raise IdentityMappingError("被测侧必须以主键接口构造")
+    if mapping.requires_public_summary is not True:
+        raise IdentityMappingError("被测侧必须依赖公开摘要")
+    if mapping.seat_scope is not SeatScope.PROBED_SEAT_ONLY:
+        raise IdentityMappingError("被测侧座位范围只能是被测座位")
+    return mapping
+
+
 def require_baseline_limits(mapping: ConstructionMapping) -> ConstructionMapping:
     """单一基线身份的构造口径限制：接口、公开摘要与座位范围三项都必须是最小形态。
 
@@ -105,6 +119,7 @@ class ConstructionCaliber(BaseModel):
         if self.baseline.identifier == self.under_test.identifier:
             raise IdentityMappingError("两侧构造口径的规范标识必须不同")
         require_baseline_limits(self.baseline)
+        require_locked_under_test_mapping(self.under_test)
         return self
 
     def canonical_payload(self) -> dict[str, object]:

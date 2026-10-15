@@ -255,9 +255,14 @@ register_strategy(
         description="本地规则型混合对手第九版：面对下注的听牌延续与无人下注的成牌兑现，累积第八版口径",
     ),
 )
-# 分布观测能力只登记在既有研发身份上；新身份不自动继承该能力声明。
+# 分布观测按身份显式登记。第八版保持原声明；第九版使用自己的规则，不改第八版。
 register_observation_entry(
     MIXED_STRATEGY_IDENTIFIER_V8,
     supported_declaration(),
     MIXED_STRATEGY_RULES[MIXED_STRATEGY_IDENTIFIER_V8],
+)
+register_observation_entry(
+    MIXED_STRATEGY_IDENTIFIER_V9,
+    supported_declaration(),
+    MIXED_STRATEGY_RULES[MIXED_STRATEGY_IDENTIFIER_V9],
 )

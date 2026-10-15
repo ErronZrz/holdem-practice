@@ -96,7 +96,7 @@ def test_declaration_read_is_decoupled_from_query_inputs() -> None:
     assert list(inspect.signature(registry.capability_health).parameters) == []
 
 
-@pytest.mark.parametrize("value", ["mixed-local", "mixed-local@9", "heuristic@1", "random@1"])
+@pytest.mark.parametrize("value", ["mixed-local", "mixed-local@7", "heuristic@1", "random@1"])
 def test_declaration_missing_for_unknown_or_undeclared_identifier(value: str) -> None:
     with pytest.raises(observation.DeclarationMissingError):
         registry.capability_declaration(value)

@@ -26,6 +26,7 @@ from app.verification import (
     INSTANTIATION_CALIBER_CATEGORY,
     RUN_FLOW_STEPS,
     AuditedMaterials,
+    ConstructionCaliber,
     DomainRunSpec,
     ExecutionIdentityRecord,
     FreezeBindingError,
@@ -34,9 +35,11 @@ from app.verification import (
     IdentityMappingError,
     MaterialBindingError,
     MaterialEntry,
+    MaterialKeyError,
     PairedHandRecord,
     PairedRunOutput,
     ProtocolAuditError,
+    ProtocolSpecError,
     SeatScope,
     SpecIncompleteError,
     VerificationError,
@@ -46,6 +49,7 @@ from app.verification import (
     execution_identity_digest,
     flow_step_entries,
     manifest_digest,
+    material_key_from_integer,
     materials_digest,
     reference_snapshot,
     verify_frozen_inputs,
@@ -54,6 +58,7 @@ from app.verification import (
 from .verification_helpers import (
     BASELINE_IDENTIFIER,
     Fixture,
+    baseline_mapping,
     build_fixture,
     caliber_categories,
     conflicting_baseline_caliber,
@@ -65,6 +70,7 @@ from .verification_helpers import (
     replace_entries,
     replace_manifest_entry,
     run_spec,
+    under_test_mapping,
 )
 
 FIXTURE: Fixture = build_fixture()
@@ -121,6 +127,7 @@ EXPECTED_FUNCTIONS: dict[str, frozenset[str]] = {
         {
             "require_baseline_limits",
             "require_identifier_match",
+            "require_locked_under_test_mapping",
             "require_material_key",
             "material_key_from_integer",
             "require_explicit_seed",
@@ -1169,7 +1176,8 @@ def test_run_spec_requires_strict_integers(field: str) -> None:
 
 def test_run_spec_plan_lookup_by_hand_ordinal() -> None:
     spec = run_spec()
-    assert spec.plan_for(1).probed_seat == 1
+    assert spec.plan_for(1).button == 0
+    assert spec.plan_for(1).probed_seat == 0
     with pytest.raises(SpecIncompleteError):
         spec.plan_for(2)
 
@@ -1321,58 +1329,37 @@ def test_build_frozen_manifest_recomputes_from_content() -> None:
 
 
 def test_chain_requires_identifier_agreement() -> None:
-    """规格里的身份标识与显式构造口径不一致时，冻结输入校验即失败。"""
+    """规格与构造口径都只接受锁定的被测标识。"""
     with pytest.raises(SpecIncompleteError):
         run_spec(under_test_identifier="absent@1")
-    mismatched_caliber = construction_caliber(identifier="absent@1")
-    with pytest.raises(IdentityMappingError):
-        verify_frozen_inputs(
-            manifest=FIXTURE.manifest,
-            spec=FIXTURE.spec,
-            caliber=mismatched_caliber,
-            bundle=FIXTURE.bundle,
-            audit=FIXTURE.audit,
-            execution_identity=FIXTURE.identity,
-            material_manifest=FIXTURE.material_manifest,
-            **_source_manifest_kwargs(FIXTURE),
-        )
+    with pytest.raises(IdentityMappingError, match="规范标识"):
+        construction_caliber(identifier="absent@1")
 
 
 def test_chain_rejects_out_of_range_material_key() -> None:
-    """协议域放宽到超过 32 字节时，身份相关的主键约束仍须拦下越界材料。"""
-    with pytest.raises(IdentityMappingError):
+    """锁定后的协议不再接受放宽的输出域；主键还原本身仍拒绝越界整数。"""
+    with pytest.raises(ProtocolSpecError, match="用途规格"):
         build_fixture(under_test_bits=264, under_test_value=1 << 256)
+    with pytest.raises(MaterialKeyError):
+        material_key_from_integer(1 << 256)
 
 
 def test_caliber_content_is_bound_by_its_own_digest() -> None:
-    """构造口径被替换、执行身份摘要照着重算时，仍会因口径摘要不符而失败。"""
-    algorithm = FIXTURE.spec.protocol.digest_algorithm
-    forged = construction_caliber(SeatScope.ALL_SEATS)
-    identity = build_execution_identity_record(
-        caliber_categories(
-            forged,
-            FIXTURE.spec,
-            FIXTURE.bundle,
-            FIXTURE.audit,
-            FIXTURE.material_manifest,
-            FIXTURE.source_manifests,
-        )
+    """被测座位范围偏离锁定值时，在进入摘要绑定之前就被拒绝。"""
+    with pytest.raises(IdentityMappingError, match="座位范围"):
+        construction_caliber(SeatScope.ALL_SEATS)
+    forged = ConstructionCaliber.model_construct(
+        baseline=baseline_mapping(),
+        under_test=under_test_mapping(SeatScope.ALL_SEATS),
     )
-    manifest = FIXTURE.manifest.model_copy(
-        update={
-            "execution_identity_digest": execution_identity_digest(
-                identity, algorithm=algorithm
-            )
-        }
-    )
-    with pytest.raises(FreezeBindingError, match="construction-caliber-digest"):
+    with pytest.raises(IdentityMappingError, match="座位范围"):
         verify_frozen_inputs(
-            manifest=manifest,
+            manifest=FIXTURE.manifest,
             spec=FIXTURE.spec,
             caliber=forged,
             bundle=FIXTURE.bundle,
             audit=FIXTURE.audit,
-            execution_identity=identity,
+            execution_identity=FIXTURE.identity,
             material_manifest=FIXTURE.material_manifest,
             **_source_manifest_kwargs(FIXTURE),
         )

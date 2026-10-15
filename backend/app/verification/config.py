@@ -4,7 +4,8 @@
 - 把人数、筹码、盲注、显式引擎种子、两侧身份标识、发牌映射、随机化协议与手序计划
   集中成一份可校验的规格：缺项或取值越界都在构造阶段失败，不进入任何运行结构；
 - 单一基线身份由常量给定并在规格中硬性核对，不接受任意受控标识充当比较基线；
-- 手序计划由调用方逐手显式给出；本包不从手序推断庄位，也不代替调用方填写片段。
+- 手序计划由调用方逐手显式给出，且必须从 1 连续排到块长；庄位按手序对人数取模，
+  被测座位与庄位相同。本包不代替调用方填写片段。
 """
 
 from __future__ import annotations
@@ -155,11 +156,16 @@ class DomainRunSpec(BaseModel):
         if not self.schedule:
             raise SpecIncompleteError("手序计划不能为空")
         ordinals = [plan.hand_ordinal for plan in self.schedule]
-        if ordinals != sorted(set(ordinals)):
-            raise SpecIncompleteError("块内手序必须严格递增且互不重复")
+        if ordinals != list(range(1, len(self.schedule) + 1)):
+            raise SpecIncompleteError("块内手序必须从 1 连续排到块长")
         for plan in self.schedule:
             if plan.button >= self.num_players or plan.probed_seat >= self.num_players:
                 raise SpecIncompleteError("庄位与被测座位必须落在人数范围内")
+            expected_button = (plan.hand_ordinal - 1) % self.num_players
+            if plan.button != expected_button:
+                raise SpecIncompleteError("庄位必须按手序对人数取模")
+            if plan.probed_seat != plan.button:
+                raise SpecIncompleteError("被测座位必须与庄位相同")
         _require_block_structure(
             self.schedule, self.fragments, self.weights, self.k_min_degenerate
         )

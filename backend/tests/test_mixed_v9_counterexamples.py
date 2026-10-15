@@ -7,12 +7,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-import pytest
-
 from app.api.schemas import CreateGameRequest
 from app.poker.actions import LegalActions
 from app.poker.state import Street
-from app.strategy.distribution_observation import DeclarationMissingError
+from app.strategy.distribution_observation import supported_declaration
 from app.strategy.mixed_features import MixedFeatures, extract_features
 from app.strategy.mixed_policy import (
     _CHECKED_VALUE_FLOOR,
@@ -168,10 +166,12 @@ def test_ninth_identity_is_registered_without_changing_the_default() -> None:
     assert selected.bot_strategy == MIXED_STRATEGY_IDENTIFIER_V9
 
 
-def test_ninth_identity_does_not_inherit_distribution_observation() -> None:
-    """分布观测仍只挂在原研发身份上，第九版没有能力声明。"""
-    with pytest.raises(DeclarationMissingError):
-        capability_declaration(MIXED_STRATEGY_IDENTIFIER_V9)
+def test_ninth_identity_declares_distribution_observation() -> None:
+    """第九版显式登记与第八版相同的能力声明，规则对象仍是第九版自己的。"""
+    assert capability_declaration(MIXED_STRATEGY_IDENTIFIER_V9) == supported_declaration()
+    assert capability_declaration(MIXED_STRATEGY_IDENTIFIER_V9) == capability_declaration(
+        MIXED_STRATEGY_IDENTIFIER_V8
+    )
 
 
 def test_ninth_digest_lists_both_new_switches() -> None:

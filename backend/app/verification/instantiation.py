@@ -47,6 +47,7 @@ from .identity import (
     require_baseline_limits,
     require_explicit_seed,
     require_identifier_match,
+    require_locked_under_test_mapping,
 )
 from .kappa_derive import DERIVATION_ALGORITHM
 from .materials import (
@@ -109,6 +110,7 @@ def require_caliber_matches_spec(
     require_identifier_match(spec.baseline_identifier, caliber.baseline)
     require_identifier_match(spec.under_test_identifier, caliber.under_test)
     require_baseline_limits(caliber.baseline)
+    require_locked_under_test_mapping(caliber.under_test)
 
 
 def require_material_format(mapping: ConstructionMapping, value: int) -> None:

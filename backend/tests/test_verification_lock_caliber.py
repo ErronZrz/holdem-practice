@@ -22,6 +22,7 @@ from app.verification import (
     IdentityMappingError,
     MaterialKeyError,
     ProtocolAuditError,
+    ProtocolSpecError,
     SpecIncompleteError,
     TranscriptCommitment,
     build_domain_run_spec,
@@ -47,6 +48,33 @@ from .verification_helpers import (
     protocol_spec,
     run_spec,
 )
+
+
+def test_schedule_rotates_button_and_probed_seat_together() -> None:
+    spec = run_spec(num_players=3, hands=4)
+    assert [
+        (plan.hand_ordinal, plan.button, plan.probed_seat) for plan in spec.schedule
+    ] == [
+        (1, 0, 0),
+        (2, 1, 1),
+        (3, 2, 2),
+        (4, 0, 0),
+    ]
+    fields = spec.model_dump()
+    fields["schedule"][0]["probed_seat"] = 1
+    with pytest.raises(SpecIncompleteError, match="被测座位"):
+        DomainRunSpec.model_validate(fields)
+    fields = spec.model_dump()
+    fields["schedule"][1]["hand_ordinal"] = 3
+    with pytest.raises(SpecIncompleteError, match="连续"):
+        DomainRunSpec.model_validate(fields)
+
+
+def test_protocol_rejects_values_outside_the_locked_table() -> None:
+    with pytest.raises(ProtocolSpecError, match="承诺形式"):
+        protocol_spec(commitment_form="single-digest-seal")
+    with pytest.raises(ProtocolSpecError, match="来源接口"):
+        protocol_spec(source_interface_id="other-random@1")
 
 
 def test_player_count_accepts_bounds_and_rejects_bool_and_overflow() -> None:

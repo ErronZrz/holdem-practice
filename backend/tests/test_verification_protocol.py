@@ -656,8 +656,8 @@ def test_isolated_rejection_at_purpose_end_fails() -> None:
         _verify(FIXTURE.spec.protocol, audit)
 
 
-def test_isolated_rejection_at_audit_end_fails() -> None:
-    """发牌用途排在遍历顺序末尾时，审计末尾的孤立拒绝读取同样失败。"""
+def test_reordered_traversal_is_rejected() -> None:
+    """遍历顺序必须与锁定表相同，不能把发牌挪到末尾再做审计。"""
     order = (
         NON_PROBED_LABEL,
         UNDER_TEST_LABEL,
@@ -665,15 +665,11 @@ def test_isolated_rejection_at_audit_end_fails() -> None:
         DEAL_LABEL,
     )
     by_label = {purpose.label: purpose for purpose in protocol_spec().purposes}
-    protocol = protocol_spec(
-        purposes=tuple(by_label[label] for label in order),
-        traversal_order=order,
-    )
-    plan = list(read_plan(protocol, ((1, 1),), 3))
-    plan.append((DEAL_LABEL, _deal_index(1, 11), REJECTED_RAW, None))
-    audit = audit_from_plan(protocol, tuple(plan))
-    with pytest.raises(ProtocolAuditError, match="接受"):
-        _verify(protocol, audit)
+    with pytest.raises(ProtocolSpecError, match="遍历顺序"):
+        protocol_spec(
+            purposes=tuple(by_label[label] for label in order),
+            traversal_order=order,
+        )
 
 
 def test_multiple_rejections_then_one_acceptance_passes() -> None:

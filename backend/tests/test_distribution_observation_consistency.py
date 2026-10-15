@@ -11,9 +11,9 @@ import hmac
 import json
 import random
 from collections import Counter
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from fractions import Fraction
-from typing import Mapping, Sequence
 
 import pytest
 
@@ -25,8 +25,8 @@ from app.strategy.mixed_context import mixed_state, require_mixed_input
 from app.strategy.mixed_features import features_for
 from app.strategy.mixed_policy import (
     HAND_MODE_ROLL_BOUNDS,
-    HandMode,
     MIXED_DISTRIBUTION_UNITS,
+    HandMode,
     MixedCandidate,
     MixedDistribution,
     build_distribution,
@@ -287,8 +287,12 @@ def test_units_amounts_and_output_structure(
     keys = [(c.action, c.amount) for c in result.candidates]
     assert len(set(keys)) == len(keys)
     assert keys == sorted(keys, key=_order_key)
-    assert all(isinstance(c.units, int) and not isinstance(c.units, bool) for c in result.candidates)
-    assert all(isinstance(c.amount, int) and not isinstance(c.amount, bool) for c in result.candidates)
+    assert all(
+        isinstance(c.units, int) and not isinstance(c.units, bool) for c in result.candidates
+    )
+    assert all(
+        isinstance(c.amount, int) and not isinstance(c.amount, bool) for c in result.candidates
+    )
     assert sum(c.units for c in result.candidates) == result.probability_units
     assert result.probability_units == MIXED_DISTRIBUTION_UNITS
 
@@ -357,9 +361,26 @@ def test_declaration_is_bound_to_the_canonical_identifier() -> None:
     assert declaration.probability_units == MIXED_DISTRIBUTION_UNITS
     assert declaration.modes == _REFERENCE_MODES
     assert declaration.mode_weights == _REFERENCE_WEIGHTS
-    for value in ("mixed-local", "mixed-local@9", "heuristic@1", "random@1"):
+    for value in ("mixed-local", "mixed-local@7", "heuristic@1", "random@1"):
         with pytest.raises(observation.DeclarationMissingError):
             registry.capability_declaration(value)
+    ninth = registry.capability_declaration("mixed-local@9")
+    assert ninth == declaration
+    assert registry.observation_entry("mixed-local@9").rules is not (
+        registry.observation_entry(CAPABILITY_IDENTIFIER).rules
+    )
+
+
+def test_ninth_identity_observation_uses_the_same_contract() -> None:
+    """第九版查询仍满足定点单位与合并口径，且不改变能力健康读取。"""
+    state, legal, _engine = _node(*NODE_PARAMS[0])
+    eighth = registry.observation_entry(CAPABILITY_IDENTIFIER).observe(state, legal)
+    ninth = registry.observation_entry("mixed-local@9").observe(state, legal)
+    for result in (eighth, ninth):
+        assert result.aggregation == "marginalized"
+        assert result.mode_weights == _REFERENCE_WEIGHTS
+        assert sum(item.units for item in result.candidates) == result.probability_units
+    assert registry.capability_health() is observation.CapabilityHealth.AVAILABLE
 
 
 def test_failure_categories_are_distinct_types() -> None:

@@ -1,8 +1,7 @@
 """验证运行器测试用的构造辅助：只把规格与已有材料拼起来。
 
-这里的牌规范序、用途标签、索引键与输出域都是测试自建口径，用于覆盖结构校验的分支，
-不是任何冻结取值。审计示例与材料清单由本文件在内存中拼出：既不是域 C 材料生成，
-也不是任何冻结工件。
+牌规范序、用途与承诺形式使用已锁定的取值，否则规格在构造时就会被拒绝。
+审计示例与材料清单仍由本文件在内存中拼出：既不是材料生成，也不是任何冻结工件。
 
 读取排布遵循结构规则：用途按遍历顺序、用途内部按索引升序；每手第 0 次发牌先给出一条
 与之同索引的被拒绝读取，随后一条同索引的接受读取。整数字段按无前导零十进制渲染。
@@ -52,6 +51,7 @@ from app.verification import (
     closed_keyset_binding_digest,
     commitment_digest,
     deal_mapping_digest,
+    deal_mapping_payload,
     injection_precheck_category_entries,
     instantiation_caliber_entries,
     manifest_digest,
@@ -73,16 +73,17 @@ from app.verification.protocol import (
     v2_record_sort_key,
 )
 
-# 测试自建的牌规范序：先点数后花色，共一副牌。
-DECK_ORDER: tuple[str, ...] = tuple(
-    f"{rank}{suit}" for rank in "23456789TJQKA" for suit in "cdhs"
-)
+# 牌规范序取自锁定载荷，避免测试另写一套顺序。
+_deck_order = deal_mapping_payload()["deck_order"]
+if not isinstance(_deck_order, list) or not all(isinstance(card, str) for card in _deck_order):
+    raise RuntimeError("锁定牌序缺失")
+DECK_ORDER: tuple[str, ...] = tuple(_deck_order)
 
-# 测试自建的用途标签、索引字段与定位字段。
+# 用途标签与锁定表一致。
 DEAL_LABEL = "deal"
-NON_PROBED_LABEL = "non-probed-seed"
-UNDER_TEST_LABEL = "under-test-material"
-BASELINE_LABEL = "baseline-seed"
+NON_PROBED_LABEL = "non_probed"
+UNDER_TEST_LABEL = "arm_m"
+BASELINE_LABEL = "arm_b"
 DRAW_FIELD = "draw"
 SEAT_FIELD = "seat"
 
@@ -145,7 +146,9 @@ def hand_field(hand: int) -> str:
 
 
 def purpose_specs(under_test_bits: int = 256) -> tuple[PurposeSpec, ...]:
-    """测试自建的用途规格：四种角色各一份，索引字段含定位字段。"""
+    """四种角色各一份。默认域与位宽对齐锁定表；偏离时由协议校验拒绝。"""
+    fixed = FixedDomain(size=1 << 256)
+    under_test_domain = FixedDomain(size=1 << under_test_bits)
     return (
         PurposeSpec(
             role=PurposeRole.DEAL,
@@ -162,15 +165,15 @@ def purpose_specs(under_test_bits: int = 256) -> tuple[PurposeSpec, ...]:
             index_fields=("campaign", "block", "hand", SEAT_FIELD),
             integer_fields=("block", "hand", SEAT_FIELD),
             seat_index_field=SEAT_FIELD,
-            domain=FixedDomain(size=1 << 64),
-            bit_width=64,
+            domain=fixed,
+            bit_width=256,
         ),
         PurposeSpec(
             role=PurposeRole.UNDER_TEST_MATERIAL,
             label=UNDER_TEST_LABEL,
             index_fields=("campaign", "block", "hand"),
             integer_fields=("block", "hand"),
-            domain=FixedDomain(size=1 << under_test_bits),
+            domain=under_test_domain,
             bit_width=under_test_bits,
         ),
         PurposeSpec(
@@ -178,8 +181,8 @@ def purpose_specs(under_test_bits: int = 256) -> tuple[PurposeSpec, ...]:
             label=BASELINE_LABEL,
             index_fields=("campaign", "block", "hand"),
             integer_fields=("block", "hand"),
-            domain=FixedDomain(size=1 << 64),
-            bit_width=64,
+            domain=fixed,
+            bit_width=256,
         ),
     )
 
@@ -194,7 +197,7 @@ def protocol_spec(
         "rejection_rule": "rejection-whole-multiple-truncation-v1",
         "purposes": purpose_specs(under_test_bits),
         "traversal_order": TRAVERSAL_ORDER,
-        "commitment_form": "single-digest-seal",
+        "commitment_form": "transcript-commitment-v1",
         "audit_format_version": 1,
         "digest_algorithm": DIGEST_ALGORITHMS[0],
         "read_record_encoding": READ_RECORD_ENCODINGS[0],
@@ -224,15 +227,18 @@ def _fixture_structure(
 def run_spec(
     *,
     num_players: int = 3,
-    probed_seat: int = 1,
     hands: int = 1,
     baseline_identifier: str = BASELINE_IDENTIFIER,
     under_test_identifier: str = UNDER_TEST_IDENTIFIER,
     under_test_bits: int = 256,
 ) -> DomainRunSpec:
-    """测试自建的运行前规格：手序计划按手号逐手显式给出。"""
+    """测试自建的运行前规格：手序从 1 连续到块长，庄位与被测座位随手序轮换。"""
     schedule = tuple(
-        HandPlan(hand_ordinal=hand, button=hand % num_players, probed_seat=probed_seat)
+        HandPlan(
+            hand_ordinal=hand,
+            button=(hand - 1) % num_players,
+            probed_seat=(hand - 1) % num_players,
+        )
         for hand in range(1, hands + 1)
     )
     fragments, weights, degenerate = _fixture_structure(hands)
@@ -757,7 +763,6 @@ class Fixture:
 def build_fixture(
     num_players: int = 3,
     hands: int = 1,
-    probed_seat: int = 1,
     under_test_bits: int = 256,
     under_test_value: int | None = None,
     under_test_scope: SeatScope = SeatScope.PROBED_SEAT_ONLY,
@@ -766,7 +771,6 @@ def build_fixture(
     caliber = construction_caliber(under_test_scope)
     spec = run_spec(
         num_players=num_players,
-        probed_seat=probed_seat,
         hands=hands,
         under_test_bits=under_test_bits,
     )
@@ -989,7 +993,7 @@ def v2_protocol_spec() -> RandomizationProtocolSpec:
             ),
         ),
         traversal_order=("deal", "non_probed", "arm_m", "arm_b"),
-        commitment_form="single-digest-seal",
+        commitment_form="transcript-commitment-v1",
         audit_format_version=1,
         digest_algorithm=DIGEST_ALGORITHMS[0],
         read_record_encoding=READ_RECORD_ENCODINGS[0],
@@ -1000,11 +1004,10 @@ def v2_protocol_spec() -> RandomizationProtocolSpec:
 def v2_run_spec(
     *,
     num_players: int = 2,
-    probed_seat: int = 1,
     hands: int = 1,
 ) -> DomainRunSpec:
     """夹具规格使用 v2 键形，campaign 按协议版本 2 重算。"""
-    base = run_spec(num_players=num_players, probed_seat=probed_seat, hands=hands)
+    base = run_spec(num_players=num_players, hands=hands)
     campaign = campaign_configuration_digest(
         num_players=base.num_players,
         starting_stack=base.starting_stack,
@@ -1065,11 +1068,10 @@ def _v2_fixture_output(label: str, key: tuple[str, ...]) -> int:
 def build_v2_frozen_fixture(
     *,
     num_players: int = 2,
-    probed_seat: int = 1,
     hands: int = 1,
 ) -> tuple[Fixture, tuple[tuple[str, tuple[str, ...]], ...]]:
     """拼出一份自洽的 v2 冻结输入。键、审计与摘要都在内存中给定。"""
-    spec = v2_run_spec(num_players=num_players, probed_seat=probed_seat, hands=hands)
+    spec = v2_run_spec(num_players=num_players, hands=hands)
     rows = tuple(
         sorted(
             v2_anchor_entries(spec, fixture_projection_hex()),
@@ -1188,7 +1190,7 @@ def v3_protocol_spec() -> RandomizationProtocolSpec:
             ),
         ),
         traversal_order=("master", "deal", "non_probed", "arm_m", "arm_b"),
-        commitment_form="single-digest-seal",
+        commitment_form="transcript-commitment-v1",
         audit_format_version=1,
         digest_algorithm=DIGEST_ALGORITHMS[0],
         read_record_encoding=READ_RECORD_ENCODINGS[0],
@@ -1199,11 +1201,10 @@ def v3_protocol_spec() -> RandomizationProtocolSpec:
 def v3_run_spec(
     *,
     num_players: int = 2,
-    probed_seat: int = 1,
     hands: int = 1,
 ) -> DomainRunSpec:
     """夹具规格使用版本 3 键形，campaign 按协议版本 3 重算。"""
-    base = run_spec(num_players=num_players, probed_seat=probed_seat, hands=hands)
+    base = run_spec(num_players=num_players, hands=hands)
     campaign = campaign_configuration_digest(
         num_players=base.num_players,
         starting_stack=base.starting_stack,
@@ -1273,11 +1274,10 @@ def _v3_fixture_output(label: str, key: tuple[str, ...]) -> int:
 def build_v3_frozen_fixture(
     *,
     num_players: int = 2,
-    probed_seat: int = 1,
     hands: int = 1,
 ) -> tuple[Fixture, tuple[tuple[str, tuple[str, ...]], ...]]:
     """拼出一份自洽的版本 3 冻结输入。主值、键和摘要都在内存中给定。"""
-    spec = v3_run_spec(num_players=num_players, probed_seat=probed_seat, hands=hands)
+    spec = v3_run_spec(num_players=num_players, hands=hands)
     rows = _v3_retained_rows(spec)
     master_key = (spec.campaign,)
     master_value = 7

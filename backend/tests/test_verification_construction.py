@@ -75,10 +75,10 @@ from .verification_helpers import (
 def test_deal_follows_fixed_assignment() -> None:
     """全零取值等价于不移动任何牌位，可直接核验分配规则本身。"""
     deal = deal_for_hand(deal_spec(), num_players=3, steps=(0,) * 11)
-    assert [str(card) for card in deal.hole_cards[0]] == ["2c", "2d"]
-    assert [str(card) for card in deal.hole_cards[1]] == ["2h", "2s"]
-    assert [str(card) for card in deal.hole_cards[2]] == ["3c", "3d"]
-    assert [str(card) for card in deal.board] == ["3h", "3s", "4c", "4d", "4h"]
+    assert [str(card) for card in deal.hole_cards[0]] == ["2c", "3c"]
+    assert [str(card) for card in deal.hole_cards[1]] == ["4c", "5c"]
+    assert [str(card) for card in deal.hole_cards[2]] == ["6c", "7c"]
+    assert [str(card) for card in deal.board] == ["8c", "9c", "Tc", "Jc", "Qc"]
 
 
 def test_deal_is_deterministic_for_same_steps() -> None:
@@ -109,6 +109,9 @@ def test_deal_spec_requires_full_deck_permutation() -> None:
         deal_spec(deck_order=(*DECK_ORDER[:-1], DECK_ORDER[0]))
     with pytest.raises(DealMaterialError):
         deal_spec(deck_order=(*DECK_ORDER[:-1], "1x"))
+    swapped = (DECK_ORDER[1], DECK_ORDER[0], *DECK_ORDER[2:])
+    with pytest.raises(DealMaterialError, match="锁定顺序"):
+        deal_spec(deck_order=swapped)
     with pytest.raises(DealMaterialError):
         deal_spec().draw_count(1)
 
@@ -449,7 +452,7 @@ def test_seat_scope_decides_probed_seat_style() -> None:
 
 
 def test_construction_plan_covers_every_seat() -> None:
-    fixture = build_fixture(num_players=3, probed_seat=1)
+    fixture = build_fixture(num_players=3)
     under_test = build_arm_construction_plan(
         fixture.spec,
         fixture.caliber,
@@ -458,11 +461,11 @@ def test_construction_plan_covers_every_seat() -> None:
         fixture.bundle[0],
     )
     assert sorted(plan_by_seat(under_test)) == [0, 1, 2]
-    assert under_test.summary_seats == (1,)
-    assert under_test.summary_scope == (1,)
+    assert under_test.summary_seats == (0,)
+    assert under_test.summary_scope == (0,)
     assert under_test.probed_seat_style == "tight"
-    assert plan_by_seat(under_test)[0].identifier == BASELINE_IDENTIFIER
-    probed = under_test.entry_for(1)
+    assert plan_by_seat(under_test)[1].identifier == BASELINE_IDENTIFIER
+    probed = under_test.entry_for(0)
     assert probed.identifier == UNDER_TEST_IDENTIFIER
     assert probed.interface is ConstructionInterface.MATERIAL_KEY
     assert probed.material.purpose_label == UNDER_TEST_LABEL
@@ -477,36 +480,22 @@ def test_construction_plan_covers_every_seat() -> None:
     assert baseline.summary_seats == ()
     assert baseline.summary_scope == ()
     assert baseline.probed_seat_style is None
-    baseline_probed = baseline.entry_for(1)
+    baseline_probed = baseline.entry_for(0)
     assert baseline_probed.identifier == BASELINE_IDENTIFIER
     assert baseline_probed.material.purpose_label == BASELINE_LABEL
 
 
-def test_construction_plan_carries_all_seats_scope() -> None:
-    caliber = construction_caliber(SeatScope.ALL_SEATS, identifier=UNDER_TEST_IDENTIFIER)
-    spec = run_spec(num_players=3, probed_seat=1, under_test_identifier=UNDER_TEST_IDENTIFIER)
-    fixture = build_fixture(num_players=3, probed_seat=1)
-    plan = build_arm_construction_plan(
-        spec, caliber, Arm.UNDER_TEST, spec.schedule[0], fixture.bundle[0]
-    )
-    assert plan.summary_scope == (0, 1, 2)
-    assert plan.probed_seat_style == "aggressive"
+def test_construction_plan_rejects_all_seats_scope() -> None:
+    with pytest.raises(IdentityMappingError, match="座位范围"):
+        construction_caliber(SeatScope.ALL_SEATS, identifier=UNDER_TEST_IDENTIFIER)
 
 
 def test_construction_plan_requires_matching_identifier() -> None:
     """规格里的标识与显式构造口径不一致时，构造计划即失败。"""
-    fixture = build_fixture()
     with pytest.raises(SpecIncompleteError):
-        run_spec(num_players=3, probed_seat=1, under_test_identifier="absent@1")
-    mismatched_caliber = construction_caliber(identifier="absent@1")
-    with pytest.raises(IdentityMappingError):
-        build_arm_construction_plan(
-            fixture.spec,
-            mismatched_caliber,
-            Arm.UNDER_TEST,
-            fixture.spec.schedule[0],
-            fixture.bundle[0],
-        )
+        run_spec(under_test_identifier="absent@1")
+    with pytest.raises(IdentityMappingError, match="规范标识"):
+        construction_caliber(identifier="absent@1")
 
 
 def test_run_spec_rejects_non_single_baseline() -> None:
@@ -573,16 +562,24 @@ def test_construction_plan_rejects_conflicting_baseline_caliber() -> None:
 
 
 def test_caliber_content_decides_construction_plan_digest() -> None:
-    """构造口径的内容不同，则由它唯一确定的构造计划摘要必然不同。"""
+    """同一锁定口径得到同一摘要；其它被测座位范围在构造时被拒绝。"""
     fixture = build_fixture()
-    other = construction_caliber(SeatScope.ALL_SEATS)
     algorithm = fixture.spec.protocol.digest_algorithm
-    assert construction_caliber_digest(
-        spec=fixture.spec, caliber=fixture.caliber, bundle=fixture.bundle,
+    first = construction_caliber_digest(
+        spec=fixture.spec,
+        caliber=fixture.caliber,
+        bundle=fixture.bundle,
         algorithm=algorithm,
-    ) != construction_caliber_digest(
-        spec=fixture.spec, caliber=other, bundle=fixture.bundle, algorithm=algorithm
     )
+    second = construction_caliber_digest(
+        spec=fixture.spec,
+        caliber=construction_caliber(),
+        bundle=fixture.bundle,
+        algorithm=algorithm,
+    )
+    assert first == second
+    with pytest.raises(IdentityMappingError):
+        construction_caliber(SeatScope.ALL_SEATS)
 
 
 def test_baseline_execution_caliber_comes_from_strategy_code() -> None:

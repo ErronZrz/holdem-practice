@@ -90,6 +90,7 @@ from .identity import (
     require_baseline_limits,
     require_explicit_seed,
     require_identifier_match,
+    require_locked_under_test_mapping,
     require_material_key,
 )
 from .instantiation import (
@@ -245,6 +246,7 @@ __all__ = [
     "ConstructionCaliber",
     "require_baseline_limits",
     "require_identifier_match",
+    "require_locked_under_test_mapping",
     "require_material_key",
     "material_key_from_integer",
     "require_explicit_seed",

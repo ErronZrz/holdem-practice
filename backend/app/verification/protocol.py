@@ -39,6 +39,10 @@ PROTOCOL_SCHEMA_V2 = "randomization-protocol-v2"
 PROTOCOL_SCHEMA_V3 = "randomization-protocol-v3"
 LOCKED_SOURCE_INTERFACE = "python-os-urandom@1"
 LOCKED_ENVIRONMENT_RECORD = "local-single-process-no-parallel@1"
+LOCKED_COMMITMENT_FORM = "transcript-commitment-v1"
+LOCKED_AUDIT_FORMAT_VERSION = 1
+LOCKED_DIGEST_ALGORITHM = "sha256"
+LOCKED_READ_RECORD_ENCODING = "compact-json-v1"
 # 拒绝规则的规范标识：标识不变则规则内容不得变化。
 REJECTION_RULE_ID = "rejection-whole-multiple-truncation-v1"
 _DOMAIN_SIZE_2_256 = 1 << 256
@@ -327,6 +331,7 @@ class RandomizationProtocolSpec(BaseModel):
                     raise ProtocolSpecError("v2 协议的环境必须是锁定的单进程记录")
             elif protocol_declares_v2_keys(self):
                 raise ProtocolSpecError("v1 schema 不得承载 v2 键形")
+        _require_locked_protocol_values(self)
         return self
 
     def purpose_for_role(self, role: PurposeRole) -> PurposeSpec:
@@ -437,6 +442,66 @@ def purpose_index_mapping_payload() -> dict[str, object]:
 def purpose_index_mapping_digest(*, algorithm: str) -> str:
     """按封闭载荷重算用途与索引映射摘要。"""
     return content_digest(purpose_index_mapping_payload(), algorithm=algorithm)
+
+
+def _purpose_lock_view(purpose: PurposeSpec) -> dict[str, object]:
+    """取出要与锁定表对照的用途字段，不包含某次材料。"""
+    domain = purpose.domain
+    if isinstance(domain, ShrinkingDomain):
+        domain_payload: dict[str, object] = {
+            "kind": "shrinking",
+            "initial_size": domain.initial_size,
+        }
+    else:
+        domain_payload = {"kind": "fixed", "size": domain.size}
+    return {
+        "label": purpose.label,
+        "role": purpose.role.value,
+        "index_fields": list(purpose.index_fields),
+        "integer_fields": list(purpose.integer_fields),
+        "domain": domain_payload,
+        "bit_width": purpose.bit_width,
+    }
+
+
+def _locked_protocol_table(protocol: RandomizationProtocolSpec) -> dict[str, object]:
+    """按协议版本取出已写死的用途表与遍历顺序。"""
+    if protocol.protocol_schema == PROTOCOL_SCHEMA_V3:
+        payload = randomization_protocol_v3_payload()
+    elif protocol.protocol_schema == PROTOCOL_SCHEMA_V2:
+        payload = randomization_protocol_v2_payload()
+    else:
+        mapping = purpose_index_mapping_payload()
+        return {
+            "purposes": mapping["purposes"],
+            "traversal_order": mapping["traversal_order"],
+        }
+    return {
+        "purposes": payload["purposes"],
+        "traversal_order": payload["traversal_order"],
+    }
+
+
+def _require_locked_protocol_values(protocol: RandomizationProtocolSpec) -> None:
+    """来源、环境、用途、遍历顺序与承诺字段必须与锁定表逐项相同。"""
+    if protocol.source_interface_id != LOCKED_SOURCE_INTERFACE:
+        raise ProtocolSpecError("来源接口与锁定值不符")
+    if protocol.environment_record != LOCKED_ENVIRONMENT_RECORD:
+        raise ProtocolSpecError("环境记录与锁定值不符")
+    if protocol.commitment_form != LOCKED_COMMITMENT_FORM:
+        raise ProtocolSpecError("承诺形式与锁定值不符")
+    if protocol.audit_format_version != LOCKED_AUDIT_FORMAT_VERSION:
+        raise ProtocolSpecError("审计版本与锁定值不符")
+    if protocol.digest_algorithm != LOCKED_DIGEST_ALGORITHM:
+        raise ProtocolSpecError("摘要算法与锁定值不符")
+    if protocol.read_record_encoding != LOCKED_READ_RECORD_ENCODING:
+        raise ProtocolSpecError("记录编码与锁定值不符")
+    table = _locked_protocol_table(protocol)
+    if list(protocol.traversal_order) != list(table["traversal_order"]):
+        raise ProtocolSpecError("遍历顺序与锁定值不符")
+    actual = [_purpose_lock_view(purpose) for purpose in protocol.purposes]
+    if actual != list(table["purposes"]):
+        raise ProtocolSpecError("用途规格与锁定值不符")
 
 
 def resolve_read(raw_value: int, *, bit_width: int, domain_size: int) -> int | None:

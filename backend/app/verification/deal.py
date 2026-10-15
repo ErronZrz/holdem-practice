@@ -43,6 +43,8 @@ class DealMappingSpec(BaseModel):
         cards = self.parsed_cards()
         if len(set(cards)) != DECK_SIZE:
             raise DealMaterialError("牌规范序不得出现重复牌面")
+        if self.deck_order != _LOCKED_DECK_ORDER:
+            raise DealMaterialError("牌规范序必须与锁定顺序逐张相同")
         return self
 
     def parsed_cards(self) -> tuple[Card, ...]:
