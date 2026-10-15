@@ -81,6 +81,12 @@ _STRONG_VALUE_BONUS = 160
 _STRONG_PREFLOP_CONTINUATION = 180
 # 强成牌的尺度偏好：小注只留一点，中注与大注占多数，不把整叠当作默认尺度。
 _STRONG_SIZE_PREFERENCES = (1, 6, 6, 0)
+# 同花及以上才允许在无人下注时把整叠放进偏好。两对、三条和顺子仍不默认全下。
+_NUT_BASE = 900
+# 面对下注时，未到同花的强成牌把尺度收回小注，避免一层层把底池打大。
+_PRESSURED_STRONG_PREFERENCES = (6, 2, 0, 0)
+# 无人下注的同花及以上：大尺度和全下占多数，用来兑现已经成牌的价值。
+_NUT_OPEN_PREFERENCES = (1, 2, 4, 6)
 # 满员桌从八人座起收紧。收紧看开局座位数，不看还剩几人，避免人走了以后门槛消失。
 _FULL_RING_SEATS = 8
 # 满员桌翻前，低于中对这一档且价格已经不小，才少跟注。
@@ -149,6 +155,9 @@ class MixedPolicyRules:
     strong_value_sizing: bool = False
     # 满员桌是否收紧中等牌力的深跟注与大尺度。默认取假，人少的底池不受影响。
     full_ring_defense: bool = False
+    # 强成牌的尺度是否按局面收回：翻前沿用风格原表，面对下注时未到同花只留小尺度，
+    # 无人下注的同花及以上才把整叠放回偏好。默认取假，旧身份的尺度逐位不变。
+    guarded_strong_commitment: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -206,6 +215,12 @@ MIXED_LOCAL_V11_RULES = replace(
     MIXED_LOCAL_V10_RULES,
     strong_value_sizing=True,
     full_ring_defense=True,
+)
+# 第十二版口径：强成牌仍兑现，但翻前不放大尺度，面对下注不层层加码，
+# 同花及以上在无人下注时才把整叠打进去。其余字段与第十一版逐字一致。
+MIXED_LOCAL_V12_RULES = replace(
+    MIXED_LOCAL_V11_RULES,
+    guarded_strong_commitment=True,
 )
 
 
@@ -595,7 +610,7 @@ def _size_preferences(
     """按牌力改尺度偏好。未命中时原样返回该风格的固定偏好。"""
     base = parameters.size_preferences
     if _strong_value_hand(features, rules):
-        return _STRONG_SIZE_PREFERENCES
+        return _guarded_strong_preferences(features, parameters, rules)
     thin_full_ring = (
         rules.full_ring_defense
         and features.seat_count >= _FULL_RING_SEATS
@@ -606,6 +621,26 @@ def _size_preferences(
         # 满员桌上的中等成牌不再打大注或全下，小注与中注仍保留。
         return (base[0], base[1], 0, 0)
     return base
+
+
+def _guarded_strong_preferences(
+    features: MixedFeatures, parameters: StyleParameters, rules: MixedPolicyRules
+) -> tuple[int, int, int, int]:
+    """强成牌的尺度。开关关闭时仍是中注和大注，旧身份因此逐位不变。
+
+    翻前放大开池会把还没看到公共牌的强牌打成大底池。面对下注时，未到同花的成牌
+    继续加到中大尺度，会在对方一层层施压时把筹码打进去。只有无人下注、且牌力
+    已经到同花及以上，才把整叠放回偏好。
+    """
+    if not rules.guarded_strong_commitment:
+        return _STRONG_SIZE_PREFERENCES
+    if features.street is Street.PREFLOP:
+        return parameters.size_preferences
+    if features.actual_call > 0 and features.base < _NUT_BASE:
+        return _PRESSURED_STRONG_PREFERENCES
+    if features.actual_call <= 0 and features.base >= _NUT_BASE:
+        return _NUT_OPEN_PREFERENCES
+    return _STRONG_SIZE_PREFERENCES
 
 
 def _large_commit_penalty(features: MixedFeatures, rules: MixedPolicyRules) -> int:
@@ -735,7 +770,14 @@ def _active_candidates(
                 and features.base < _CHECKED_VALUE_FLOOR
             ):
                 short_ok = False
-            if not (score >= _DANGEROUS_SCORE_STRONG or short_ok):
+            # 无人下注的同花及以上允许打出整叠，不因位置或人数扣分被挡在门槛下。
+            nut_open = (
+                rules.guarded_strong_commitment
+                and features.street is not Street.PREFLOP
+                and features.actual_call <= 0
+                and features.base >= _NUT_BASE
+            )
+            if not (score >= _DANGEROUS_SCORE_STRONG or short_ok or nut_open):
                 continue
         # 危险候选一律禁用非价值质量，避免把压迫性尺度用在无价值依据的场合。
         quality = value_quality + (0 if dangerous else bluff_quality)

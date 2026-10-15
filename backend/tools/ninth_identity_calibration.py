@@ -1,13 +1,14 @@
 """本地混合身份的开发标定入口。
 
 只在命令行显式带上运行开关时才查询分布或推进对局。默认导入不做任何实测。
-默认被测身份仍是第九版；传入第十版或第十一版时沿用同一节点集与同一配对排期。
+默认被测身份仍是第九版；传入第十版、第十一版或第十二版时沿用同一节点集与同一配对排期。
 读数供开发对照，不代替独立验证，也不改默认策略。
 
 用法（在 backend 目录下）：
     uv run python tools/ninth_identity_calibration.py --run
     uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@10
     uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@11
+    uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@12
 """
 
 from __future__ import annotations
@@ -34,6 +35,7 @@ from app.strategy.mixed_strategy import (  # noqa: E402
     MIXED_STRATEGY_IDENTIFIER_V9,
     MIXED_STRATEGY_IDENTIFIER_V10,
     MIXED_STRATEGY_IDENTIFIER_V11,
+    MIXED_STRATEGY_IDENTIFIER_V12,
     rules_for_identifier,
 )
 from app.strategy.registry import (  # noqa: E402
@@ -75,6 +77,7 @@ def _previous_identifier(identifier: str) -> str:
         MIXED_STRATEGY_IDENTIFIER_V9,
         MIXED_STRATEGY_IDENTIFIER_V10,
         MIXED_STRATEGY_IDENTIFIER_V11,
+        MIXED_STRATEGY_IDENTIFIER_V12,
     )
     if identifier not in order[1:]:
         raise ValueError(f"标定身份必须是已登记分布观测的新身份，收到 {identifier}")

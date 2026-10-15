@@ -9,3 +9,4 @@ def test_calibration_refuses_to_run_without_an_explicit_switch() -> None:
     assert main([]) == 2
     assert main(["--identity", "mixed-local@10"]) == 2
     assert main(["--identity", "mixed-local@11"]) == 2
+    assert main(["--identity", "mixed-local@12"]) == 2

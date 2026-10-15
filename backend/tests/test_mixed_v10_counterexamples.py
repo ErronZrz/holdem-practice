@@ -153,10 +153,9 @@ def test_tenth_version_only_adds_the_defense_switch() -> None:
 
 def test_tenth_identity_is_registered_without_changing_the_default() -> None:
     """第十版可构造，且创建对局的默认身份仍是启发式基线。"""
-    assert MIXED_STRATEGY_IDENTIFIERS[-3:-1] == (
-        MIXED_STRATEGY_IDENTIFIER_V9,
-        MIXED_STRATEGY_IDENTIFIER_V10,
-    )
+    ordered = MIXED_STRATEGY_IDENTIFIERS
+    tenth_at = ordered.index(MIXED_STRATEGY_IDENTIFIER_V10)
+    assert ordered[tenth_at - 1] == MIXED_STRATEGY_IDENTIFIER_V9
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V10).version == 10
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V10, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V10
@@ -336,9 +335,9 @@ def test_multiway_short_stack_does_not_jam_below_top_pair() -> None:
 
 
 def test_under_test_whitelist_accepts_the_tenth_identity() -> None:
-    """被测白名单同时接受第九版与第十版，其它标识仍然失败。"""
+    """被测白名单同时接受第九版到第十二版，其它标识仍然失败。"""
     assert UNDER_TEST_IDENTIFIER == "mixed-local@9"
-    assert frozenset({"mixed-local@9", "mixed-local@10", "mixed-local@11"}) == (
+    assert frozenset({"mixed-local@9", "mixed-local@10", "mixed-local@11", "mixed-local@12"}) == (
         UNDER_TEST_IDENTIFIERS
     )
     accepted = require_locked_under_test_mapping(
