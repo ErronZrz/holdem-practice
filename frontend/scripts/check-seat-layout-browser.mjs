@@ -1,4 +1,5 @@
-// 2–9 人 × 验收视口的浏览器实测：读取真实渲染的座位包围盒，断言两两不相交且都在牌桌内。
+// 2–9 人 × 验收视口的浏览器实测：读取真实渲染的座位与中央公共牌区包围盒，
+// 断言座位两两不相交、都躲开中央区，且都在牌桌内。
 //
 // 前置：后端与前端开发服务器已在运行，且后端使用一次性数据库（不要写真实库）：
 //   cd backend && HOLDEM_DB_PATH=<临时库> uv run uvicorn app.main:app --port 8000
@@ -13,7 +14,11 @@
 import { execFileSync } from 'node:child_process'
 
 import {
+  BOARD_CENTER_HEIGHT,
+  BOARD_CENTER_WIDTH,
   computeSeatLayout,
+  MIN_SEAT_GAP,
+  minimumBoardGap,
   minimumSeatGap,
   overlappingSeatPairs,
   SUPPORTED_PLAYER_COUNTS,
@@ -83,8 +88,25 @@ const MEASURE_SCRIPT = `(async () => {
       height: rect.height,
     };
   });
+  const boardEl = document.querySelector('.board-center');
+  const boardRect = boardEl ? boardEl.getBoundingClientRect() : null;
+  const emptyShowdownPainted = Array.from(document.querySelectorAll('.seat .showdown'))
+    .filter((el) => {
+      if (el.childElementCount > 0) return false;
+      const bg = getComputedStyle(el).backgroundColor;
+      return bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent';
+    }).length;
   return JSON.stringify({
     seats,
+    board: boardRect && {
+      left: boardRect.left,
+      top: boardRect.top,
+      right: boardRect.right,
+      bottom: boardRect.bottom,
+      width: boardRect.width,
+      height: boardRect.height,
+    },
+    emptyShowdownPainted,
     felt: {
       left: feltRect.left,
       top: feltRect.top,
@@ -159,6 +181,30 @@ async function main() {
         problems.push(`实测盒高 ${maxHeight.toFixed(1)} > 模型 ${layout.box.height.toFixed(1)}`)
       }
       const gap = minimumSeatGap(measurement.seats)
+      if (!measurement.board) {
+        problems.push('缺少中央公共牌区')
+      } else {
+        if (Math.abs(measurement.board.width - BOARD_CENTER_WIDTH) > TOLERANCE) {
+          problems.push(
+            `中央区宽 ${measurement.board.width.toFixed(1)} ≠ 模型 ${BOARD_CENTER_WIDTH}`,
+          )
+        }
+        if (Math.abs(measurement.board.height - BOARD_CENTER_HEIGHT) > TOLERANCE) {
+          problems.push(
+            `中央区高 ${measurement.board.height.toFixed(1)} ≠ 模型 ${BOARD_CENTER_HEIGHT}`,
+          )
+        }
+        if (!insideFelt(measurement.board, measurement.felt)) {
+          problems.push('中央区越出牌桌')
+        }
+        const boardGap = minimumBoardGap(measurement.seats, measurement.board)
+        if (boardGap < MIN_SEAT_GAP - TOLERANCE) {
+          problems.push(`座位与中央区间距 ${boardGap.toFixed(1)} < ${MIN_SEAT_GAP}`)
+        }
+      }
+      if (measurement.emptyShowdownPainted) {
+        problems.push(`空摊牌行仍有底色 ${measurement.emptyShowdownPainted} 处`)
+      }
 
       if (problems.length) {
         failures.push(`${playerCount} 人 / ${viewport.name}(${viewport.width})：${problems.join('；')}`)
@@ -202,6 +248,6 @@ if (failures.length) {
 } else {
   console.log(
     `\n浏览器实测通过：${rows.length} 个（人数 × 视口）组合全部座位数正确、两两不相交、`
-    + `都在牌桌内且实测盒高不超过模型盒高。`,
+    + `与中央公共牌区留有间距、都在牌桌内，且空摊牌行没有底色。`,
   )
 }

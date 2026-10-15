@@ -1,14 +1,16 @@
 // 座位布局的纯几何：只做数学、不碰 DOM，便于组件、回归检查与浏览器验收脚本共用同一套口径。
 // 关键约定：座位盒宽高固定且内容行高确定，因此「模型盒」与「渲染盒」一一对应，可直接用包围盒判定重叠。
+// 牌桌正中央的公共牌与底池也占一块固定区域，座位必须躲开它，不能只躲开彼此。
 
 export const MIN_PLAYERS = 2
 export const MAX_PLAYERS = 9
 export const SUPPORTED_PLAYER_COUNTS = [2, 3, 4, 5, 6, 7, 8, 9]
 
 // 座位整体缩放档：由大到小依次尝试，取第一个可行档，尽量保住可读性。
-export const SEAT_SCALES = [1, 0.9, 0.8, 0.72, 0.65, 0.58]
-// 超过该人数时，五张摊牌明细改为紧凑行（明细移到控制面板，信息不丢失）。
-export const INLINE_SHOWDOWN_MAX_PLAYERS = 6
+// 末几档只在窄屏上使用：中央公共牌区宽度固定，座位必须再缩小才能从两侧躲开它。
+export const SEAT_SCALES = [1, 0.9, 0.8, 0.72, 0.65, 0.58, 0.52, 0.46, 0.4]
+// 人数不超过该值时，优先在座位上展示五张摊牌；几何放不下才改成紧凑行，明细改到控制面板。
+export const INLINE_SHOWDOWN_MAX_PLAYERS = MAX_PLAYERS
 
 // 牌桌高度由确定性搜索决定：步长与上下界固定，保证同一输入得到同一结果。
 export const FELT_MIN_HEIGHT = 420
@@ -31,6 +33,18 @@ export const SEAT_ROW_HEIGHTS = {
 export const SEAT_ROW_GAP = 4
 // 未缩放的基础盒宽度：内联摊牌时最宽的一行是五张 small 牌。
 export const SEAT_BASE_WIDTH = { inline: 132, compact: 110 }
+
+// 中央公共牌区：五张牌面横排，下面一行底池文字。翻牌前也按这个满尺寸占位，
+// 这样发到河牌时座位不会突然压上去。数字与牌面组件的牌面尺寸一致。
+export const BOARD_CARD_WIDTH = 38
+export const BOARD_CARD_HEIGHT = 54
+export const BOARD_CARD_GAP = 6
+export const BOARD_CARD_COUNT = 5
+export const BOARD_CENTER_GAP = 8
+export const BOARD_POT_HEIGHT = 22
+export const BOARD_CENTER_WIDTH =
+  BOARD_CARD_WIDTH * BOARD_CARD_COUNT + BOARD_CARD_GAP * (BOARD_CARD_COUNT - 1)
+export const BOARD_CENTER_HEIGHT = BOARD_CARD_HEIGHT + BOARD_CENTER_GAP + BOARD_POT_HEIGHT
 
 const SEAT_ROW_COUNT = 6
 
@@ -119,6 +133,30 @@ export function minimumSeatGap(rects) {
   return rects.length < 2 ? Number.POSITIVE_INFINITY : smallest
 }
 
+// 公共牌区在牌桌内容盒里居中。宽高不随人数或街道变化。
+export function boardCenterRect(width, height) {
+  const left = (width - BOARD_CENTER_WIDTH) / 2
+  const top = (height - BOARD_CENTER_HEIGHT) / 2
+  return {
+    left,
+    top,
+    right: left + BOARD_CENTER_WIDTH,
+    bottom: top + BOARD_CENTER_HEIGHT,
+    width: BOARD_CENTER_WIDTH,
+    height: BOARD_CENTER_HEIGHT,
+  }
+}
+
+// 座位盒到中央公共牌区的最小间距。相交或相切时为 0。
+export function minimumBoardGap(rects, board) {
+  if (!rects.length || !board) return Number.POSITIVE_INFINITY
+  let smallest = Number.POSITIVE_INFINITY
+  for (const rect of rects) {
+    smallest = Math.min(smallest, rectGap(rect, board))
+  }
+  return smallest
+}
+
 export function seatsOutside(rects, width, height) {
   const tolerance = 0.5
   return rects
@@ -133,11 +171,14 @@ export function seatsOutside(rects, width, height) {
 }
 
 // 给定缩放档与摊牌形态，搜索最小的、留有安全间距且不越界的牌桌高度；无解返回 null。
+// 安全间距同时约束座位彼此、以及每个座位与中央公共牌区。
 export function minimumFeltHeight(playerCount, width, scale, inlineShowdown) {
   const box = seatScaledBox(playerCount, scale, inlineShowdown)
   for (let height = FELT_MIN_HEIGHT; height <= FELT_MAX_HEIGHT; height += FELT_HEIGHT_STEP) {
     const rects = seatRects(seatCenters(playerCount, width, height, box), box)
+    const board = boardCenterRect(width, height)
     const clear = minimumSeatGap(rects) >= MIN_SEAT_GAP
+      && minimumBoardGap(rects, board) >= MIN_SEAT_GAP
       && !seatsOutside(rects, width, height).length
     if (clear) return height
   }
@@ -148,6 +189,7 @@ function assemble(playerCount, width, scale, inlineShowdown, feltHeight, fits) {
   const box = seatScaledBox(playerCount, scale, inlineShowdown)
   const centers = seatCenters(playerCount, width, feltHeight, box)
   const rects = seatRects(centers, box)
+  const boardCenter = boardCenterRect(width, feltHeight)
   return {
     playerCount,
     containerWidth: width,
@@ -168,11 +210,13 @@ function assemble(playerCount, width, scale, inlineShowdown, feltHeight, fits) {
     overlappingPairs: overlappingSeatPairs(rects),
     outsideSeats: seatsOutside(rects, width, feltHeight),
     minimumGap: minimumSeatGap(rects),
+    boardCenter,
+    boardGap: minimumBoardGap(rects, boardCenter),
   }
 }
 
-// 计算整套布局：先按缩放档由大到小、再按内联/紧凑摊牌依次尝试，取第一个可行解。
-// 全部不可行时返回 fits=false 的尽力布局（可读性下降但牌桌仍可用），由调用方显式提示。
+// 计算整套布局：先在全部缩放档里找能放下五张摊牌的方案，再退到紧凑行。
+// 这样人数变多时仍尽量把摊牌牌面留在座位上。全部不可行时返回 fits=false 的尽力布局。
 export function computeSeatLayout(playerCount, containerWidth) {
   const width = Math.max(0, Math.round(containerWidth))
   const unsupported = !SUPPORTED_PLAYER_COUNTS.includes(playerCount) || width <= 0
@@ -190,11 +234,13 @@ export function computeSeatLayout(playerCount, containerWidth) {
       overlappingPairs: [],
       outsideSeats: [],
       minimumGap: 0,
+      boardCenter: boardCenterRect(width, FELT_MIN_HEIGHT),
+      boardGap: 0,
     }
   }
-  for (const scale of SEAT_SCALES) {
-    for (const inlineShowdown of [true, false]) {
-      if (inlineShowdown && !usesInlineShowdown(playerCount)) continue
+  for (const inlineShowdown of [true, false]) {
+    if (inlineShowdown && !usesInlineShowdown(playerCount)) continue
+    for (const scale of SEAT_SCALES) {
       const feltHeight = minimumFeltHeight(playerCount, width, scale, inlineShowdown)
       if (feltHeight === null) continue
       return assemble(playerCount, width, scale, inlineShowdown, feltHeight, true)

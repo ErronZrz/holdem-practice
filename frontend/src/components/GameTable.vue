@@ -15,6 +15,12 @@ import { actionText, distributionText, HAND_CATEGORY_CN, STREET_CN } from '../ca
 import { copyText } from '../clipboard.js'
 import { referenceLimitationText, referenceScopeText, referenceText } from '../reviewText.js'
 import {
+  BOARD_CARD_GAP,
+  BOARD_CARD_HEIGHT,
+  BOARD_CENTER_GAP,
+  BOARD_CENTER_HEIGHT,
+  BOARD_CENTER_WIDTH,
+  BOARD_POT_HEIGHT,
   computeSeatLayout,
   MAX_PLAYERS,
   MIN_PLAYERS,
@@ -157,6 +163,12 @@ const feltStyle = computed(() => ({
   '--seat-row-showdown': seatLayout.value.inlineShowdown
     ? `${SEAT_ROW_HEIGHTS.showdownInline}px`
     : `${SEAT_ROW_HEIGHTS.showdownCompact}px`,
+  '--board-center-width': `${BOARD_CENTER_WIDTH}px`,
+  '--board-center-height': `${BOARD_CENTER_HEIGHT}px`,
+  '--board-center-gap': `${BOARD_CENTER_GAP}px`,
+  '--board-card-height': `${BOARD_CARD_HEIGHT}px`,
+  '--board-card-gap': `${BOARD_CARD_GAP}px`,
+  '--board-pot-height': `${BOARD_POT_HEIGHT}px`,
 }))
 
 // 摊牌明细在多人桌折叠为一行，五张明细改在控制面板列出，信息不丢失。
@@ -729,27 +741,32 @@ onUnmounted(() => {
           :key="p.seat"
           class="seat"
           :data-seat="p.seat"
-          :class="{ 'is-active': game.current_seat === p.seat && !game.hand_over }"
+          :class="{ 'is-folded': !game.hand_over && p.folded }"
           :style="seatStyle(p.seat)"
         >
-          <div class="markers">
-            <span v-if="markerLabel(p)" class="marker">{{ markerLabel(p) }}</span>
+          <div
+            class="seat-face"
+            :class="{ 'is-active': !game.hand_over && !p.folded && game.current_seat === p.seat }"
+          >
+            <div class="markers">
+              <span v-if="markerLabel(p)" class="marker">{{ markerLabel(p) }}</span>
+            </div>
+            <div class="cards">
+              <PlayingCard v-for="(c, i) in p.hole_cards" :key="i" :code="c" />
+              <template v-if="!p.cards_revealed">
+                <PlayingCard hidden /><PlayingCard hidden />
+              </template>
+            </div>
+            <div class="name">{{ p.name }}{{ p.is_human ? '（你）' : '' }}</div>
+            <div class="stack">筹码 {{ p.stack }}</div>
+            <!-- 状态与下注标记共用一行：座位盒高度不随座位状态变化，几何判定才有意义。 -->
+            <div class="status-row">
+              <span v-if="p.folded" class="status">已弃牌</span>
+              <span v-else-if="p.all_in" class="status">全下</span>
+              <span v-if="p.street_bet" class="bet-chip">+{{ p.street_bet }}</span>
+            </div>
           </div>
-          <div class="cards">
-            <PlayingCard v-for="(c, i) in p.hole_cards" :key="i" :code="c" />
-            <template v-if="!p.cards_revealed">
-              <PlayingCard hidden /><PlayingCard hidden />
-            </template>
-          </div>
-          <div class="name">{{ p.name }}{{ p.is_human ? '（你）' : '' }}</div>
-          <div class="stack">筹码 {{ p.stack }}</div>
-          <!-- 状态与下注标记共用一行：座位盒高度不随座位状态变化，几何判定才有意义。 -->
-          <div class="status-row">
-            <span v-if="p.folded" class="status">已弃牌</span>
-            <span v-else-if="p.all_in" class="status">全下</span>
-            <span v-if="p.street_bet" class="bet-chip">+{{ p.street_bet }}</span>
-          </div>
-          <div class="showdown">
+          <div class="showdown" :class="{ 'has-hand': showdownHand(p.seat) }">
             <template v-if="showdownHand(p.seat)">
               <span class="cat">{{ HAND_CATEGORY_CN[showdownHand(p.seat).category] }}</span>
               <div v-if="seatLayout.inlineShowdown" class="cards-small">
@@ -1023,14 +1040,19 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
+  width: var(--board-center-width, 214px);
+  height: var(--board-center-height, 84px);
+  gap: var(--board-center-gap, 8px);
 }
 
 .board {
   display: flex;
-  gap: 6px;
-  min-height: 54px;
+  flex: 0 0 auto;
+  justify-content: center;
   align-items: center;
+  gap: var(--board-card-gap, 6px);
+  width: 100%;
+  height: var(--board-card-height, 54px);
 }
 
 .board-empty {
@@ -1039,6 +1061,9 @@ onUnmounted(() => {
 }
 
 .pot {
+  flex: 0 0 auto;
+  height: var(--board-pot-height, 22px);
+  line-height: var(--board-pot-height, 22px);
   font-size: 15px;
   font-weight: 600;
 }
@@ -1056,7 +1081,27 @@ onUnmounted(() => {
   transform-origin: center;
 }
 
-.seat.is-active .name {
+/* 本手进行中：已弃牌的座位整体变淡。行动亮边与座位同宽，包住标记、手牌、名字、筹码和状态行，不把下面的摊牌占位算进去。手结束后都去掉。 */
+.seat.is-folded {
+  opacity: 0.5;
+}
+
+.seat-face {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--seat-row-gap, 4px);
+  width: 100%;
+}
+
+.seat-face.is-active {
+  border-radius: 12px;
+  box-shadow:
+    0 0 0 2px #fde68a,
+    0 0 14px 2px rgba(253, 230, 138, 0.55);
+}
+
+.seat-face.is-active .name {
   color: #fde68a;
 }
 
@@ -1101,6 +1146,7 @@ onUnmounted(() => {
   padding: 2px 8px;
 }
 
+/* 行高始终保留，座位盒才不随摊牌状态变高；底色和内边距只在真正有牌型时出现，避免空行变成深色竖条。 */
 .showdown {
   display: flex;
   flex-direction: column;
@@ -1108,6 +1154,9 @@ onUnmounted(() => {
   gap: 2px;
   height: var(--seat-row-showdown, 62px);
   font-size: 12px;
+}
+
+.showdown.has-hand {
   background: rgba(0, 0, 0, 0.2);
   border-radius: 8px;
   padding: 4px 8px;
