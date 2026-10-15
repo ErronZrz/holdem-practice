@@ -209,7 +209,8 @@ def test_closed_categories_contain_forty_five_entries() -> None:
     assert "pending:per-hand-arm_b-material-vs-per-kappa-arm_b" not in KNOWN_PLAIN_TEXTS
     assert "mixed-local@9" in KNOWN_PLAIN_TEXTS
     assert "mixed-local@10" in KNOWN_PLAIN_TEXTS
-    assert len(KNOWN_PLAIN_TEXTS) == 11
+    assert "mixed-local@11" in KNOWN_PLAIN_TEXTS
+    assert len(KNOWN_PLAIN_TEXTS) == 12
 
 
 def test_bluff_freq_encoding_rejects_other_numeric_forms() -> None:

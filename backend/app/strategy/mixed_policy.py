@@ -73,6 +73,20 @@ _LARGE_COMMIT_PENALTY = 420
 _MULTIWAY_CONTENDERS = 2
 # 价值下限收得更晚：四人及以上才取消中等成牌的主动托底。
 _MULTIWAY_VALUE_CONTENDERS = 3
+# 翻前强牌下沿：口袋十及以上。低于这条线的翻前跟注不因强牌路径放宽。
+_STRONG_PREFLOP_BASE = 780
+# 强成牌的主动附加量：与成牌托底跨度同阶，用来把价值下注抬到免费过牌之上。
+_STRONG_VALUE_BONUS = 160
+# 翻前强牌的继续偏移：大约抵消一次弃牌缓冲，避免强牌在有价格时直接弃掉。
+_STRONG_PREFLOP_CONTINUATION = 180
+# 强成牌的尺度偏好：小注只留一点，中注与大注占多数，不把整叠当作默认尺度。
+_STRONG_SIZE_PREFERENCES = (1, 6, 6, 0)
+# 满员桌从八人座起收紧。收紧看开局座位数，不看还剩几人，避免人走了以后门槛消失。
+_FULL_RING_SEATS = 8
+# 满员桌翻前，低于中对这一档且价格已经不小，才少跟注。
+_FULL_RING_WEAK_BASE = 500
+_FULL_RING_PREFLOP_PRICE = 300
+# 满员桌翻后收紧的是中对到两对高档之下，不收紧听牌，也不收紧两对高档及以上。
 
 
 class MixedPolicyError(ValueError):
@@ -131,6 +145,10 @@ class MixedPolicyRules:
     checked_value_realization: bool = False
     # 大额承诺与多人底池是否收紧跟注、压迫尺度和薄价值托底。默认取假，旧身份分布不变。
     large_pot_defense: bool = False
+    # 强成牌是否加大主动质量，并把尺度从微注挪到中注与大注。默认取假。
+    strong_value_sizing: bool = False
+    # 满员桌是否收紧中等牌力的深跟注与大尺度。默认取假，人少的底池不受影响。
+    full_ring_defense: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -183,6 +201,12 @@ MIXED_LOCAL_V9_RULES = replace(
 )
 # 第十版口径：只在第九版上打开大额承诺与多人底池的收紧。其余字段逐字一致。
 MIXED_LOCAL_V10_RULES = replace(MIXED_LOCAL_V9_RULES, large_pot_defense=True)
+# 第十一版口径：强成牌加大兑现，满员桌收紧中等牌力。其余字段与第十版逐字一致。
+MIXED_LOCAL_V11_RULES = replace(
+    MIXED_LOCAL_V10_RULES,
+    strong_value_sizing=True,
+    full_ring_defense=True,
+)
 
 
 class MixedStyle(StrEnum):
@@ -344,18 +368,24 @@ def build_distribution(
     )
     # 大额承诺只压低跟注，避免中等牌力在多人底池里把筹码跟光。
     commit_penalty = _large_commit_penalty(features, rules)
-    passive_score -= commit_penalty
+    # 满员桌的深跟注另算，人少或强成牌不走这条扣分。
+    ring_penalty = _full_ring_call_penalty(features, rules)
+    passive_score += _strong_preflop_continuation(features, rules)
+    passive_score -= commit_penalty + ring_penalty
     fold_weight = max(0, call_threshold - passive_score + 160) * parameters.fold_percent
     call_weight = max(0, passive_score - call_threshold + 160) * parameters.call_percent
     gate = _active_gate(features, style, rules)
     threshold_quality = max(0, score - value_threshold + _VALUE_GATE_TOLERANCE + gate)
     # 托底只抬高没越过原门槛的成牌；已经更高的主动质量保持原值。
     value_quality = max(threshold_quality, _checked_value_floor(features, rules))
+    if _strong_value_hand(features, rules):
+        # 强成牌再加一截主动质量，避免只过牌或只打微注。
+        value_quality += _STRONG_VALUE_BONUS
     # 分化只调整已有依据的幅度，不给没有公开依据的场合凭空加依据。
     bluff_raw = _non_value_quality(features, rules)
     bluff_quality = max(0, bluff_raw + gate) if bluff_raw > 0 else 0
-    if commit_penalty:
-        # 同一大额承诺上不再加注：加注会把本该弃掉的中等牌力打成更大的底池。
+    if commit_penalty or ring_penalty:
+        # 同一笔不该跟的承诺上不再加注，避免把中等牌力打成更大的底池。
         value_quality = 0
         bluff_quality = 0
     aggression_scale = Fraction(
@@ -371,7 +401,7 @@ def build_distribution(
         score,
         value_quality,
         bluff_quality,
-        parameters.size_preferences,
+        _size_preferences(features, parameters, rules),
         rules,
     )
     total_active_preference = sum(preference for _, preference in active)
@@ -519,6 +549,65 @@ def _checked_value_floor(features: MixedFeatures, rules: MixedPolicyRules) -> in
     return min(features.base - _CHECKED_VALUE_FLOOR, _CHECKED_VALUE_SPAN)
 
 
+def _strong_value_hand(features: MixedFeatures, rules: MixedPolicyRules) -> bool:
+    """强成牌或翻前强牌。开关关闭时恒为假，旧身份的尺度与跟注因此不变。"""
+    if not rules.strong_value_sizing:
+        return False
+    if features.street is Street.PREFLOP:
+        return features.base >= _STRONG_PREFLOP_BASE
+    return features.base >= _THIN_VALUE_BASE
+
+
+def _strong_preflop_continuation(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """翻前强牌的继续偏移。翻后与非强牌返回 0，不改动原有跟注分。"""
+    if features.street is not Street.PREFLOP or not _strong_value_hand(features, rules):
+        return 0
+    return _STRONG_PREFLOP_CONTINUATION
+
+
+def _full_ring_call_penalty(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """满员桌上中等牌力面对深跟注时的被动扣分。
+
+    人少的桌子、听牌和两对高档及以上都不扣。翻前只扣低于中对档且价格已经不小的跟注，
+    避免把还能看到翻牌的强牌一并弃掉。
+    """
+    if not rules.full_ring_defense or features.seat_count < _FULL_RING_SEATS:
+        return 0
+    committing = features.actual_call * 2 >= features.stack
+    if features.street is Street.PREFLOP:
+        if features.base >= _FULL_RING_WEAK_BASE or features.actual_call <= 0:
+            return 0
+        if features.price < _FULL_RING_PREFLOP_PRICE and not committing:
+            return 0
+        return _LARGE_COMMIT_PENALTY
+    if features.actual_call <= 0:
+        return 0
+    if features.base < _FULL_RING_WEAK_BASE or features.base >= _THIN_VALUE_BASE:
+        return 0
+    if not (committing or features.price >= _LARGE_PRICE):
+        return 0
+    return _LARGE_COMMIT_PENALTY
+
+
+def _size_preferences(
+    features: MixedFeatures, parameters: StyleParameters, rules: MixedPolicyRules
+) -> tuple[int, int, int, int]:
+    """按牌力改尺度偏好。未命中时原样返回该风格的固定偏好。"""
+    base = parameters.size_preferences
+    if _strong_value_hand(features, rules):
+        return _STRONG_SIZE_PREFERENCES
+    thin_full_ring = (
+        rules.full_ring_defense
+        and features.seat_count >= _FULL_RING_SEATS
+        and features.street is not Street.PREFLOP
+        and _FULL_RING_WEAK_BASE <= features.base < _THIN_VALUE_BASE
+    )
+    if thin_full_ring:
+        # 满员桌上的中等成牌不再打大注或全下，小注与中注仍保留。
+        return (base[0], base[1], 0, 0)
+    return base
+
+
 def _large_commit_penalty(features: MixedFeatures, rules: MixedPolicyRules) -> int:
     """大额承诺上的被动扣分。开关关闭、翻前、或牌力已到成牌下沿时为 0。
 
@@ -622,9 +711,12 @@ def _active_candidates(
 
     merged: dict[int, int] = {}
     for target, preference in zip((small, medium, large), size_preferences[:3], strict=True):
+        # 偏好为 0 的尺度不进入候选，避免造出永远抽不中的空额度。
+        if preference <= 0:
+            continue
         amount = clip(target, legal_min, upper)
         merged[amount] = merged.get(amount, 0) + preference
-    if all_in_total <= upper:
+    if all_in_total <= upper and size_preferences[3] > 0:
         merged[all_in_total] = merged.get(all_in_total, 0) + size_preferences[3]
 
     pot_reference = max(features.pot, features.big_blind)

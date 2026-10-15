@@ -35,6 +35,7 @@ KNOWN_PLAIN_TEXTS: frozenset[str] = frozenset(
         "heuristic@1",
         "mixed-local@9",
         "mixed-local@10",
+        "mixed-local@11",
         "app.strategy.registry.create_strategy",
         "app.strategy.heuristic.HeuristicStrategy.__init__",
         "python-os-urandom@1",

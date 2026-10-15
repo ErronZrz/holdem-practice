@@ -1,12 +1,13 @@
 """本地混合身份的开发标定入口。
 
 只在命令行显式带上运行开关时才查询分布或推进对局。默认导入不做任何实测。
-默认被测身份仍是第九版；传入第十版时沿用同一节点集与同一配对排期。
+默认被测身份仍是第九版；传入第十版或第十一版时沿用同一节点集与同一配对排期。
 读数供开发对照，不代替独立验证，也不改默认策略。
 
 用法（在 backend 目录下）：
     uv run python tools/ninth_identity_calibration.py --run
     uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@10
+    uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@11
 """
 
 from __future__ import annotations
@@ -32,6 +33,7 @@ from app.strategy.mixed_strategy import (  # noqa: E402
     MIXED_STRATEGY_IDENTIFIER_V8,
     MIXED_STRATEGY_IDENTIFIER_V9,
     MIXED_STRATEGY_IDENTIFIER_V10,
+    MIXED_STRATEGY_IDENTIFIER_V11,
     rules_for_identifier,
 )
 from app.strategy.registry import (  # noqa: E402
@@ -67,11 +69,12 @@ def _candidate_rows(observation: object) -> tuple[tuple[str, int, int], ...]:
 
 
 def _previous_identifier(identifier: str) -> str:
-    """标定对照的上一身份。只接受已经登记分布观测的相邻两版。"""
+    """标定对照的上一身份。只接受已经登记分布观测、且前面还有一版的身份。"""
     order = (
         MIXED_STRATEGY_IDENTIFIER_V8,
         MIXED_STRATEGY_IDENTIFIER_V9,
         MIXED_STRATEGY_IDENTIFIER_V10,
+        MIXED_STRATEGY_IDENTIFIER_V11,
     )
     if identifier not in order[1:]:
         raise ValueError(f"标定身份必须是已登记分布观测的新身份，收到 {identifier}")
@@ -325,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--identity",
         default=MIXED_STRATEGY_IDENTIFIER_V9,
-        help="被测身份，默认第九版；第十版沿用同一排期",
+        help="被测身份，默认第九版；更后的已登记身份沿用同一排期",
     )
     args = parser.parse_args(argv)
     if not args.run:

@@ -28,7 +28,9 @@ BASELINE_IDENTIFIER = "heuristic@1"
 # 被测身份在配置载荷中的规范标识。这里只锁定字符串，不创建该身份。
 UNDER_TEST_IDENTIFIER = "mixed-local@9"
 # 允许写入配置载荷的被测标识。第一项保持原锁定值，因此旧载荷不变。
-UNDER_TEST_IDENTIFIERS = frozenset({UNDER_TEST_IDENTIFIER, "mixed-local@10"})
+UNDER_TEST_IDENTIFIERS = frozenset(
+    {UNDER_TEST_IDENTIFIER, "mixed-local@10", "mixed-local@11"}
+)
 _CAMPAIGN_ROOT = "74-domain-c"
 _LOCKED_VERSIONS: tuple[tuple[str, int], ...] = (
     ("deal_mapping", 1),

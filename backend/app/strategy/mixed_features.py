@@ -83,6 +83,8 @@ class MixedFeatures:
     hole_ranks: tuple[int, int]
     # 河牌时自身最佳牌型等同于公共五张，且该牌型已不可能被任何两张底牌超越。
     shared_board_locked: bool = False
+    # 开局座位总数。旧的手工构造不填时为 0，因此不会被当成满员桌。
+    seat_count: int = 0
 
     @property
     def spr_denominator(self) -> int:
@@ -178,6 +180,7 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         # 翻前尚无自愿加注时，开池尺寸按人头的名义目标给出。
         preflop_unraised=(street is Street.PREFLOP and context.streets[0].last_aggressor is None),
         hole_ranks=(ranks[0], ranks[1]),
+        seat_count=len(players),
         shared_board_locked=shared_locked,
     )
 
