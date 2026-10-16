@@ -191,6 +191,7 @@ def mixed_state(state: GameState, context: MixedContext) -> MixedGameState:
         button=state.button,
         hand_over=state.hand_over,
         players=state.players,
+        big_blind=state.big_blind,
         context=context,
     )
 

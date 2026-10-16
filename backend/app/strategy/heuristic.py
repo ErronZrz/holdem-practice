@@ -121,6 +121,28 @@ def _num_pot_contenders(state: GameState) -> int:
     )
 
 
+def _fit_chip_unit(target: int, low: int, high: int, big_blind: int) -> int:
+    """把目标金额对齐到小盲后再夹进合法区间。
+
+    快照没有大盲，或区间里放不下一个对齐金额时，保留夹紧后的原值，避免打出非法动作。
+    """
+    unit = big_blind // 2 if big_blind >= 2 else 1
+    if unit <= 1:
+        return min(high, max(low, target))
+    quotient, remainder = divmod(target, unit)
+    aligned = (quotient + (1 if remainder * 2 >= unit else 0)) * unit
+    fitted = min(high, max(low, aligned))
+    if fitted % unit == 0:
+        return fitted
+    lower = (fitted // unit) * unit
+    if lower >= low:
+        return lower
+    upper = ((low + unit - 1) // unit) * unit
+    if upper <= high:
+        return upper
+    return fitted
+
+
 class HeuristicStrategy:
     """基于胜率的启发式 Bot：翻牌前按 Chen 分档，翻牌后按胜率 + 赔率决策。"""
 
@@ -264,11 +286,11 @@ class HeuristicStrategy:
         return Action(ActionType.CHECK) if legal.can_check else Action(ActionType.CALL)
 
     def _bet_amount(self, state: GameState, legal: LegalActions) -> int:
-        # 下注约一个底池，夹在合法区间内。
-        return min(legal.max_bet, max(legal.min_bet, state.pot))
+        # 下注约一个底池；快照带有大盲时对齐到小盲，并留在合法区间内。
+        return _fit_chip_unit(state.pot, legal.min_bet, legal.max_bet, state.big_blind)
 
     def _raise_amount(self, state: GameState, legal: LegalActions, me: PlayerState) -> int:
-        # 加注后总额约为「当前跟注额 + 一个底池」，夹在合法区间内。
+        # 加注后总额约为当前跟注额再加一个底池；同样在可行时对齐到小盲。
         current_bet = me.street_bet + legal.call_amount
         target = current_bet + state.pot
-        return min(legal.max_raise_to, max(legal.min_raise_to, target))
+        return _fit_chip_unit(target, legal.min_raise_to, legal.max_raise_to, state.big_blind)

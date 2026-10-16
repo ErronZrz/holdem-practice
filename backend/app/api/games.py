@@ -301,6 +301,8 @@ def create_game(
     small_blind = req.big_blind // 2
     if req.small_blind is not None and req.small_blind != small_blind:
         raise HTTPException(status_code=400, detail="小盲必须等于大盲的一半")
+    if req.starting_stack % small_blind != 0:
+        raise HTTPException(status_code=400, detail="初始筹码必须是小盲的整数倍")
     session = repository.create_session(
         db,
         num_players=req.num_players,
@@ -392,6 +394,11 @@ def submit_action(
         raise HTTPException(status_code=400, detail="当前不是你的行动回合")
 
     action = _build_action(req)
+    off_unit = action.type in (ActionType.BET, ActionType.RAISE) and (
+        action.amount % engine.small_blind != 0
+    )
+    if off_unit:
+        raise HTTPException(status_code=400, detail="下注/加注金额必须是小盲的整数倍")
     try:
         engine.apply_action(action)
     except IllegalActionError as exc:

@@ -84,6 +84,7 @@ function loadSavedConfig() {
     }
     if (!isEvenPositiveInt(bigBlind)) return null
     if (!Number.isInteger(startingStack) || startingStack < 1) return null
+    if (startingStack % (bigBlind / 2) !== 0) return null
     return { num_players: numPlayers, big_blind: bigBlind, starting_stack: startingStack }
   } catch {
     return null
@@ -107,6 +108,10 @@ function configErrorText(cfg) {
   }
   if (!Number.isInteger(cfg.starting_stack) || cfg.starting_stack < 1) {
     return '初始筹码需为正整数'
+  }
+  const smallBlind = cfg.big_blind / 2
+  if (cfg.starting_stack % smallBlind !== 0) {
+    return `初始筹码必须是小盲 ${smallBlind} 的整数倍`
   }
   return ''
 }
@@ -136,6 +141,9 @@ const form = reactive({
 // 小盲由大盲推导，设置表单里只做只读预览。
 const smallBlindPreview = computed(() =>
   isEvenPositiveInt(form.big_blind) ? form.big_blind / 2 : '—',
+)
+const startingStackStep = computed(() =>
+  isEvenPositiveInt(form.big_blind) ? form.big_blind / 2 : 1,
 )
 
 const players = computed(() => (game.value ? game.value.players : []))
@@ -433,10 +441,18 @@ function setMax() {
   betAmount.value = pendingAction.value === 'bet' ? legal.value.max_bet : legal.value.max_raise_to
 }
 
+function alignToSmallBlind(amount, unit) {
+  if (!Number.isInteger(amount) || !Number.isInteger(unit) || unit <= 1) return amount
+  const quotient = Math.floor(amount / unit)
+  const remainder = amount - quotient * unit
+  return (quotient + (remainder * 2 >= unit ? 1 : 0)) * unit
+}
+
 function setPot() {
   const lo = pendingAction.value === 'bet' ? legal.value.min_bet : legal.value.min_raise_to
   const hi = pendingAction.value === 'bet' ? legal.value.max_bet : legal.value.max_raise_to
-  betAmount.value = Math.min(hi, Math.max(lo, game.value.pot))
+  const aligned = alignToSmallBlind(game.value.pot, game.value.small_blind)
+  betAmount.value = Math.min(hi, Math.max(lo, aligned))
 }
 
 // 金额校验：只接受合法区间内的整数，非法时给出中文原因并拒绝发送。
@@ -452,6 +468,10 @@ function amountErrorText(value) {
   }
   if (hi != null && value > hi) {
     return `${label}额不能大于最大值 ${hi}`
+  }
+  const unit = game.value?.small_blind
+  if (Number.isInteger(unit) && unit > 1 && value % unit !== 0) {
+    return `${label}额必须是小盲 ${unit} 的整数倍`
   }
   return ''
 }
@@ -704,11 +724,16 @@ onUnmounted(() => {
         </label>
         <label>
           初始筹码
-          <input v-model.number="form.starting_stack" type="number" min="1" />
+          <input
+            v-model.number="form.starting_stack"
+            type="number"
+            min="1"
+            :step="startingStackStep"
+          />
         </label>
       </div>
       <p class="hint">
-        支持 {{ MIN_PLAYERS }}–{{ MAX_PLAYERS }} 人；小盲自动为大盲的一半（{{ smallBlindPreview }}）；真人固定坐 0 号位，其余座位由 Bot 驱动；不限手数，可一直练习。
+        支持 {{ MIN_PLAYERS }}–{{ MAX_PLAYERS }} 人；小盲自动为大盲的一半（{{ smallBlindPreview }}）；初始筹码须为小盲的整数倍；真人固定坐 0 号位，其余座位由 Bot 驱动；不限手数，可一直练习。
       </p>
       <button class="primary" :disabled="busy" @click="createGame">开始对局</button>
     </div>
@@ -814,6 +839,7 @@ onUnmounted(() => {
                 type="number"
                 :min="amountMin"
                 :max="amountMax"
+                :step="game.small_blind"
               />
               <span class="range">{{ amountMin }} ~ {{ amountMax }}</span>
               <button @click="setMin">最小<kbd>M</kbd></button>

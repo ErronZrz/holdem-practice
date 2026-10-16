@@ -11,7 +11,8 @@ class CreateGameRequest(BaseModel):
     """创建对局的请求。产品支持 2–9 人（引擎自身按 N 人设计且不设上限，默认 2）。
 
     人数上限只在这里落实：越界请求直接失败，不静默截断、不回退到默认值。
-    大盲必须是偶数，小盲由大盲推导（= 大盲 / 2）；``target_hands`` 省略表示不限手数。
+    大盲必须是偶数，小盲由大盲推导（= 大盲 / 2）；初始筹码必须是小盲的整数倍。
+    ``target_hands`` 省略表示不限手数。
     ``small_blind`` / ``target_hands`` / ``bot_strategy`` 保留以兼容旧客户端，界面已不再提供这三项。
     ``bot_strategy`` 只接受受控注册表内的标识，旧值会被规范化到对应历史版本。
     """
@@ -23,7 +24,7 @@ class CreateGameRequest(BaseModel):
     small_blind: int | None = Field(default=None, ge=1)
     target_hands: int | None = Field(default=None, ge=1, le=10000)
     # 未指定时使用当前产品默认身份，并让校验器同样作用于默认值，避免绕过受控注册表。
-    bot_strategy: str = Field(default="mixed-local@12", validate_default=True)
+    bot_strategy: str = Field(default="mixed-local@13", validate_default=True)
 
     @field_validator("bot_strategy")
     @classmethod

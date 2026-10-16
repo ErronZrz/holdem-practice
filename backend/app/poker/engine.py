@@ -95,6 +95,7 @@ class PokerEngine:
             button=self.button,
             hand_over=self.hand_over,
             players=players,
+            big_blind=self.big_blind,
         )
 
     # ------------------------------------------------------------------ 一手牌
@@ -484,16 +485,22 @@ class PokerEngine:
         for amount, eligible in pots:
             best = max(ranks[i] for i in eligible)
             pot_winners = [i for i in eligible if ranks[i] == best]
+            # 展示顺序保持座位号升序；余数另按庄家下家起的顺时针顺序发放。
             ordered = sorted(pot_winners)
-            share = amount // len(pot_winners)
-            remainder = amount % len(pot_winners)
-            shares = {w: share + (1 if idx < remainder else 0) for idx, w in enumerate(ordered)}
-            for w in pot_winners:
-                self.players[w].stack += share
-                winners.add(w)
-            # 余数筹码按座位号升序依次分配，保证确定性。
-            for w in ordered[:remainder]:
-                self.players[w].stack += 1
+            winner_count = len(pot_winners)
+            unit = self.small_blind if amount % self.small_blind == 0 else 1
+            total_units = amount // unit
+            base = (total_units // winner_count) * unit
+            remainder_units = total_units % winner_count
+            remainder_order = sorted(
+                pot_winners,
+                key=lambda seat: (seat - self.button - 1) % self.num_players,
+            )
+            extra = set(remainder_order[:remainder_units])
+            shares = {seat: base + (unit if seat in extra else 0) for seat in ordered}
+            for seat, share in shares.items():
+                self.players[seat].stack += share
+                winners.add(seat)
             self.pot_results.append({"amount": amount, "winners": ordered, "shares": shares})
         self.winners = sorted(winners)
 

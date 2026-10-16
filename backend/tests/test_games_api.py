@@ -303,3 +303,35 @@ def test_hand_review_endpoint() -> None:
         top = max(distribution, key=lambda item: item["probability"])
         assert d["bot_action"]["action"] == top["action"], "参考动作取分布中的众数"
     assert client.get("/hands/unknown/review").status_code == 404
+
+
+def test_rejects_starting_stack_that_is_not_a_small_blind_multiple() -> None:
+    """初始筹码必须是小盲的整数倍；默认一千在大盲 10 时仍可创建。"""
+    client = TestClient(app)
+    rejected = client.post(
+        "/games", json={"num_players": 2, "big_blind": 10, "starting_stack": 1001}
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"] == "初始筹码必须是小盲的整数倍"
+    accepted = client.post(
+        "/games", json={"num_players": 2, "big_blind": 10, "starting_stack": 1000, "seed": 1}
+    )
+    assert accepted.status_code == 201
+
+
+def test_rejects_human_raise_that_is_not_a_small_blind_multiple() -> None:
+    """真人加注额必须是小盲的整数倍；对齐后的金额仍可提交。"""
+    client = TestClient(app)
+    created = client.post("/games", json={"num_players": 2, "big_blind": 10, "seed": 1})
+    assert created.status_code == 201
+    game_id = created.json()["session_id"]
+    rejected = client.post(
+        f"/games/{game_id}/actions", json={"action": "raise", "amount": 34}
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["detail"] == "下注/加注金额必须是小盲的整数倍"
+    accepted = client.post(
+        f"/games/{game_id}/actions", json={"action": "raise", "amount": 30}
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["hand_over"] is False

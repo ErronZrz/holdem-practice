@@ -36,7 +36,7 @@ class SessionModel(Base):
     hands_played: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     net_chips: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     # 新建行未写入身份时的产品默认；已落库的旧行保留原值，不做回填。
-    bot_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="mixed-local@12")
+    bot_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="mixed-local@13")
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

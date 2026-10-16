@@ -574,6 +574,7 @@ def test_measured_path_ignores_hidden_cards() -> None:
         button=state.button,
         hand_over=state.hand_over,
         players=tuple(players),
+        big_blind=state.big_blind,
     )
 
     assert HeuristicStrategy(seed=7).action_distribution(swapped, legal) == baseline

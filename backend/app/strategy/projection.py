@@ -32,4 +32,5 @@ def project_for_actor(state: GameState) -> GameState:
         button=state.button,
         hand_over=state.hand_over,
         players=players,
+        big_blind=state.big_blind,
     )

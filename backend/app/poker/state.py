@@ -42,3 +42,6 @@ class GameState:
     button: int
     hand_over: bool
     players: tuple[PlayerState, ...]
+    # 大盲。为 0 表示这份快照没有带盲注，调用方不能据此推断最小筹码单位。
+    # 仅关键字传入，避免带默认值的字段挡在子类必填字段之前。
+    big_blind: int = field(default=0, kw_only=True)

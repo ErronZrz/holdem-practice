@@ -158,6 +158,8 @@ class MixedPolicyRules:
     # 强成牌的尺度是否按局面收回：翻前沿用风格原表，面对下注时未到同花只留小尺度，
     # 无人下注的同花及以上才把整叠放回偏好。默认取假，旧身份的尺度逐位不变。
     guarded_strong_commitment: bool = False
+    # 主动尺度是否先按小盲对齐再夹紧。默认关闭，既有身份的候选金额逐位不变。
+    align_bet_to_small_blind: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -221,6 +223,11 @@ MIXED_LOCAL_V11_RULES = replace(
 MIXED_LOCAL_V12_RULES = replace(
     MIXED_LOCAL_V11_RULES,
     guarded_strong_commitment=True,
+)
+# 第十三版口径：主动尺度按小盲对齐，其余字段与第十二版逐字一致。
+MIXED_LOCAL_V13_RULES = replace(
+    MIXED_LOCAL_V12_RULES,
+    align_bet_to_small_blind=True,
 )
 
 
@@ -745,11 +752,13 @@ def _active_candidates(
         large = call_point + -(-5 * pot_target // 4)
 
     merged: dict[int, int] = {}
+    chip_unit = max(1, features.big_blind // 2) if rules.align_bet_to_small_blind else 1
     for target, preference in zip((small, medium, large), size_preferences[:3], strict=True):
         # 偏好为 0 的尺度不进入候选，避免造出永远抽不中的空额度。
         if preference <= 0:
             continue
-        amount = clip(target, legal_min, upper)
+        aligned = target if chip_unit <= 1 else _align_to_unit(target, chip_unit)
+        amount = clip(aligned, legal_min, upper)
         merged[amount] = merged.get(amount, 0) + preference
     if all_in_total <= upper and size_preferences[3] > 0:
         merged[all_in_total] = merged.get(all_in_total, 0) + size_preferences[3]
@@ -783,6 +792,14 @@ def _active_candidates(
         quality = value_quality + (0 if dangerous else bluff_quality)
         candidates.append(((action_type, amount, quality), merged[amount]))
     return candidates
+
+
+def _align_to_unit(amount: int, unit: int) -> int:
+    """把金额对齐到给定正整数单位；对半时向上取整。"""
+    quotient, remainder = divmod(amount, unit)
+    if remainder * 2 >= unit:
+        return (quotient + 1) * unit
+    return quotient * unit
 
 
 def _quantize(weights: list[Fraction], total: Fraction) -> list[int]:
