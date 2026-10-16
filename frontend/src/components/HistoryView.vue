@@ -17,6 +17,9 @@ const selectedSession = ref(null)
 const hands = ref([])
 const selectedHand = ref(null)
 const review = ref(null)
+const coach = ref(null)
+const coachLoading = ref(false)
+const coachError = ref('')
 const copiedHandId = ref('')
 const error = ref('')
 
@@ -67,21 +70,52 @@ async function loadHands(id) {
   }
 }
 
+function resetCoach() {
+  coach.value = null
+  coachLoading.value = false
+  coachError.value = ''
+}
+
+function coachFor(index) {
+  const items = coach.value?.decisions
+  if (!items) return null
+  return items.find((item) => item.action_index === index) || null
+}
+
 async function selectSession(id) {
   selectedSession.value = id
   selectedHand.value = null
   review.value = null
+  resetCoach()
   await loadHands(id)
 }
 
 async function selectHand(id) {
   error.value = ''
+  if (!selectedHand.value || selectedHand.value.id !== id) resetCoach()
   review.value = null
   try {
     selectedHand.value = await api.getHand(id)
     review.value = await api.getReview(id)
   } catch (e) {
     error.value = e.message
+  }
+}
+
+async function loadCoach() {
+  const handId = review.value?.hand_id
+  if (!handId || coachLoading.value) return
+  coachLoading.value = true
+  coachError.value = ''
+  try {
+    const data = await api.explainHand(handId)
+    if (review.value?.hand_id !== handId) return
+    coach.value = data
+  } catch (e) {
+    if (review.value?.hand_id !== handId) return
+    coachError.value = e.message || '教练解读暂时不可用'
+  } finally {
+    if (review.value?.hand_id === handId) coachLoading.value = false
   }
 }
 
@@ -261,6 +295,13 @@ onActivated(() => {
               </svg>
             </button>
           </p>
+          <div class="coach-bar">
+            <button type="button" :disabled="coachLoading" @click="loadCoach">
+              {{ coachLoading ? '教练正在思考…' : 'AI 教练解读' }}
+            </button>
+            <span v-if="coachError" class="coach-error">{{ coachError }}</span>
+          </div>
+          <p v-if="coach && !coach.decisions.length" class="muted">本手没有可解读的决策点。</p>
           <div v-for="(d, i) in review.decisions" :key="i" class="review-decision">
             <div class="review-street">
               <strong>{{ STREET_CN[d.street] || d.street }}</strong>
@@ -294,6 +335,12 @@ onActivated(() => {
               :class="mistakeClass(m.severity)"
             >
               {{ m.message }}
+            </div>
+            <div v-if="coachFor(i)" class="coach-note">
+              <div>{{ coachFor(i).explanation }}</div>
+              <div class="muted">
+                {{ coachFor(i).model }} · {{ coachFor(i).cached ? '已缓存' : '新生成' }}
+              </div>
             </div>
           </div>
         </div>
@@ -505,5 +552,29 @@ select {
 .mistake-info {
   background: #e0e7ff;
   color: #3730a3;
+}
+
+.coach-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0;
+}
+
+.coach-note {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #f8fafc;
+  font-size: 13px;
+  color: #1e293b;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.coach-error {
+  color: #b91c1c;
+  font-size: 13px;
 }
 </style>

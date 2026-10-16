@@ -51,6 +51,9 @@ export const api = {
   getReview(id) {
     return request(`/hands/${id}/review`)
   },
+  explainHand(id) {
+    return request(`/hands/${id}/explain`, { method: 'POST', body: '{}' })
+  },
   getStats(id) {
     return request(`/games/${id}/stats`)
   },

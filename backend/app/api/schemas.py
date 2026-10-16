@@ -230,3 +230,22 @@ class HandReview(BaseModel):
     reference_limitations: list[str]
     decisions: list[DecisionReview]
     mistake_count: int
+
+
+class DecisionExplanation(BaseModel):
+    """一个真人决策点的教练解读，不替代复盘里的动作和数字。"""
+
+    action_index: int
+    seat: int
+    street: str
+    explanation: str
+    cached: bool
+    provider: str
+    model: str
+
+
+class HandExplanation(BaseModel):
+    """一手牌的教练解读列表。没有真人决策点时列表为空。"""
+
+    hand_id: str
+    decisions: list[DecisionExplanation]

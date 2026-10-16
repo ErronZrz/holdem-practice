@@ -1,12 +1,15 @@
-"""手牌历史与结算/统计接口。"""
+"""手牌历史、复盘与教练解读接口。"""
 
 import json
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.analysis.hand_review import build_review
+from app.llm.coach import explain_decisions
+from app.llm.deepseek import DeepSeekProvider
+from app.llm.types import CoachUnavailableError
 from app.storage import repository
 from app.storage.db import get_db
 from app.storage.hand_history import project_hand_history
@@ -15,6 +18,11 @@ from app.storage.models import HandModel
 from . import schemas
 
 router = APIRouter(tags=["hands"])
+
+
+def get_coach_provider() -> DeepSeekProvider:
+    """线上教练上游。测试可替换，避免请求真实接口。"""
+    return DeepSeekProvider()
 
 
 def _hand_summary(hand: HandModel) -> schemas.HandSummary:
@@ -79,6 +87,33 @@ def get_review(
         decisions=review["decisions"],
         mistake_count=review["mistake_count"],
     )
+
+
+@router.post("/hands/{hand_id}/explain", response_model=schemas.HandExplanation)
+def explain_hand(
+    hand_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    provider: Annotated[Any, Depends(get_coach_provider)],
+) -> schemas.HandExplanation:
+    """按真人决策点生成中文解读。命中缓存则不再请求上游，失败时不改动复盘。"""
+    hand = repository.get_hand(db, hand_id)
+    if hand is None:
+        raise HTTPException(status_code=404, detail="手牌记录不存在")
+    history = json.loads(hand.history_json)
+    review = build_review(history)
+    if not review["decisions"]:
+        return schemas.HandExplanation(hand_id=hand.id, decisions=[])
+    try:
+        decisions = explain_decisions(
+            db,
+            hand_id=hand.id,
+            history=history,
+            review=review,
+            provider=provider,
+        )
+    except CoachUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return schemas.HandExplanation(hand_id=hand.id, decisions=decisions)
 
 
 @router.get("/games/{game_id}/stats", response_model=schemas.SessionStats)

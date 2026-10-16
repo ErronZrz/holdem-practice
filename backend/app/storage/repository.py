@@ -1,6 +1,6 @@
-"""Session / Hand 的持久化读写。
+"""Session / Hand 与教练解读缓存的持久化读写。
 
-函数均不自行 commit，由调用方（API 层）控制事务边界。
+函数均不自行 commit，由调用方控制事务边界。
 """
 
 import uuid
@@ -8,7 +8,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import HandModel, SessionModel
+from .models import CoachExplanationModel, HandModel, SessionModel
 
 
 def _new_id() -> str:
@@ -82,3 +82,46 @@ def list_hands(db: Session, session_id: str) -> list[HandModel]:
             .order_by(HandModel.hand_number)
         )
     )
+
+
+def get_coach_explanation(db: Session, cache_key: str) -> CoachExplanationModel | None:
+    """按决策缓存键读取一条教练解读。"""
+    return db.get(CoachExplanationModel, cache_key)
+
+
+def add_coach_explanation(
+    db: Session,
+    *,
+    cache_key: str,
+    hand_id: str,
+    action_index: int,
+    seat: int,
+    provider: str,
+    model: str,
+    prompt_schema_version: int,
+    explanation: str,
+    reasoning_summary: str | None,
+    prompt_tokens: int,
+    completion_tokens: int,
+    reasoning_tokens: int,
+    total_tokens: int,
+) -> CoachExplanationModel:
+    """写入一条教练解读（flush，不 commit）。"""
+    row = CoachExplanationModel(
+        cache_key=cache_key,
+        hand_id=hand_id,
+        action_index=action_index,
+        seat=seat,
+        provider=provider,
+        model=model,
+        prompt_schema_version=prompt_schema_version,
+        explanation=explanation,
+        reasoning_summary=reasoning_summary,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        reasoning_tokens=reasoning_tokens,
+        total_tokens=total_tokens,
+    )
+    db.add(row)
+    db.flush()
+    return row
