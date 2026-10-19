@@ -15,7 +15,12 @@ import app.analysis.reference_identity as identity_module
 import app.llm.deepseek as deepseek_module
 from app.analysis.hand_review import build_review
 from app.api.hands import get_coach_provider
-from app.llm.coach import PROMPT_SCHEMA_VERSION, build_decision_payload, render_messages
+from app.llm.coach import (
+    PROMPT_SCHEMA_VERSION,
+    build_decision_payload,
+    input_digest,
+    render_messages,
+)
 from app.llm.deepseek import DEFAULT_TIMEOUT_SECONDS, DeepSeekProvider, resolve_api_key
 from app.llm.types import Completion
 from app.main import app
@@ -69,7 +74,7 @@ class FakeProvider:
     provider_name = "fake"
     model_name = "stub"
 
-    def __init__(self, content: str = "翻前这手牌面对加注，弃牌可以少投入。") -> None:
+    def __init__(self, content: str | None = None) -> None:
         self.content = content
         self.calls = 0
         self.messages: list[list[dict[str, str]]] = []
@@ -77,8 +82,9 @@ class FakeProvider:
     def complete(self, messages: list[dict[str, str]]) -> Completion:
         self.calls += 1
         self.messages.append(messages)
+        content = self.content if self.content is not None else _batch_reply(messages)
         return Completion(
-            content=self.content,
+            content=content,
             reasoning="先看牌力和要跟的筹码。",
             prompt_tokens=11,
             completion_tokens=19,
@@ -186,6 +192,90 @@ def _no_human_decision_history() -> dict:
     )
     assert engine.current_player.seat == 1
     engine.apply_action(Action(ActionType.FOLD))
+    assert engine.hand_over
+    return build_hand_history(engine, hand_number=1, human_seat=0)
+
+
+def _request_body(messages: list[dict[str, str]]) -> dict:
+    return json.loads(messages[1]["content"].split("\n", 1)[1])
+
+
+def _batch_reply(messages: list[dict[str, str]]) -> str:
+    """按请求里的决策序号回一份结构化点评，便于断言只打了一次上游。"""
+    body = _request_body(messages)
+    return json.dumps(
+        {
+            "explanations": [
+                {
+                    "action_index": item["action_index"],
+                    "explanation": (
+                        f"决策{item['action_index']}结合公开行动线看，这一手不必追加被动投入。"
+                    ),
+                }
+                for item in body["decisions"]
+            ]
+        },
+        ensure_ascii=False,
+    )
+
+
+def _seed_explanation(hand_id: str, history: dict, index: int, explanation: str) -> None:
+    review = build_review(history)
+    payload = build_decision_payload(history, review, index)
+    cache_key = identity_module.decision_cache_key(
+        hand_id=hand_id,
+        action_index=index,
+        seat=int(review["human_seat"]),
+        input_digest=input_digest(payload),
+        prompt_schema_version=PROMPT_SCHEMA_VERSION,
+        provider=FakeProvider.provider_name,
+        model=FakeProvider.model_name,
+    )
+    generator = get_db()
+    db = next(generator)
+    try:
+        repository.add_coach_explanation(
+            db,
+            cache_key=cache_key,
+            hand_id=hand_id,
+            action_index=index,
+            seat=int(review["human_seat"]),
+            provider=FakeProvider.provider_name,
+            model=FakeProvider.model_name,
+            prompt_schema_version=PROMPT_SCHEMA_VERSION,
+            explanation=explanation,
+            reasoning_summary=None,
+            prompt_tokens=0,
+            completion_tokens=0,
+            reasoning_tokens=0,
+            total_tokens=0,
+        )
+        db.commit()
+    finally:
+        generator.close()
+
+
+def _heads_up_checked_down() -> dict:
+    """两人打到摊牌，真人有翻前到河牌的多个决策点。"""
+    engine = PokerEngine(2, 5, 10, 1000)
+    engine.start_hand_with(
+        button=0,
+        hole_cards={0: cards("As Kd"), 1: cards("Qh Jc")},
+        board=cards("2c 7d 9h Ts 3c"),
+    )
+    script = [
+        (0, ActionType.CALL),
+        (1, ActionType.CHECK),
+        (1, ActionType.CHECK),
+        (0, ActionType.CHECK),
+        (1, ActionType.CHECK),
+        (0, ActionType.CHECK),
+        (1, ActionType.CHECK),
+        (0, ActionType.CHECK),
+    ]
+    for seat, action_type in script:
+        assert engine.current_player.seat == seat
+        engine.apply_action(Action(action_type))
     assert engine.hand_over
     return build_hand_history(engine, hand_number=1, human_seat=0)
 
@@ -375,36 +465,61 @@ def test_unrevealed_opponent_cards_never_enter_the_request(fake_provider: FakePr
     response = client.post(f"/hands/{hand_id}/explain")
     assert response.status_code == 200, response.text
     decisions = response.json()["decisions"]
-    assert len(decisions) == fake_provider.calls
-    assert fake_provider.calls > 1
+    assert len(decisions) > 1
+    assert fake_provider.calls == 1
 
     request_text = json.dumps(fake_provider.messages, ensure_ascii=False)
     assert "Qh" not in request_text
     assert "Jc" not in request_text
     assert "As" in request_text
     assert "9s" in request_text
-    for messages in fake_provider.messages:
-        payload = json.loads(messages[1]["content"].split("\n", 1)[1])
-        assert "players" not in payload
-        assert all(item["seat"] != 1 for item in payload["revealed_hands"])
-        assert any(item["seat"] == 2 for item in payload["revealed_hands"])
-        _assert_no_solver_labels(messages[0]["content"] + messages[1]["content"])
+    messages = fake_provider.messages[0]
+    payload = _request_body(messages)
+    assert "players" not in payload
+    assert "players" not in payload["hand"]
+    revealed = payload["hand"]["revealed_hands"]
+    assert all(item["seat"] != 1 for item in revealed)
+    assert any(item["seat"] == 2 for item in revealed)
+    assert [item["action_index"] for item in payload["decisions"]] == [
+        item["action_index"] for item in decisions
+    ]
+    assert all("revealed_hands" not in item for item in payload["decisions"])
+    _assert_no_solver_labels(messages[0]["content"] + messages[1]["content"])
 
     cached = client.post(f"/hands/{hand_id}/explain")
     assert cached.status_code == 200
     assert all(item["cached"] for item in cached.json()["decisions"])
-    assert fake_provider.calls == len(decisions)
+    assert fake_provider.calls == 1
 
 
 def test_prompt_forbids_solver_wording_without_hiding_the_reference() -> None:
     history = _human_fold_history()
     review = build_review(history)
-    messages = render_messages(build_decision_payload(history, review, 0))
+    messages = render_messages([build_decision_payload(history, review, 0)])
     text = messages[0]["content"] + messages[1]["content"]
     _assert_no_solver_labels(text)
     assert "非均衡" in text
-    assert "紧手标准" in messages[0]["content"]
-    assert PROMPT_SCHEMA_VERSION == 2
+    system = messages[0]["content"]
+    assert "紧手标准" in system
+    assert "mixed-tight-normal" in system
+    assert "公开行动线加权" in system
+    assert "逐层摊牌份额" in system
+    assert "随机两张牌" in system
+    assert "求解器范围" in system
+    assert "call_ev" in system
+    assert "不含加注的弃牌权益" in system
+    assert "跟注是众数" in system
+    assert "本身不构成错误" in system
+    assert PROMPT_SCHEMA_VERSION == 3
+    body = _request_body(messages)
+    assert "As" in body["hand"]["hero_hole_cards"]
+    assert body["hand"]["revealed_hands"] == []
+    decision = body["decisions"][0]
+    assert decision["action_index"] == 0
+    assert "hero_hole_cards" not in decision
+    assert "revealed_hands" not in decision
+    for field in ("equity", "pot_odds", "call_ev"):
+        assert field in decision
 
 
 def test_solver_claims_are_removed_before_storage(fake_provider: FakeProvider) -> None:
@@ -418,6 +533,164 @@ def test_solver_claims_are_removed_before_storage(fake_provider: FakeProvider) -
     _assert_no_solver_labels(explanation)
     assert "非均衡" in explanation
     assert _coach_rows(hand_id)[0].explanation == explanation
+
+
+def test_multiple_decisions_share_one_upstream_call(fake_provider: FakeProvider) -> None:
+    history = _heads_up_checked_down()
+    hand_id = _persist(history)
+    client = TestClient(app)
+
+    first = client.post(f"/hands/{hand_id}/explain")
+    assert first.status_code == 200, first.text
+    decisions = first.json()["decisions"]
+    assert len(decisions) > 1
+    assert {item["street"] for item in decisions} >= {"preflop", "flop", "turn", "river"}
+    assert fake_provider.calls == 1
+    assert all(item["cached"] is False for item in decisions)
+    for item in decisions:
+        assert item["explanation"] == (
+            f"决策{item['action_index']}结合公开行动线看，这一手不必追加被动投入。"
+        )
+        _assert_no_solver_labels(item["explanation"])
+
+    sent = _request_body(fake_provider.messages[0])
+    assert [item["action_index"] for item in sent["decisions"]] == [
+        item["action_index"] for item in decisions
+    ]
+    assert sent["hand"]["public_actions"]
+    assert "As" in sent["hand"]["hero_hole_cards"]
+
+    rows = _coach_rows(hand_id)
+    assert len(rows) == len(decisions)
+    assert len({row.cache_key for row in rows}) == len(rows)
+    assert {row.action_index for row in rows} == {item["action_index"] for item in decisions}
+    assert all(row.hand_id == hand_id and row.cache_key != hand_id for row in rows)
+    assert all(row.cache_key.split("|")[2] == str(row.action_index) for row in rows)
+    assert all(row.prompt_schema_version == PROMPT_SCHEMA_VERSION for row in rows)
+    assert all(row.prompt_tokens == 11 and row.total_tokens == 30 for row in rows)
+
+    second = client.post(f"/hands/{hand_id}/explain")
+    assert second.status_code == 200, second.text
+    again = second.json()["decisions"]
+    assert [item["explanation"] for item in again] == [item["explanation"] for item in decisions]
+    assert all(item["cached"] is True for item in again)
+    assert fake_provider.calls == 1
+
+
+def test_partial_cache_requests_only_the_misses(fake_provider: FakeProvider) -> None:
+    history = _heads_up_checked_down()
+    hand_id = _persist(history)
+    seeded = "翻前这一手已有解读，不必再问。"
+    _seed_explanation(hand_id, history, 0, seeded)
+    client = TestClient(app)
+
+    first = client.post(f"/hands/{hand_id}/explain")
+    assert first.status_code == 200, first.text
+    decisions = first.json()["decisions"]
+    assert len(decisions) > 1
+    assert fake_provider.calls == 1
+    assert decisions[0]["cached"] is True
+    assert decisions[0]["explanation"] == seeded
+    assert all(item["cached"] is False for item in decisions[1:])
+    sent = _request_body(fake_provider.messages[0])
+    sent_indexes = [item["action_index"] for item in sent["decisions"]]
+    assert sent_indexes == [item["action_index"] for item in decisions[1:]]
+    assert 0 not in sent_indexes
+
+    second = client.post(f"/hands/{hand_id}/explain")
+    assert second.status_code == 200, second.text
+    assert all(item["cached"] is True for item in second.json()["decisions"])
+    assert second.json()["decisions"][0]["explanation"] == seeded
+    assert fake_provider.calls == 1
+
+
+def test_fenced_json_is_split_and_sanitized_per_decision(fake_provider: FakeProvider) -> None:
+    history = _heads_up_checked_down()
+    review = build_review(history)
+    indexes = list(range(len(review["decisions"])))
+    rows = []
+    for index in indexes:
+        text = "按 GTO 这是最优均衡。" if index == 0 else f"决策{index}可以少投入。"
+        rows.append({"action_index": index, "explanation": text})
+    fake_provider.content = "```json\n" + json.dumps(
+        {"explanations": rows}, ensure_ascii=False
+    ) + "\n```"
+    hand_id = _persist(history)
+
+    response = TestClient(app).post(f"/hands/{hand_id}/explain")
+    assert response.status_code == 200, response.text
+    decisions = response.json()["decisions"]
+    assert fake_provider.calls == 1
+    assert len(decisions) == len(indexes)
+    _assert_no_solver_labels(decisions[0]["explanation"])
+    assert "参考" in decisions[0]["explanation"]
+    assert "非均衡" not in decisions[0]["explanation"]
+    for item in decisions[1:]:
+        assert item["explanation"] == f"决策{item['action_index']}可以少投入。"
+    stored = _coach_rows(hand_id)
+    assert len(stored) == len(indexes)
+    by_index = {row.action_index: row.explanation for row in stored}
+    assert by_index[0] == decisions[0]["explanation"]
+    assert "gto" not in by_index[0].lower()
+
+
+def test_blank_or_unstructured_batch_returns_503_and_keeps_review(
+    fake_provider: FakeProvider,
+) -> None:
+    history = _heads_up_checked_down()
+    hand_id = _persist(history)
+    seeded = "翻前这一手已有解读，不必再问。"
+    _seed_explanation(hand_id, history, 0, seeded)
+    fake_provider.content = "先随便说两句，没有按决策序号分开。"
+    client = TestClient(app)
+    before = client.get(f"/hands/{hand_id}/review")
+    assert before.status_code == 200
+
+    response = client.post(f"/hands/{hand_id}/explain")
+    assert response.status_code == 503
+    assert "暂时不可用" in response.json()["detail"]
+    assert fake_provider.calls == 1
+    assert client.get(f"/hands/{hand_id}/review").json() == before.json()
+    rows = _coach_rows(hand_id)
+    assert len(rows) == 1
+    assert rows[0].action_index == 0
+    assert rows[0].explanation == seeded
+
+    pending = list(range(1, len(before.json()["decisions"])))
+    fake_provider.content = json.dumps(
+        {
+            "explanations": [
+                {
+                    "action_index": index,
+                    "explanation": "   " if index == pending[-1] else f"决策{index}可以少投入。",
+                }
+                for index in pending
+            ]
+        },
+        ensure_ascii=False,
+    )
+    blank = client.post(f"/hands/{hand_id}/explain")
+    assert blank.status_code == 503
+    assert fake_provider.calls == 2
+    assert [row.action_index for row in _coach_rows(hand_id)] == [0]
+    assert client.get(f"/hands/{hand_id}/review").json() == before.json()
+
+
+def test_single_decision_accepts_plain_text_and_bare_json(fake_provider: FakeProvider) -> None:
+    fake_provider.content = "翻前面对加注，弃牌可以少投入。"
+    client = TestClient(app)
+    plain = client.post(f"/hands/{_persist(_human_fold_history())}/explain")
+    assert plain.status_code == 200, plain.text
+    assert plain.json()["decisions"][0]["explanation"] == "翻前面对加注，弃牌可以少投入。"
+
+    fake_provider.content = json.dumps(
+        {"action_index": 0, "explanation": "这手翻前弃牌更稳妥。"},
+        ensure_ascii=False,
+    )
+    bare = client.post(f"/hands/{_persist(_human_fold_history())}/explain")
+    assert bare.status_code == 200, bare.text
+    assert bare.json()["decisions"][0]["explanation"] == "这手翻前弃牌更稳妥。"
+    assert fake_provider.calls == 2
 
 
 def test_no_human_decision_skips_upstream_even_without_a_key(monkeypatch, tmp_path) -> None:
@@ -532,18 +805,21 @@ def test_live_deepseek_smoke() -> None:
         return urllib.request.urlopen(request, timeout=timeout)
 
     app.dependency_overrides[get_coach_provider] = lambda: DeepSeekProvider(opener=opener)
-    history = _human_fold_history()
+    history = _heads_up_checked_down()
     hand_id = _persist(history)
     client = TestClient(app)
 
     first = client.post(f"/hands/{hand_id}/explain")
     assert first.status_code == 200, first.text
-    decision = first.json()["decisions"][0]
-    assert decision["cached"] is False
-    assert decision["model"] == "deepseek-flash"
-    assert decision["provider"] == "deepseek"
-    assert decision["explanation"].strip()
-    _assert_no_solver_labels(decision["explanation"])
+    decisions = first.json()["decisions"]
+    assert len(decisions) > 1
+    assert captured["calls"] == 1
+    assert all(item["cached"] is False for item in decisions)
+    assert all(item["model"] == "deepseek-flash" for item in decisions)
+    assert all(item["provider"] == "deepseek" for item in decisions)
+    for item in decisions:
+        assert item["explanation"].strip()
+        _assert_no_solver_labels(item["explanation"])
 
     sent = captured["body"]
     assert sent["model"] == "deepseek-flash"
@@ -558,23 +834,28 @@ def test_live_deepseek_smoke() -> None:
     assert captured["authorization"].startswith("Bearer ")
     assert len(captured["authorization"]) > len("Bearer ")
     request_text = json.dumps(sent["messages"], ensure_ascii=False)
-    assert "Qh" not in request_text
-    assert "Jc" not in request_text
+    payload = _request_body(sent["messages"])
+    assert [item["action_index"] for item in payload["decisions"]] == [
+        item["action_index"] for item in decisions
+    ]
     assert "As" in request_text
+    assert "公开行动线" in sent["messages"][0]["content"]
 
-    row = _coach_rows(hand_id)[0]
-    assert row.reasoning_tokens > 0 or row.reasoning_summary
+    rows = _coach_rows(hand_id)
+    assert len(rows) == len(decisions)
+    assert len({row.cache_key for row in rows}) == len(rows)
+    assert any(row.reasoning_tokens > 0 or row.reasoning_summary for row in rows)
     print(
-        "smoke explanation:",
-        decision["explanation"][:300],
+        "smoke explanations:",
+        [(item["action_index"], item["explanation"][:180]) for item in decisions],
         "tokens:",
-        row.prompt_tokens,
-        row.completion_tokens,
-        row.reasoning_tokens,
+        rows[0].prompt_tokens,
+        rows[0].completion_tokens,
+        rows[0].reasoning_tokens,
     )
 
     second = client.post(f"/hands/{hand_id}/explain")
     assert second.status_code == 200, second.text
-    assert second.json()["decisions"][0]["cached"] is True
+    assert all(item["cached"] is True for item in second.json()["decisions"])
     assert captured["calls"] == 1
     assert client.get(f"/hands/{hand_id}/review").status_code == 200

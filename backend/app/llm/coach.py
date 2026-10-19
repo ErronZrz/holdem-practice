@@ -13,16 +13,64 @@ from app.storage import repository
 from app.storage.models import CoachExplanationModel
 
 # 提示词结构变化时递增，已缓存的解读随之失效。
-PROMPT_SCHEMA_VERSION = 2
+PROMPT_SCHEMA_VERSION = 3
 _REASONING_SUMMARY_LIMIT = 500
 _EMPTY = "教练解读暂时不可用，请稍后再试"
 
-_SYSTEM_PROMPT = (
-    "你是德州扑克练习里的复盘教练。请只用中文，用两三句话点评这一个决策。\n"
-    "只能依据给出的事实：不要改写玩家动作、胜率、赔率、跟注期望或已标出的问题。\n"
-    "参考动作来自紧手标准模式，只供对照。\n"
-    "已公开摊牌之外的对手底牌是未知的，不要猜测具体牌面。"
+# 整手只出现一次的公开事实。决策点各自的指标不放在这里。
+_HAND_FIELDS = (
+    "seat",
+    "hero_hole_cards",
+    "public_actions",
+    "revealed_hands",
+    "reference_strategy",
+    "reference_version",
+    "evaluation_version",
+    "reference_coverage",
+    "reference_scope",
+    "reference_limitations",
 )
+# 每个待点评决策点单独携带的指标。摘要仍按完整事实计算，不因这里的拆分改变。
+_DECISION_FIELDS = (
+    "action_index",
+    "street",
+    "board",
+    "pot",
+    "to_call",
+    "actual_call_amount",
+    "is_short_all_in_call",
+    "opponents",
+    "equity",
+    "pot_odds",
+    "call_ev",
+    "action",
+    "bot_action",
+    "bot_distribution",
+    "mistakes",
+)
+
+_SYSTEM_PROMPT = """\
+你是德州扑克练习里的复盘教练。请先通盘看完整手牌的公开行动线，再针对待点评的每个决策点各写两三句简明中文。前后决策要连贯，不要逐街机械重复念胜率、赔率或期望数字。
+
+指标口径：
+- equity 是按未弃牌对手的公开行动线加权后的逐层摊牌份额，不是对随机两张牌，也不是求解器范围。
+- pot_odds 与 call_ev 按候选跟注可达的池层计算。
+  赔率是这次跟注相对该层底池的比例。
+  期望净收益假设其余未弃牌对手都跟注到摊牌，不含加注的弃牌权益。
+- 参考动作来自紧手标准模式（mixed-tight-normal）。
+  当跟注是众数且 call_ev < 0 时，跟注质量已经挪到弃牌。
+  参考只供对照，与参考不同本身不构成错误。
+
+只能依据给出的事实，不要改写玩家动作、胜率、赔率、跟注期望或已标出的问题。
+未出现在 revealed_hands 里的对手底牌是未知的，不要猜测具体牌面。
+
+只输出一个 JSON 对象，不要加 Markdown 代码块，也不要附加说明。格式如下：
+{"explanations":[{"action_index":0,"explanation":"两三句中文"}]}
+explanations 必须恰好覆盖输入 decisions 中的每个 action_index，不得遗漏，也不得新增。
+每个 explanation 都要有实质内容。
+"""
+
+_FENCE = re.compile(r"```(?:json)?[^\n]*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
 
 # 去掉把参考说成求解器结论的字样；否定语境保留。
 _REPLACEMENTS = (
@@ -42,7 +90,7 @@ def explain_decisions(
     review: dict,
     provider: CoachProvider,
 ) -> list[dict]:
-    """为每个真人决策点返回解读。命中缓存则不再请求上游；没有决策点时直接返回空列表。"""
+    """为每个真人决策点返回解读。全部命中缓存则不请求上游；未命中的点合并为一次请求。"""
     decisions = review["decisions"]
     if not decisions:
         return []
@@ -66,11 +114,17 @@ def explain_decisions(
             continue
         pending.append((index, payload, cache_key))
 
-    for index, payload, cache_key in pending:
-        completion = provider.complete(render_messages(payload))
-        text = sanitize_explanation(completion.content)
-        if not text:
-            raise CoachUnavailableError(_EMPTY)
+    if not pending:
+        return [item for item in results if item is not None]
+
+    completion = provider.complete(render_messages([item[1] for item in pending]))
+    texts = _explanations_for(
+        completion.content,
+        [item[0] for item in pending],
+    )
+    # 用量属于这一次合并请求，记在每个新写入的决策行上。
+    summary = _reasoning_summary(completion.reasoning)
+    for index, _payload, cache_key in pending:
         row, raced = _save_explanation(
             db,
             cache_key=cache_key,
@@ -80,8 +134,8 @@ def explain_decisions(
             provider=provider.provider_name,
             model=provider.model_name,
             prompt_schema_version=PROMPT_SCHEMA_VERSION,
-            explanation=text,
-            reasoning_summary=_reasoning_summary(completion.reasoning),
+            explanation=texts[index],
+            reasoning_summary=summary,
             prompt_tokens=completion.prompt_tokens,
             completion_tokens=completion.completion_tokens,
             reasoning_tokens=completion.reasoning_tokens,
@@ -134,12 +188,14 @@ def input_digest(payload: dict) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
-def render_messages(payload: dict) -> list[dict[str, str]]:
-    """把同一份公开事实渲染成对话。不额外附带历史里的底牌字段。"""
-    body = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+def render_messages(payloads: list[dict]) -> list[dict[str, str]]:
+    """把本手公共上下文和待点评决策点渲染成同一次对话。不附带未公开的底牌。"""
+    if not payloads:
+        raise ValueError("没有待点评的决策点")
+    body = json.dumps(_request_body(payloads), ensure_ascii=False, indent=2, sort_keys=True)
     return [
         {"role": "system", "content": _SYSTEM_PROMPT},
-        {"role": "user", "content": f"请点评下面这个决策点。\n{body}"},
+        {"role": "user", "content": f"请通盘看完这一手公开行动线，只点评下面这些决策点。\n{body}"},
     ]
 
 
@@ -175,6 +231,128 @@ def _view(row: CoachExplanationModel, *, street: str, cached: bool) -> dict:
         "provider": row.provider,
         "model": row.model,
     }
+
+
+def _request_body(payloads: list[dict]) -> dict:
+    """公共上下文只取一份，每个决策点只保留自己的指标。"""
+    hand = {key: payloads[0][key] for key in _HAND_FIELDS}
+    decisions = []
+    shared = set(_HAND_FIELDS)
+    per_decision = set(_DECISION_FIELDS)
+    for payload in payloads:
+        decision = {key: payload[key] for key in _DECISION_FIELDS}
+        decision.update(
+            {
+                key: value
+                for key, value in payload.items()
+                if key not in shared and key not in per_decision
+            }
+        )
+        decisions.append(decision)
+    return {"decisions": decisions, "hand": hand}
+
+
+def _explanations_for(content: str, action_indexes: list[int]) -> dict[int, str]:
+    """从一次响应里取出每个待点评决策点的正文。结构对不上时整批失败，不落库。"""
+    candidate = _json_candidate(content)
+    parsed = _load_json(candidate)
+    if parsed is not None:
+        found = _collect_explanations(parsed)
+        if found is None or any(index not in found for index in action_indexes):
+            raise CoachUnavailableError(_EMPTY)
+        selected = {index: found[index] for index in action_indexes}
+    elif len(action_indexes) == 1 and candidate and candidate[0] not in "{[":
+        selected = {action_indexes[0]: candidate}
+    else:
+        raise CoachUnavailableError(_EMPTY)
+
+    cleaned: dict[int, str] = {}
+    for index, raw in selected.items():
+        text = sanitize_explanation(raw)
+        if not text:
+            raise CoachUnavailableError(_EMPTY)
+        cleaned[index] = text
+    return cleaned
+
+
+def _json_candidate(content: str) -> str:
+    """去掉包住正文的 Markdown 代码块。没有代码块时保留原文。"""
+    stripped = content.strip()
+    match = _FENCE.search(stripped)
+    if match:
+        return match.group(1).strip()
+    return stripped
+
+
+def _load_json(text: str) -> object | None:
+    """尽量读出 JSON。正文前后若有多余说明，只截取最外层对象或数组。"""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = text.find(opener)
+        end = text.rfind(closer)
+        if start == -1 or end <= start:
+            continue
+        try:
+            return json.loads(text[start : end + 1])
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _collect_explanations(parsed: object) -> dict[int, str] | None:
+    """接受按决策序号组织的几种 JSON 形状。序号重复或正文不是字符串时视为无法解析。"""
+    if isinstance(parsed, list):
+        return _explanations_from_rows(parsed)
+    if not isinstance(parsed, dict):
+        return None
+    rows = parsed.get("explanations")
+    if isinstance(rows, list):
+        return _explanations_from_rows(rows)
+    if isinstance(rows, dict):
+        return _explanations_from_mapping(rows)
+    if "action_index" in parsed and "explanation" in parsed:
+        return _explanations_from_rows([parsed])
+    return _explanations_from_mapping(parsed)
+
+
+def _explanations_from_rows(rows: list) -> dict[int, str] | None:
+    found: dict[int, str] = {}
+    for item in rows:
+        if not isinstance(item, dict):
+            return None
+        index = _action_index(item.get("action_index"))
+        text = item.get("explanation")
+        if index is None or not isinstance(text, str) or index in found:
+            return None
+        found[index] = text
+    return found
+
+
+def _explanations_from_mapping(mapping: dict) -> dict[int, str] | None:
+    found: dict[int, str] = {}
+    for key, value in mapping.items():
+        index = _action_index(key)
+        text = value if isinstance(value, str) else None
+        if text is None and isinstance(value, dict):
+            nested = value.get("explanation")
+            text = nested if isinstance(nested, str) else None
+        if index is None or text is None or index in found:
+            return None
+        found[index] = text
+    return found or None
+
+
+def _action_index(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, str) and value.strip().isdigit():
+        return int(value.strip())
+    return None
 
 
 def _reasoning_summary(reasoning: str) -> str | None:

@@ -95,7 +95,7 @@ def explain_hand(
     db: Annotated[Session, Depends(get_db)],
     provider: Annotated[Any, Depends(get_coach_provider)],
 ) -> schemas.HandExplanation:
-    """按真人决策点生成中文解读。命中缓存则不再请求上游，失败时不改动复盘。"""
+    """按真人决策点生成中文解读。未缓存的点合并为一次上游请求，失败时不改动复盘。"""
     hand = repository.get_hand(db, hand_id)
     if hand is None:
         raise HTTPException(status_code=404, detail="手牌记录不存在")
