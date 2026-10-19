@@ -403,6 +403,8 @@ def test_prompt_forbids_solver_wording_without_hiding_the_reference() -> None:
     text = messages[0]["content"] + messages[1]["content"]
     _assert_no_solver_labels(text)
     assert "非均衡" in text
+    assert "紧手标准" in messages[0]["content"]
+    assert PROMPT_SCHEMA_VERSION == 2
 
 
 def test_solver_claims_are_removed_before_storage(fake_provider: FakeProvider) -> None:

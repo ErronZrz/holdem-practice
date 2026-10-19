@@ -123,7 +123,7 @@ def test_reference_source_literal_is_single() -> None:
     for folder in ("analysis", "api"):
         for path in (_REPO_ROOT / "backend" / "app" / folder).rglob("*.py"):
             hits.extend(
-                f"{path.name}" for _ in re.finditer("heuristic-conservative", path.read_text())
+                f"{path.name}" for _ in re.finditer("mixed-tight-normal", path.read_text())
             )
     assert hits == ["reference_identity.py"]
 
@@ -157,23 +157,29 @@ def test_both_review_views_render_scope_and_limitations() -> None:
 # ------------------------------------------------------------------ 非众数不判错
 
 
-def test_mistake_detection_does_not_read_reference_distribution() -> None:
-    # 判据函数既不接收分布/众数参数，也不在实现中引用它们。
+def test_mistake_detection_uses_reference_only_as_a_veto() -> None:
+    # 允许传入参考动作做方向否决，但仍不读取分布，也不把「不是众数」本身写成错误。
     params = set(inspect.signature(_detect_mistakes).parameters)
     assert params == {
         "action",
         "equity",
+        "call_ev",
         "pot_odds",
         "to_call",
+        "actual_call",
         "pot",
+        "contested",
         "can_raise",
+        "opponents",
         "hole_cards",
         "board",
         "big_blind",
+        "reference",
     }
     source = inspect.getsource(_detect_mistakes)
     assert "bot_distribution" not in source
     assert "_mode_action" not in source
+    assert "本身" not in source
 
 
 def test_non_mode_action_without_existing_rule_is_not_flagged() -> None:
@@ -201,31 +207,28 @@ def test_mistake_codes_come_only_from_existing_rules() -> None:
 # ------------------------------------------------------------------ 保护判据冻结
 
 
-def test_conservative_protection_constants_are_frozen() -> None:
+def test_review_thresholds_are_frozen() -> None:
     module = hand_review_module
     assert module._EQUITY_SAMPLES == 1000
     assert module._REVIEW_SEED == 0
     assert module._FOLD_EV_MARGIN == 0.15
     assert module._FOLD_BET_SCALE == 0.10
-    assert module._FOLD_MIN_EQ_PREFLOP == 0.55
-    assert module._BAD_CALL_EQ_MARGIN == 0.03
-    assert module._VALUE_BET_EQ == 0.80
-    assert module._UNDERBET_EQ == 0.80
+    assert module._BAD_CALL_FRACTION == 0.03
+    assert module._VALUE_FAIR_SCALE == 1.6
+    assert module._SLOWPLAY_FAIR_SCALE == 1.8
+    assert module._AIR_FAIR_SCALE == 0.5
     assert module._UNDERBET_DEN == 2
-    assert module._SLOWPLAY_EQ == 0.90
-    assert module._AIR_EQ == 0.25
-    assert module._OVER_AGGRESSIVE_EQ == 0.50
     assert module._STRONG_DRAW_OUTS == 8
     assert module._SMALL_BET_NUM == 1
     assert module._SMALL_BET_DEN == 3
-    assert module._DRAW_MARGIN_SCALE == 0.5
-    # 误弃容差随跟注占底池比例放大：跟注半池时余量为 0.15 + 0.10 × 0.5。
-    assert module._fold_margin(100, 200) == pytest.approx(0.20)
+    # 实付占底池一半、竞争层 300 时，正期望门槛是 (0.15 + 0.10 × 0.5) × 300。
+    assert module._call_ev_margin(100, 200, 300, 10) == pytest.approx(60)
 
 
-def test_reference_semantics_versions_unchanged() -> None:
-    # 本轮只新增声明性字段，参考语义与版本号不变。
-    assert REFERENCE_VERSION == 1
-    assert EVALUATION_VERSION == 1
+def test_reference_versions_track_the_action_line_upgrade() -> None:
+    assert REFERENCE_VERSION == 2
+    assert EVALUATION_VERSION == 2
     assert CACHE_KEY_VERSION == 1
-    assert reference_identity()["reference_strategy"] == "heuristic-conservative"
+    identity = reference_identity()
+    assert identity["reference_strategy"] == "mixed-tight-normal"
+    assert identity["reference_coverage"] == "action-line-weighted"

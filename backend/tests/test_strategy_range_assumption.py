@@ -563,15 +563,16 @@ def test_module_has_no_production_caller() -> None:
     assert offenders == []
 
 
-def test_contrast_coverage_mirrors_the_frozen_reference_identity() -> None:
-    assert RANGE_CONTRAST_COVERAGE == reference_identity.REFERENCE_COVERAGE
+def test_contrast_coverage_stays_random_while_review_is_action_line_weighted() -> None:
+    assert RANGE_CONTRAST_COVERAGE == "vs-random"
+    assert reference_identity.REFERENCE_COVERAGE == "action-line-weighted"
 
 
-def test_production_reference_identity_is_unchanged() -> None:
+def test_production_reference_identity_is_action_line_weighted() -> None:
     identity = reference_identity.reference_identity()
-    assert identity["reference_strategy"] == "heuristic-conservative"
-    assert identity["reference_version"] == 1
-    assert identity["evaluation_version"] == 1
+    assert identity["reference_strategy"] == "mixed-tight-normal"
+    assert identity["reference_version"] == 2
+    assert identity["evaluation_version"] == 2
 
 
 def test_assumption_ignores_hidden_cards_and_board() -> None:

@@ -4,16 +4,15 @@ import pytest
 
 import app.analysis.hand_review as hand_review_module
 from app.analysis.hand_review import (
-    _conservative_distribution,
     _detect_mistakes,
     _dominated_pair,
+    _guard_negative_call,
     _weak_kicker_top_pair,
     build_review,
 )
-from app.poker.actions import Action, ActionType, LegalActions
+from app.poker.actions import Action, ActionType
 from app.poker.cards import card_from_str as card
 from app.poker.engine import PokerEngine
-from app.poker.state import GameState, PlayerState, Street
 from app.storage.hand_history import build_hand_history
 
 
@@ -159,10 +158,10 @@ def test_review_replays_per_player_stacks() -> None:
     assert captured[1] == (500, 0)
 
 
-def test_review_short_call_keeps_complete_gap_for_internal_checks(
+def test_review_short_call_reports_layered_price(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # 对外不展示单池结果，但既有参考与错误判据继续使用完整欠注差额。
+    # 短码全下对外给出按实际支付计算的赔率，判据看到的跟注额仍是完整欠注。
     engine = PokerEngine(2, 5, 10, 110)
     engine.players[1].stack = 100
     engine.start_hand_with(
@@ -200,9 +199,9 @@ def test_review_short_call_keeps_complete_gap_for_internal_checks(
     )
 
     assert flop["actual_call_amount"] == 90
-    assert flop["pot_odds"] is None
-    assert flop["call_ev"] is None
-    assert captured == [(100, pytest.approx(100 / 220))]
+    assert flop["pot_odds"] is not None
+    assert flop["call_ev"] is not None
+    assert captured == [(100, pytest.approx(flop["pot_odds"]))]
 
 
 def test_review_reference_counts_all_in_opponent() -> None:
@@ -238,8 +237,8 @@ def test_review_reference_counts_all_in_opponent() -> None:
     assert flop["to_call"] == 100
     assert flop["actual_call_amount"] == 90
     assert flop["is_short_all_in_call"] is True
-    assert flop["pot_odds"] is None
-    assert flop["call_ev"] is None
+    assert flop["pot_odds"] is not None
+    assert flop["call_ev"] is not None
     assert flop["bot_action"]["action"] == ActionType.FOLD.value
 
 
@@ -275,59 +274,83 @@ def test_review_replays_raise_increment() -> None:
     assert captured[1] == (210, 60)
 
 
-def test_detect_mistakes_bad_fold_preflop_floor() -> None:
-    # 翻牌前 vs 随机胜率不足以支撑「误弃」判定：胜率 0.53 不命中，0.60 命中。
-    base = {
+def _codes(action: Action, **overrides: object) -> set[str]:
+    """用单挑、跟注期望足够高的默认局面调用判据，再按用例覆盖字段。"""
+    params: dict[str, object] = {
+        "equity": 0.60,
+        "call_ev": 500.0,
         "pot_odds": 0.33,
         "to_call": 20,
+        "actual_call": 20,
         "pot": 40,
+        "contested": 60,
         "can_raise": False,
+        "opponents": 1,
         "hole_cards": [card("As"), card("Kd")],
         "board": [],
         "big_blind": 10,
+        "reference": Action(ActionType.CALL),
     }
-    weak = _detect_mistakes(action=Action(ActionType.FOLD), equity=0.53, **base)
-    assert "bad_fold" not in {m["code"] for m in weak}
-    strong = _detect_mistakes(action=Action(ActionType.FOLD), equity=0.60, **base)
-    assert "bad_fold" in {m["code"] for m in strong}
+    params.update(overrides)
+    return {item["code"] for item in _detect_mistakes(action=action, **params)}
+
+
+def test_detect_mistakes_bad_fold_preflop_floor() -> None:
+    # 翻牌前份额低于公平份额时不判误弃；达到公平份额且跟注期望超过门槛才判。
+    base = {
+        "call_ev": 500.0,
+        "to_call": 20,
+        "actual_call": 20,
+        "pot": 40,
+        "contested": 60,
+        "hole_cards": [card("As"), card("Kd")],
+        "board": [],
+    }
+    assert "bad_fold" not in _codes(Action(ActionType.FOLD), equity=0.49, **base)
+    assert "bad_fold" in _codes(Action(ActionType.FOLD), equity=0.50, **base)
 
 
 def test_detect_mistakes_bad_fold_scales_with_bet_size() -> None:
-    # 翻牌后跟注占底池越大，容差越高：胜率 0.50 不命中，0.60 命中。
-    # 用顶对（对子等于公共牌最高点数）作样本，避免受「被压制对子」门槛干扰。
+    # 实付占底池一半时门槛更高：跟注期望等于门槛不命中，超过才命中。
     base = {
-        "pot_odds": 0.333,
         "to_call": 100,
+        "actual_call": 100,
         "pot": 200,
-        "can_raise": False,
+        "contested": 300,
         "hole_cards": [card("Ah"), card("Kd")],
         "board": [card("Kc"), card("7d"), card("2h")],
-        "big_blind": 10,
     }
-    edge = _detect_mistakes(action=Action(ActionType.FOLD), equity=0.50, **base)
-    assert "bad_fold" not in {m["code"] for m in edge}
-    clear = _detect_mistakes(action=Action(ActionType.FOLD), equity=0.60, **base)
-    assert "bad_fold" in {m["code"] for m in clear}
+    assert "bad_fold" not in _codes(Action(ActionType.FOLD), call_ev=60.0, **base)
+    assert "bad_fold" in _codes(Action(ActionType.FOLD), call_ev=60.1, **base)
 
 
 def test_detect_mistakes_bad_fold_requires_playable_strength() -> None:
-    # 翻牌后即使胜率高于赔率容差，无真实牌力（仅公共牌成对）也不判误弃；有真实成手牌才判。
+    # 翻牌后即使跟注期望很高，无真实牌力也不判误弃；有真实成手牌才判。
     base = {
-        "pot_odds": 0.333,
+        "call_ev": 500.0,
         "to_call": 100,
+        "actual_call": 100,
         "pot": 200,
-        "can_raise": False,
+        "contested": 300,
         "board": [card("5s"), card("5d"), card("7c")],
-        "big_blind": 10,
     }
-    weak = _detect_mistakes(
-        action=Action(ActionType.FOLD), equity=0.60, hole_cards=[card("Ah"), card("9h")], **base
+    assert "bad_fold" not in _codes(
+        Action(ActionType.FOLD), hole_cards=[card("Ah"), card("9h")], **base
     )
-    assert "bad_fold" not in {m["code"] for m in weak}
-    made = _detect_mistakes(
-        action=Action(ActionType.FOLD), equity=0.60, hole_cards=[card("7h"), card("9h")], **base
+    assert "bad_fold" in _codes(
+        Action(ActionType.FOLD), hole_cards=[card("7h"), card("9h")], **base
     )
-    assert "bad_fold" in {m["code"] for m in made}
+
+
+def test_detect_mistakes_bad_fold_requires_positive_call_ev() -> None:
+    # 跟注期望为负时，弃牌不再被标成放弃正期望。
+    assert "bad_fold" not in _codes(
+        Action(ActionType.FOLD),
+        call_ev=-1.0,
+        equity=0.80,
+        board=[card("Kc"), card("7d"), card("2h")],
+        hole_cards=[card("Ah"), card("Kd")],
+    )
 
 
 def test_dominated_pair_detection() -> None:
@@ -351,100 +374,95 @@ def test_dominated_pair_detection() -> None:
 
 
 def test_detect_mistakes_bad_fold_skips_dominated_pair() -> None:
-    # 被公共牌高张压制的对子不算可继续牌力：胜率高于赔率容差也不判误弃，超对仍判。
+    # 被公共牌高张压制的对子不算可继续牌力：跟注期望很高也不判误弃，超对仍判。
     base = {
-        "pot_odds": 0.333,
+        "call_ev": 500.0,
         "to_call": 120,
+        "actual_call": 120,
         "pot": 240,
-        "can_raise": False,
+        "contested": 360,
         "board": [card(s) for s in ("9d", "Kd", "2h")],
-        "big_blind": 10,
     }
-    dominated = _detect_mistakes(
-        action=Action(ActionType.FOLD),
-        equity=0.60,
-        hole_cards=[card("Jc"), card("Js")],
-        **base,
+    assert "bad_fold" not in _codes(
+        Action(ActionType.FOLD), hole_cards=[card("Jc"), card("Js")], **base
     )
-    assert "bad_fold" not in {m["code"] for m in dominated}
-    overpair = _detect_mistakes(
-        action=Action(ActionType.FOLD),
-        equity=0.60,
-        hole_cards=[card("Ac"), card("Ad")],
-        **base,
+    assert "bad_fold" in _codes(
+        Action(ActionType.FOLD), hole_cards=[card("Ac"), card("Ad")], **base
     )
-    assert "bad_fold" in {m["code"] for m in overpair}
 
 
 def test_detect_mistakes_value_missed_threshold() -> None:
-    # 无人下注过牌：胜率 0.75 不再判价值丢失，0.85 命中。
+    # 单挑公平份额 1/2，价值线是 0.8。参考自己下注时才标过牌丢失价值。
     base = {
+        "call_ev": None,
         "pot_odds": None,
         "to_call": 0,
+        "actual_call": 0,
         "pot": 100,
+        "contested": 0,
         "can_raise": True,
         "hole_cards": [card("As"), card("Ad")],
         "board": [card("2c"), card("7d"), card("9h")],
-        "big_blind": 10,
+        "reference": Action(ActionType.BET, 60),
     }
-    thin = _detect_mistakes(action=Action(ActionType.CHECK), equity=0.75, **base)
-    assert "value_missed" not in {m["code"] for m in thin}
-    strong = _detect_mistakes(action=Action(ActionType.CHECK), equity=0.85, **base)
-    assert "value_missed" in {m["code"] for m in strong}
+    assert "value_missed" not in _codes(Action(ActionType.CHECK), equity=0.79, **base)
+    assert "value_missed" in _codes(Action(ActionType.CHECK), equity=0.80, **base)
+    assert "value_missed" not in _codes(
+        Action(ActionType.CHECK),
+        equity=0.90,
+        reference=Action(ActionType.CHECK),
+        **{key: value for key, value in base.items() if key != "reference"},
+    )
 
 
 def test_detect_mistakes_bad_call_margin() -> None:
-    # 跟注仅略低于赔率（EV 约 0）不判 error，明显不足才判。
+    # 亏损不超过一个大盲或竞争层的 3% 时不判，明显超出才判。
     base = {
         "pot_odds": 0.40,
-        "to_call": 20,
-        "pot": 30,
+        "to_call": 40,
+        "actual_call": 40,
+        "pot": 60,
+        "contested": 100,
         "can_raise": True,
         "hole_cards": [card("8c"), card("3d")],
         "board": [card("2c"), card("7d"), card("9h")],
-        "big_blind": 10,
     }
-    edge = _detect_mistakes(action=Action(ActionType.CALL), equity=0.38, **base)
-    assert "bad_call" not in {m["code"] for m in edge}
-    clear = _detect_mistakes(action=Action(ActionType.CALL), equity=0.30, **base)
-    assert "bad_call" in {m["code"] for m in clear}
+    assert "bad_call" not in _codes(Action(ActionType.CALL), call_ev=-9.0, **base)
+    assert "bad_call" in _codes(Action(ActionType.CALL), call_ev=-10.1, **base)
 
 
 def test_detect_mistakes_preflop_limp_exempt() -> None:
-    # 翻牌前跟注额不超过一个大盲（补齐盲注 / limp）属廉价看牌，不判赔率不足。
+    # 翻牌前跟注额不超过一个大盲属廉价看牌，不判赔率不足。
     base = {
+        "call_ev": -50.0,
         "pot_odds": 0.40,
         "to_call": 20,
+        "actual_call": 20,
         "pot": 30,
+        "contested": 50,
         "can_raise": True,
         "hole_cards": [card("6h"), card("As")],
         "board": [],
     }
-    limp = _detect_mistakes(
-        action=Action(ActionType.CALL), equity=0.275, big_blind=20, **base
-    )
-    assert "bad_call" not in {m["code"] for m in limp}
-    # 超过一个大盲的翻前跟注仍按赔率判定。
-    raised = _detect_mistakes(
-        action=Action(ActionType.CALL), equity=0.275, big_blind=10, **base
-    )
-    assert "bad_call" in {m["code"] for m in raised}
+    assert "bad_call" not in _codes(Action(ActionType.CALL), big_blind=20, **base)
+    assert "bad_call" in _codes(Action(ActionType.CALL), big_blind=10, **base)
 
 
 def test_detect_mistakes_limp_exempt_is_preflop_only() -> None:
-    # 翻牌后即使跟注额不超过一个大盲，也不适用 limp 豁免。
-    base = {
-        "pot_odds": 0.40,
-        "to_call": 20,
-        "pot": 30,
-        "can_raise": True,
-        "hole_cards": [card("8c"), card("3d")],
-        "board": [card("2c"), card("7d"), card("9h")],
-    }
-    mistakes = _detect_mistakes(
-        action=Action(ActionType.CALL), equity=0.275, big_blind=20, **base
+    # 翻牌后即使跟注额不超过一个大盲，也不适用补盲豁免。
+    assert "bad_call" in _codes(
+        Action(ActionType.CALL),
+        call_ev=-50.0,
+        pot_odds=0.40,
+        to_call=20,
+        actual_call=20,
+        pot=30,
+        contested=50,
+        can_raise=True,
+        hole_cards=[card("8c"), card("3d")],
+        board=[card("2c"), card("7d"), card("9h")],
+        big_blind=20,
     )
-    assert "bad_call" in {m["code"] for m in mistakes}
 
 
 def test_weak_kicker_top_pair_detection() -> None:
@@ -468,217 +486,136 @@ def test_weak_kicker_top_pair_detection() -> None:
 
 
 def test_detect_mistakes_value_missed_skips_weak_kicker() -> None:
-    # 弱踢脚顶对属薄价值，过牌不判价值丢失；强踢脚顶对仍判。
+    # 弱踢脚顶对属薄价值，过牌不判价值丢失；强踢脚顶对在参考下注时仍判。
     base = {
+        "call_ev": None,
         "pot_odds": None,
         "to_call": 0,
+        "actual_call": 0,
         "pot": 630,
+        "contested": 0,
         "can_raise": True,
         "board": [card(s) for s in ("Qs", "Tc", "Ad", "2h", "8s")],
-        "big_blind": 10,
+        "reference": Action(ActionType.BET, 400),
     }
-    weak = _detect_mistakes(
-        action=Action(ActionType.CHECK), equity=0.85, hole_cards=[card("6h"), card("As")], **base
+    assert "value_missed" not in _codes(
+        Action(ActionType.CHECK), equity=0.85, hole_cards=[card("6h"), card("As")], **base
     )
-    assert "value_missed" not in {m["code"] for m in weak}
-    strong = _detect_mistakes(
-        action=Action(ActionType.CHECK), equity=0.85, hole_cards=[card("Kh"), card("As")], **base
+    assert "value_missed" in _codes(
+        Action(ActionType.CHECK), equity=0.85, hole_cards=[card("Kh"), card("As")], **base
     )
-    assert "value_missed" in {m["code"] for m in strong}
 
 
-# ------------------------------------------------------------------ 保守参考动作
-
-
-def _legal(**kw) -> LegalActions:
-    defaults = dict(
-        can_fold=True,
-        can_check=False,
-        can_call=False,
-        call_amount=0,
-        actual_call_amount=0,
-        is_short_all_in_call=False,
-        can_bet=False,
-        min_bet=0,
-        max_bet=0,
-        can_raise=False,
-        min_raise_to=0,
-        max_raise_to=0,
+def test_detect_mistakes_scales_fair_share_with_opponents() -> None:
+    # 五人底池的公平份额是 1/5，价值线降到 0.32；单挑同一份额不够。
+    board = [card("2c"), card("7d"), card("9h")]
+    shared = {
+        "call_ev": None,
+        "pot_odds": None,
+        "to_call": 0,
+        "actual_call": 0,
+        "contested": 0,
+        "can_raise": True,
+        "hole_cards": [card("As"), card("Ad")],
+        "board": board,
+        "reference": Action(ActionType.BET, 40),
+    }
+    assert "value_missed" in _codes(
+        Action(ActionType.CHECK), equity=0.40, opponents=4, **shared
     )
-    defaults.update(kw)
-    return LegalActions(**defaults)
-
-
-def _facing_bet_state(hole, board, pot, street=Street.FLOP) -> GameState:
-    me = PlayerState(seat=0, name="p0", hole_cards=list(hole))
-    villain = PlayerState(seat=1, name="p1")
-    return GameState(
-        street=street,
-        board=tuple(board),
-        pot=pot,
-        current_seat=0,
-        button=0,
-        hand_over=False,
-        players=(me, villain),
+    assert "value_missed" not in _codes(
+        Action(ActionType.CHECK), equity=0.40, opponents=1, **shared
     )
+
+
+def test_detect_mistakes_reference_direction_vetoes_aggression_labels() -> None:
+    # 参考自己在加注时，不把真人的加注标成过度激进；参考在过牌时才标。
+    board = [card("2c"), card("7d"), card("9h")]
+    shared = {
+        "equity": 0.20,
+        "call_ev": -30.0,
+        "pot_odds": 0.40,
+        "to_call": 40,
+        "actual_call": 40,
+        "pot": 60,
+        "contested": 100,
+        "can_raise": True,
+        "hole_cards": [card("8c"), card("3d")],
+        "board": board,
+    }
+    assert "over_aggressive" not in _codes(
+        Action(ActionType.RAISE, 80), reference=Action(ActionType.RAISE, 120), **shared
+    )
+    assert "over_aggressive" in _codes(
+        Action(ActionType.RAISE, 80), reference=Action(ActionType.FOLD), **shared
+    )
+    # 慢玩只在参考自己会加注时出现。
+    strong = {**shared, "equity": 0.95, "call_ev": 80.0}
+    assert "slowplay" in _codes(
+        Action(ActionType.CALL), reference=Action(ActionType.RAISE, 120), **strong
+    )
+    assert "slowplay" not in _codes(
+        Action(ActionType.CALL), reference=Action(ActionType.CALL), **strong
+    )
+
+
+# ------------------------------------------------------------------ 负期望跟注保护
 
 
 def _prob(distribution: list[tuple[Action, float]], action_type: ActionType) -> float:
-    """取分布中某类动作的总概率，便于断言。"""
     return sum(weight for action, weight in distribution if action.type == action_type)
 
 
-def _single(action_type: ActionType, amount: int = 0) -> list[tuple[Action, float]]:
-    """构造只含一个动作（概率 1.0）的基线分布。"""
-    return [(Action(action_type, amount), 1.0)]
+def test_negative_call_ev_moves_only_call_mass_to_fold() -> None:
+    # 众数是跟注且期望为负时，跟注质量挪到弃牌，加注权重保留。
+    baseline = [
+        (Action(ActionType.CALL), 0.7),
+        (Action(ActionType.RAISE, 40), 0.3),
+    ]
+    guarded = _guard_negative_call(baseline, -1.0)
+    assert _prob(guarded, ActionType.FOLD) == pytest.approx(0.7)
+    assert _prob(guarded, ActionType.CALL) == 0.0
+    assert _prob(guarded, ActionType.RAISE) == pytest.approx(0.3)
 
 
-def test_conservative_reference_folds_high_card_to_bet() -> None:
-    # 高张无听牌面对下注：胜率虽高于赔率，但无成手牌，跟注质量应转移到弃牌。
-    state = _facing_bet_state(
-        [card("Ah"), card("Qs")], [card("8h"), card("Th"), card("4d")], pot=30
-    )
-    legal = _legal(can_call=True, call_amount=15)
-    dist = _conservative_distribution(
-        state, legal, state.players[0], eq=0.55, baseline=_single(ActionType.CALL)
-    )
-    assert _prob(dist, ActionType.FOLD) == 1.0
-    assert _prob(dist, ActionType.CALL) == 0.0
+def test_non_negative_call_ev_keeps_the_call() -> None:
+    baseline = [(Action(ActionType.CALL), 1.0)]
+    assert _guard_negative_call(baseline, 0.0) == baseline
+    assert _guard_negative_call(baseline, None) == baseline
 
 
-def test_conservative_reference_calls_top_pair() -> None:
-    # 顶对（底牌与公共牌配对）是真实成手牌，参考动作仍跟注。
-    state = _facing_bet_state(
-        [card("Ah"), card("7d")], [card("Ad"), card("Kc"), card("2s")], pot=30
-    )
-    legal = _legal(can_call=True, call_amount=15)
-    dist = _conservative_distribution(
-        state, legal, state.players[0], eq=0.55, baseline=_single(ActionType.CALL)
-    )
-    assert _prob(dist, ActionType.CALL) == 1.0
+def test_raise_mode_is_not_rewritten_by_negative_call_ev() -> None:
+    # 加注的弃牌权益不在跟注到摊牌这个情景里，负的跟注期望不改写加注众数。
+    baseline = [
+        (Action(ActionType.RAISE, 40), 0.6),
+        (Action(ActionType.CALL), 0.4),
+    ]
+    assert _guard_negative_call(baseline, -5.0) == baseline
 
 
-def test_conservative_reference_calls_strong_draw() -> None:
-    # 同花听牌（补牌数 ≥ 8）即使暂无成手牌，参考动作仍跟注。
-    state = _facing_bet_state(
-        [card("Ts"), card("9s")], [card("As"), card("Ks"), card("2d")], pot=30
+def test_review_equity_ignores_opponent_hole_cards() -> None:
+    # 换掉对手底牌后，同一条公开行动线上的份额与跟注期望不变。
+    hole = {0: [card("As"), card("Ad")], 1: [card("7c"), card("2d")]}
+    board = [card(s) for s in ("2c", "7d", "9h", "3s", "Kd")]
+    moves = [
+        (ActionType.CALL, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.CHECK, 0),
+        (ActionType.CHECK, 0),
+    ]
+    original = _review_for(hole, board, moves)
+    swapped = _review_for(
+        {0: [card("As"), card("Ad")], 1: [card("Ks"), card("Qh")]},
+        board,
+        moves,
     )
-    legal = _legal(can_call=True, call_amount=15)
-    dist = _conservative_distribution(
-        state, legal, state.players[0], eq=0.55, baseline=_single(ActionType.CALL)
-    )
-    assert _prob(dist, ActionType.CALL) == 1.0
-
-
-def test_conservative_reference_folds_dominated_pair() -> None:
-    # 被公共牌高张压制的口袋对（JJ 在 K 高面）面对大注：跟注质量转移到弃牌。
-    state = _facing_bet_state(
-        [card("Jc"), card("Js")], [card(s) for s in ("9d", "Kd", "2h")], pot=240
-    )
-    legal = _legal(can_call=True, call_amount=120)
-    dist = _conservative_distribution(
-        state, legal, state.players[0], eq=0.60, baseline=_single(ActionType.CALL)
-    )
-    assert _prob(dist, ActionType.FOLD) == 1.0
-    assert _prob(dist, ActionType.CALL) == 0.0
-
-
-def test_conservative_reference_calls_overpair() -> None:
-    # 超对不被公共牌压制，赔率有余量时参考动作仍跟注。
-    state = _facing_bet_state(
-        [card("Ac"), card("Ad")], [card(s) for s in ("9d", "Kd", "2h")], pot=240
-    )
-    legal = _legal(can_call=True, call_amount=120)
-    dist = _conservative_distribution(
-        state, legal, state.players[0], eq=0.60, baseline=_single(ActionType.CALL)
-    )
-    assert _prob(dist, ActionType.CALL) == 1.0
-
-
-def test_conservative_reference_halves_margin_for_strong_draw() -> None:
-    # 强听牌（同花听牌 9 补牌）余量折半：胜率 0.4570 可跟半池，0.4200 仍弃牌。
-    board = [card(s) for s in ("Jh", "8h", "Kh", "7c")]
-    state = _facing_bet_state(
-        [card("2h"), card("2d")], board, pot=360, street=Street.TURN
-    )
-    legal = _legal(can_call=True, call_amount=180)
-    calls = _conservative_distribution(
-        state, legal, state.players[0], eq=0.4570, baseline=_single(ActionType.CALL)
-    )
-    assert _prob(calls, ActionType.CALL) == 1.0
-    folds = _conservative_distribution(
-        state, legal, state.players[0], eq=0.4200, baseline=_single(ActionType.CALL)
-    )
-    assert _prob(folds, ActionType.FOLD) == 1.0
-
-
-def test_conservative_reference_allows_cheap_call_with_high_card() -> None:
-    # 跟注额不超过底池 1/3 时放宽牌力要求，高张可便宜看牌。
-    state = _facing_bet_state(
-        [card("Ah"), card("Qs")], [card("8h"), card("Th"), card("4d")], pot=60
-    )
-    legal = _legal(can_call=True, call_amount=20)
-    dist = _conservative_distribution(
-        state, legal, state.players[0], eq=0.55, baseline=_single(ActionType.CALL)
-    )
-    assert _prob(dist, ActionType.CALL) == 1.0
-
-
-def test_conservative_reference_shifts_only_call_mass() -> None:
-    # 收窄只转移跟注质量，不改变弃牌等其它动作的权重。
-    state = _facing_bet_state(
-        [card("Ah"), card("Qs")], [card("8h"), card("Th"), card("4d")], pot=30
-    )
-    legal = _legal(can_call=True, call_amount=15)
-    baseline = [(Action(ActionType.CALL), 0.6), (Action(ActionType.FOLD), 0.4)]
-    dist = _conservative_distribution(state, legal, state.players[0], eq=0.55, baseline=baseline)
-    assert _prob(dist, ActionType.FOLD) == pytest.approx(1.0)
-    assert _prob(dist, ActionType.CALL) == 0.0
-
-
-def test_conservative_reference_checks_weak_kicker_top_pair() -> None:
-    # 弱踢脚顶对无人下注：把价值下注质量转移到过牌。
-    state = _facing_bet_state(
-        [card("6h"), card("As")],
-        [card(s) for s in ("Qs", "Tc", "Ad", "2h", "8s")],
-        pot=630,
-        street=Street.RIVER,
-    )
-    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=630)
-    dist = _conservative_distribution(
-        state, legal, state.players[0], eq=0.85, baseline=_single(ActionType.BET, 630)
-    )
-    assert _prob(dist, ActionType.CHECK) == 1.0
-    assert _prob(dist, ActionType.BET) == 0.0
-
-
-def test_conservative_reference_keeps_strong_kicker_value_bet() -> None:
-    # 强踢脚顶对（K 高于公共牌第二高的 Q）不属弱踢脚，价值下注保留。
-    state = _facing_bet_state(
-        [card("Kh"), card("As")], [card("Qs"), card("Tc"), card("Ad")], pot=100
-    )
-    legal = _legal(can_check=True, can_bet=True, min_bet=10, max_bet=100)
-    dist = _conservative_distribution(
-        state, legal, state.players[0], eq=0.85, baseline=_single(ActionType.BET, 100)
-    )
-    assert _prob(dist, ActionType.BET) == 1.0
-
-
-def test_conservative_reference_keeps_raise_and_fold() -> None:
-    # 加注与弃牌不属于「宽松跟注」，参考分布原样沿用基线。
-    state = _facing_bet_state(
-        [card("3s"), card("3c")], [card("3d"), card("Kc"), card("2s")], pot=30
-    )
-    legal = _legal(
-        can_call=True, call_amount=15, can_raise=True, min_raise_to=30, max_raise_to=1000
-    )
-    raise_dist = _single(ActionType.RAISE, 60)
-    assert (
-        _conservative_distribution(state, legal, state.players[0], eq=0.95, baseline=raise_dist)
-        == raise_dist
-    )
-    fold_dist = _single(ActionType.FOLD)
-    assert (
-        _conservative_distribution(state, legal, state.players[0], eq=0.10, baseline=fold_dist)
-        == fold_dist
-    )
+    assert [item["equity"] for item in original["decisions"]] == [
+        item["equity"] for item in swapped["decisions"]
+    ]
+    assert [item["call_ev"] for item in original["decisions"]] == [
+        item["call_ev"] for item in swapped["decisions"]
+    ]

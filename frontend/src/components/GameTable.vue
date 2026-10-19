@@ -1006,9 +1006,6 @@ onUnmounted(() => {
               <span v-if="d.pot_odds != null">赔率 {{ pct(d.pot_odds) }}</span>
               <span v-if="d.call_ev != null">跟注 EV {{ evText(d.call_ev) }}</span>
             </div>
-            <div v-if="d.is_short_all_in_call" class="review-row muted">
-              <span>短码全下尚未建立逐池资格与 EV 模型，未显示单池赔率和跟注 EV。</span>
-            </div>
             <div v-for="(m, k) in d.mistakes" :key="k" class="mistake" :class="mistakeClass(m.severity)">
               {{ m.message }}
             </div>

@@ -60,10 +60,10 @@ def _key(**overrides) -> str:
 
 def test_reference_identity_is_declared() -> None:
     assert reference_identity() == {
-        "reference_strategy": "heuristic-conservative",
-        "reference_version": 1,
-        "evaluation_version": 1,
-        "reference_coverage": "vs-random",
+        "reference_strategy": "mixed-tight-normal",
+        "reference_version": 2,
+        "evaluation_version": 2,
+        "reference_coverage": "action-line-weighted",
     }
 
 
@@ -71,8 +71,7 @@ def test_review_uses_the_single_source_identity() -> None:
     review = _sample_review()
     for key, value in reference_identity().items():
         assert review[key] == value
-    # 兼容字段取值保持不变。
-    assert review["reference_strategy"] == "heuristic-conservative"
+    assert review["reference_strategy"] == "mixed-tight-normal"
 
 
 def test_review_endpoint_declares_versions() -> None:
@@ -83,10 +82,10 @@ def test_review_endpoint_declares_versions() -> None:
     ).json()
     body = client.get(f"/hands/{finished['last_hand_id']}/review").json()
 
-    assert body["reference_strategy"] == "heuristic-conservative"
+    assert body["reference_strategy"] == "mixed-tight-normal"
     assert body["reference_version"] == REFERENCE_VERSION
     assert body["evaluation_version"] == EVALUATION_VERSION
-    assert body["reference_coverage"] == "vs-random"
+    assert body["reference_coverage"] == "action-line-weighted"
 
 
 # ------------------------------------------------------------------ 缓存键契约

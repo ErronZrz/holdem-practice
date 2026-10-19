@@ -13,14 +13,14 @@ from app.storage import repository
 from app.storage.models import CoachExplanationModel
 
 # 提示词结构变化时递增，已缓存的解读随之失效。
-PROMPT_SCHEMA_VERSION = 1
+PROMPT_SCHEMA_VERSION = 2
 _REASONING_SUMMARY_LIMIT = 500
 _EMPTY = "教练解读暂时不可用，请稍后再试"
 
 _SYSTEM_PROMPT = (
     "你是德州扑克练习里的复盘教练。请只用中文，用两三句话点评这一个决策。\n"
     "只能依据给出的事实：不要改写玩家动作、胜率、赔率、跟注期望或已标出的问题。\n"
-    "参考动作来自启发式加保守收窄，只供对照。\n"
+    "参考动作来自紧手标准模式，只供对照。\n"
     "已公开摊牌之外的对手底牌是未知的，不要猜测具体牌面。"
 )
 

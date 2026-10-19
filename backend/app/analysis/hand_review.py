@@ -1,72 +1,67 @@
-"""复盘分析：从一手牌历史确定性重放，对真人每个决策点做轻量 EV 分析与错误检测。
+"""复盘分析：从一手牌历史确定性重放，对真人每个决策点做份额估计与错误检测。
 
-复盘只在牌局结束后进行，此时所有底牌与公共牌均已公开，因此可以：
-- 确定性重放整手动作轨迹（复用引擎规则），重建每个决策点的局面；
-- 用蒙特卡洛估算「自己底牌面对随机对手范围」的摊牌胜率——与打牌时的信息边界一致，
-  不读取对手真实底牌来算胜率，避免上帝视角作弊；
-- 给出轻量 EV 参考量（胜率、底池赔率、跟注期望收益）与明显错误标记；
-- 附上「保守参考策略在同一局面会怎么做」作为对比：以启发式 Bot 的动作概率分布为基线，
-  翻牌后面对下注时额外要求赔率有余量与可继续的牌力（真实成手牌或强听牌，且成手牌不被
-  公共牌高张压制），强听牌的余量要求放宽；无人下注时弱踢脚顶对不做价值下注；
-  避免用高张盲目跟注、用被压制的对子跟注、用弱踢脚顶对薄价值下注。
+复盘只在牌局结束后进行，重放整手动作以重建每个决策点。份额与跟注期望只使用英雄底牌、
+公共牌和截至该决策点的公开行动，不读取对手真实底牌。参考动作来自紧手标准模式；
+跟注是众数且跟注期望为负时，把跟注质量挪到弃牌。加注不因跟注期望被改写。
+错误来自份额、跟注期望和牌力门槛；与参考众数不同本身不是错误，参考动作只用来否决
+与参考自己方向相反的标记。
 
-本模块只读引擎公开状态、不修改引擎，属于 analysis 层对 poker 层公开能力的消费。
-
-对外声明的是**参考契约**而非对手目标：参考分布由策略层唯一事实源生产，本层只做保守收窄与
-错误判定，不另写一套与策略重复的分支判据；参考动作与其分布众数仅作展示，错误只来自既有判据。
+本模块只读引擎公开状态，不修改引擎。
 """
 
 import random
 from collections.abc import Sequence
 
+from app.analysis.action_line_equity import ActionLineTracker, estimate_decision
 from app.analysis.reference_identity import reference_declaration
-from app.poker.actions import Action, ActionType, LegalActions
+from app.poker.actions import Action, ActionType
 from app.poker.cards import Card, card_from_str
 from app.poker.engine import PokerEngine
-from app.poker.equity import equity
 from app.poker.evaluator import evaluate
 from app.poker.hand import HandCategory
-from app.poker.state import GameState, PlayerState, Street
-from app.strategy.heuristic import HeuristicStrategy, draw_outs
+from app.strategy.heuristic import draw_outs
+from app.strategy.mixed_context import MixedSummaryTracker, mixed_state
+from app.strategy.mixed_policy import MIXED_DISTRIBUTION_UNITS, HandMode, MixedDistribution
+from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V13, MixedLocalStrategy
+from app.strategy.projection import project_for_actor
 
-# 复盘胜率采样数：高于策略层的 500，复盘可接受更慢以求更稳。
+# 复盘采样数与固定种子：牌局结束后可以多采样，结果必须可复现。
 _EQUITY_SAMPLES = 1000
-# 复盘与 Bot 对比使用的固定随机种子，保证结果可复现。
 _REVIEW_SEED = 0
 
-# 弃牌放弃正 EV 的容差基准：胜率需高出底池赔率这么多才判「该跟却弃」。
+# 弃牌放弃正期望的容差：跟注占底池比例越大，要求的正期望越高。
 _FOLD_EV_MARGIN = 0.15
-# 容差随「跟注占底池比例」放大的系数：注越大，对手范围越强，vs 随机胜率越偏乐观。
 _FOLD_BET_SCALE = 0.10
-# 翻牌前误弃的胜率下限：vs 随机胜率无法反映加注范围，踢脚弱的高张牌易被误判。
-_FOLD_MIN_EQ_PREFLOP = 0.55
-# 跟注赔率不足的容差：胜率需低于底池赔率这么多才判错误，避免 EV 约等于 0 的边缘误报。
-_BAD_CALL_EQ_MARGIN = 0.03
-# 价值下注胜率阈值（复盘口径比策略层更保守，降低薄价值过牌的误报）。
-_VALUE_BET_EQ = 0.80
-# 下注过小的胜率阈值与额度比例（下注额 < 底池 / 2 视为过小）。
-_UNDERBET_EQ = 0.80
+# 跟注亏损需超过竞争层的这个比例，才避免把接近零的期望判成错误。
+_BAD_CALL_FRACTION = 0.03
+# 相对单挑公平份额的倍数。单挑时公平份额是 1/2，这些倍数与原先的固定胜率线重合。
+_VALUE_FAIR_SCALE = 1.6
+_SLOWPLAY_FAIR_SCALE = 1.8
+_AIR_FAIR_SCALE = 0.5
+# 下注额小于底池的这个比例视为过小。
 _UNDERBET_DEN = 2
-# 慢玩（强牌面对下注只跟不加）胜率阈值。
-_SLOWPLAY_EQ = 0.90
-# 纯空气胜率阈值（与 heuristic 保持一致）。
-_AIR_EQ = 0.25
-# 低胜率加注视为过度激进的上限。
-_OVER_AGGRESSIVE_EQ = 0.50
-# 保守参考动作所需的强听牌补牌数下限（开放式顺子 / 同花听牌）。
+# 强听牌补牌数下限（开放式顺子 / 同花听牌）。
 _STRONG_DRAW_OUTS = 8
-# 保守参考动作的小注例外：跟注额不超过底池的 1/3 时放宽牌力要求，高张也可便宜看牌。
+# 跟注额不超过底池的这个比例时，放宽可继续牌力的要求。
 _SMALL_BET_NUM = 1
 _SMALL_BET_DEN = 3
-# 强听牌的余量折扣：听牌的胜率主要来自补牌、隐含赔率更高，面对下注不必要求满额余量。
-_DRAW_MARGIN_SCALE = 0.5
 
 
-def _fold_margin(to_call: int, pot: int) -> float:
-    """误弃判定所需的胜率优势：跟注占底池比例越大，要求越高。"""
-    if pot <= 0:
-        return _FOLD_EV_MARGIN
-    return _FOLD_EV_MARGIN + _FOLD_BET_SCALE * (to_call / pot)
+def _call_ev_margin(actual_call: int, pot: int, contested: int, big_blind: int) -> float:
+    """弃牌仍算明显正期望时，跟注期望需要超过的筹码数。"""
+    ratio = (actual_call / pot) if pot > 0 else 0.0
+    scaled = (_FOLD_EV_MARGIN + _FOLD_BET_SCALE * ratio) * contested
+    return max(float(big_blind), scaled)
+
+
+def _bad_call_tolerance(contested: int, big_blind: int) -> float:
+    """跟注亏损在这个幅度以内不标错误。"""
+    return max(float(big_blind), _BAD_CALL_FRACTION * contested)
+
+
+def _fair_share(opponents: int) -> float:
+    """当前未弃牌人数下的平均份额。"""
+    return 1.0 / (opponents + 1)
 
 
 def _strong_draw(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
@@ -74,19 +69,6 @@ def _strong_draw(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
     if not 3 <= len(board) < 5:
         return False
     return draw_outs(list(hole_cards), tuple(board)) >= _STRONG_DRAW_OUTS
-
-
-def _call_margin(
-    hole_cards: Sequence[Card],
-    board: Sequence[Card],
-    to_call: int,
-    pot: int,
-) -> float:
-    """跟注所需的胜率余量：强听牌折半，其余按跟注占底池比例放大。"""
-    margin = _fold_margin(to_call, pot)
-    if _strong_draw(hole_cards, board):
-        return margin * _DRAW_MARGIN_SCALE
-    return margin
 
 
 def _is_made_hand(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
@@ -108,8 +90,8 @@ def _is_made_hand(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
 def _dominated_pair(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
     """是否「一对且该对低于公共牌最高点数」：被公共牌高张压制的成手牌。
 
-    作为跟注侧的牌力质量门槛，与价值下注侧的弱踢脚顶对门槛对称：这类牌面对下注时
-    只能赢对手诈唬，兑现能力差。顶对与超对不受影响；两对、三条等更强牌力不适用。
+    作为跟注侧的牌力质量门槛：这类牌面对下注时只能赢对手诈唬。顶对与超对不受影响；
+    两对、三条等更强牌力不适用。
     """
     if len(board) < 3:
         return False
@@ -140,7 +122,7 @@ def _has_playable_strength(
 
 
 def _weak_kicker_top_pair(hole_cards: Sequence[Card], board: Sequence[Card]) -> bool:
-    """是否「顶对 + 弱踢脚」，作为价值下注的牌力质量门槛（与误弃的牌力要求对称）。
+    """是否「顶对 + 弱踢脚」，作为价值下注的牌力质量门槛。
 
     判定条件：最强牌力恰为一对、该对由底牌配中公共牌最高点数，且另一张底牌（踢脚）
     低于公共牌去重后第二高的点数。超对、两对、三条等更强牌力不适用；仅靠公共牌
@@ -160,61 +142,76 @@ def _weak_kicker_top_pair(hole_cards: Sequence[Card], board: Sequence[Card]) -> 
     return hole_ranks[1] < board_ranks[1]
 
 
-def _shift_mass(
-    distribution: list[tuple[Action, float]],
-    from_type: ActionType,
-    to_action: Action,
-) -> list[tuple[Action, float]]:
-    """把某类动作的概率质量整体转移到目标动作，用于复盘的保守收窄。
+def _mode_action(distribution: list[tuple[Action, float]]) -> Action:
+    """取分布中概率最高的动作（并列时取列表靠前者）。"""
+    return max(distribution, key=lambda item: item[1])[0]
 
-    目标动作已在分布中则叠加权重，否则新增一项；无该类动作时原样返回。
-    """
-    moved = sum(weight for action, weight in distribution if action.type == from_type)
+
+def _move_call_mass_to_fold(
+    distribution: list[tuple[Action, float]],
+) -> list[tuple[Action, float]]:
+    """把跟注概率质量挪到弃牌。没有跟注质量时原样返回。"""
+    moved = sum(weight for action, weight in distribution if action.type == ActionType.CALL)
     if moved <= 0.0:
         return distribution
-    kept = [(action, weight) for action, weight in distribution if action.type != from_type]
-    for i, (action, weight) in enumerate(kept):
-        if action.type == to_action.type:
-            kept[i] = (action, weight + moved)
+    kept = [(action, weight) for action, weight in distribution if action.type != ActionType.CALL]
+    for index, (action, weight) in enumerate(kept):
+        if action.type == ActionType.FOLD:
+            kept[index] = (action, weight + moved)
             return kept
-    return [*kept, (to_action, moved)]
+    return [*kept, (Action(ActionType.FOLD), moved)]
 
 
-def _conservative_distribution(
-    snapshot: GameState,
-    legal: LegalActions,
-    me: PlayerState,
-    eq: float,
-    baseline: list[tuple[Action, float]],
+def _guard_negative_call(
+    distribution: list[tuple[Action, float]],
+    call_ev: float | None,
 ) -> list[tuple[Action, float]]:
-    """在启发式基线分布上做保守收窄，返回复盘参考分布。
-
-    翻牌后面对下注：胜率对底池赔率无余量或底牌无可继续的牌力时，把跟注概率质量
-    转移到弃牌（跟注额很小时放宽，强听牌的余量要求放宽）；翻牌后无人下注：
-    弱踢脚顶对不做价值下注，把下注质量转移到过牌。翻牌前与其它动作原样沿用基线。
-    """
-    if snapshot.street == Street.PREFLOP:
-        return baseline
-    if legal.call_amount > 0:
-        pot_odds = legal.call_amount / (snapshot.pot + legal.call_amount)
-        margin = _call_margin(
-            me.hole_cards, snapshot.board, legal.call_amount, snapshot.pot
-        )
-        has_margin = eq > pot_odds + margin
-        playable = _has_playable_strength(
-            me.hole_cards, snapshot.board, legal.call_amount, snapshot.pot
-        )
-        if has_margin and playable:
-            return baseline
-        return _shift_mass(baseline, ActionType.CALL, Action(ActionType.FOLD))
-    if _weak_kicker_top_pair(me.hole_cards, snapshot.board):
-        return _shift_mass(baseline, ActionType.BET, Action(ActionType.CHECK))
-    return baseline
+    """众数是跟注且跟注期望为负时，把跟注质量挪到弃牌。加注保持不动。"""
+    if call_ev is None or call_ev >= 0.0:
+        return distribution
+    if _mode_action(distribution).type != ActionType.CALL:
+        return distribution
+    return _move_call_mass_to_fold(distribution)
 
 
-def _mode_action(distribution: list[tuple[Action, float]]) -> Action:
-    """取分布中概率最高的动作作为参考动作（并列时取列表靠前者）。"""
-    return max(distribution, key=lambda item: item[1])[0]
+def _distribution_rows(selected: MixedDistribution) -> list[tuple[Action, float]]:
+    """把整数单位的混合分布换成概率。零单位候选不进入展示。"""
+    scale = float(MIXED_DISTRIBUTION_UNITS)
+    rows: list[tuple[Action, float]] = []
+    for item in selected.candidates:
+        if item.units <= 0:
+            continue
+        rows.append((Action(item.action, item.amount), item.units / scale))
+    return rows
+
+
+def _present_distribution(
+    distribution: list[tuple[Action, float]],
+    mode: Action,
+) -> list[dict]:
+    """按概率从高到低展示，并把四舍五入的余数放在众数上，使展示总和为 1。"""
+    ordered = sorted(
+        distribution,
+        key=lambda item: (item[1], item[0] == mode),
+        reverse=True,
+    )
+    shown = [round(weight, 4) for _action, weight in ordered]
+    mode_index = next(
+        (index for index, (action, _weight) in enumerate(ordered) if action == mode),
+        0,
+    )
+    if shown:
+        shown[mode_index] = round(shown[mode_index] + (1.0 - sum(shown)), 4)
+        top = max(shown)
+        if shown[mode_index] + 1e-9 < top:
+            donor = shown.index(top)
+            gap = round(top - shown[mode_index], 4)
+            shown[donor] = round(shown[donor] - gap, 4)
+            shown[mode_index] = round(shown[mode_index] + gap, 4)
+    return [
+        {"action": action.type.value, "amount": action.amount, "probability": probability}
+        for (action, _weight), probability in zip(ordered, shown, strict=True)
+    ]
 
 
 def _history_action(record: dict) -> Action:
@@ -235,47 +232,67 @@ def _replay_action(engine: PokerEngine, seat: int, action: Action) -> Action:
 def _detect_mistakes(
     action: Action,
     equity: float,
+    call_ev: float | None,
     pot_odds: float | None,
     to_call: int,
+    actual_call: int,
     pot: int,
+    contested: int,
     can_raise: bool,
+    opponents: int,
     hole_cards: Sequence[Card],
     board: Sequence[Card],
     big_blind: int,
+    reference: Action,
 ) -> list[dict]:
-    """按既定规则对单个决策点做错误检测，返回命中的错误标记列表。"""
+    """按份额和跟注期望标记明显错误。参考动作只用于方向否决。"""
     postflop = len(board) > 0
+    fair = _fair_share(opponents)
+    value_bar = _VALUE_FAIR_SCALE * fair
+    slowplay_bar = _SLOWPLAY_FAIR_SCALE * fair
+    air_bar = _AIR_FAIR_SCALE * fair
     # 翻牌前跟注额不超过一个大盲（补齐盲注 / limp）属廉价看牌，不判赔率不足。
     cheap_preflop = not postflop and to_call <= big_blind
     mistakes: list[dict] = []
+    facing_bet = to_call > 0 and call_ev is not None and pot_odds is not None
 
-    if to_call > 0:
-        # 面对下注：赔率错误 +（翻牌后）慢玩 / 过度激进。
+    if facing_bet:
+        assert call_ev is not None
         if (
             action.type == ActionType.CALL
-            and pot_odds is not None
             and not cheap_preflop
-            and equity < pot_odds - _BAD_CALL_EQ_MARGIN
+            and call_ev < -_bad_call_tolerance(contested, big_blind)
         ):
+            shown = int(round(call_ev))
             mistakes.append(
                 {
                     "code": "bad_call",
                     "severity": "error",
-                    "message": f"胜率 {equity:.0%} 明显低于底池赔率 {pot_odds:.0%}，跟注赔率不足",
+                    "message": f"跟注期望 {shown}，亏损超过容差，跟注赔率不足",
                 }
             )
-        if action.type == ActionType.FOLD and pot_odds is not None:
-            # 翻牌前胜率不足时，弃牌不构成明显错误；
-            # 翻牌后还要求底牌有可继续的牌力，与保守参考动作的跟注标准一致。
-            strong_enough = postflop or equity >= _FOLD_MIN_EQ_PREFLOP
+        if action.type == ActionType.FOLD:
+            # 翻牌前份额不足时，弃牌不构成明显错误；
+            # 翻牌后还要求底牌有可继续的牌力。
             playable = not postflop or _has_playable_strength(hole_cards, board, to_call, pot)
-            margin = _call_margin(hole_cards, board, to_call, pot)
-            if strong_enough and playable and equity > pot_odds + margin:
-                message = f"胜率 {equity:.0%} 明显高于赔率 {pot_odds:.0%}，弃牌可能放弃正 EV"
+            strong_enough = postflop or equity >= fair
+            margin = _call_ev_margin(actual_call, pot, contested, big_blind)
+            if playable and strong_enough and call_ev > margin:
+                shown = int(round(call_ev))
                 mistakes.append(
-                    {"code": "bad_fold", "severity": "warning", "message": message}
+                    {
+                        "code": "bad_fold",
+                        "severity": "warning",
+                        "message": f"跟注期望 {shown}，弃牌可能放弃正 EV",
+                    }
                 )
-        if postflop and action.type == ActionType.CALL and equity >= _SLOWPLAY_EQ and can_raise:
+        if (
+            postflop
+            and action.type == ActionType.CALL
+            and can_raise
+            and equity >= slowplay_bar
+            and reference.type == ActionType.RAISE
+        ):
             mistakes.append(
                 {
                     "code": "slowplay",
@@ -283,7 +300,12 @@ def _detect_mistakes(
                     "message": f"强牌（胜率 {equity:.0%}）只跟不加，慢玩可能丢失价值",
                 }
             )
-        if postflop and action.type == ActionType.RAISE and equity < _OVER_AGGRESSIVE_EQ:
+        if (
+            postflop
+            and action.type == ActionType.RAISE
+            and equity < fair
+            and reference.type not in (ActionType.BET, ActionType.RAISE)
+        ):
             mistakes.append(
                 {
                     "code": "over_aggressive",
@@ -292,12 +314,12 @@ def _detect_mistakes(
                 }
             )
     elif postflop:
-        # 无人下注：价值丢失 / 下注过小 / 空气诈唬。
-        # 弱踢脚顶对属薄价值，过牌不算丢失价值，与参考动作共用同一门槛。
+        reference_bets = reference.type == ActionType.BET
         if (
             action.type == ActionType.CHECK
-            and equity >= _VALUE_BET_EQ
+            and equity >= value_bar
             and not _weak_kicker_top_pair(hole_cards, board)
+            and reference_bets
         ):
             mistakes.append(
                 {
@@ -307,7 +329,12 @@ def _detect_mistakes(
                 }
             )
         if action.type == ActionType.BET:
-            if equity >= _UNDERBET_EQ and action.amount * _UNDERBET_DEN < pot:
+            if (
+                equity >= value_bar
+                and action.amount * _UNDERBET_DEN < pot
+                and reference_bets
+                and reference.amount > action.amount
+            ):
                 mistakes.append(
                     {
                         "code": "underbet",
@@ -315,7 +342,7 @@ def _detect_mistakes(
                         "message": f"强牌下注偏小（{action.amount}，底池 {pot}）",
                     }
                 )
-            if equity < _AIR_EQ:
+            if equity < air_bar and reference.type == ActionType.CHECK:
                 mistakes.append(
                     {
                         "code": "air_bluff",
@@ -331,58 +358,66 @@ def _analyze_decision(
     engine: PokerEngine,
     human_seat: int,
     action: Action,
-    reference_bot: HeuristicStrategy,
+    reference_bot: MixedLocalStrategy,
+    context: object,
+    levels: ActionLineTracker,
     rng: random.Random,
 ) -> dict:
-    """分析真人一个决策点：胜率 / 赔率 / EV + 参考 Bot 动作 + 错误检测。"""
+    """分析真人一个决策点：份额 / 赔率 / 跟注期望 + 参考动作 + 错误检测。"""
     snapshot = engine.snapshot()
     legal = engine.legal_actions()
     hero_state = snapshot.players[human_seat]
-    opponents = sum(1 for p in snapshot.players if p.seat != human_seat and not p.folded)
-
-    eq = equity(hero_state.hole_cards, snapshot.board, opponents, rng, _EQUITY_SAMPLES)
-    to_call = legal.call_amount
-    actual_call_amount = legal.actual_call_amount
-    is_short_all_in_call = legal.is_short_all_in_call
-    reference_pot_odds = to_call / (snapshot.pot + to_call) if to_call > 0 else None
-    reference_call_ev = (
-        round(eq * (snapshot.pot + to_call) - to_call) if to_call > 0 else None
+    live = levels.live_opponents(snapshot.players, human_seat)
+    projection = engine.candidate_call_pot_projection()
+    valued = estimate_decision(
+        hero_cards=hero_state.hole_cards,
+        board=snapshot.board,
+        opponents=live,
+        projection=projection,
+        pot=snapshot.pot,
+        hero_seat=human_seat,
+        actual_call_amount=legal.actual_call_amount,
+        samples=_EQUITY_SAMPLES,
+        rng=rng,
     )
-    baseline = reference_bot.action_distribution(snapshot, legal)
-    distribution = _conservative_distribution(snapshot, legal, hero_state, eq, baseline)
+    projected = mixed_state(project_for_actor(snapshot), context)
+    selected = reference_bot.distribution_for(projected, legal, mode=HandMode.NORMAL)
+    baseline = _distribution_rows(selected)
+    distribution = _guard_negative_call(baseline, valued.call_ev)
     bot_action = _mode_action(distribution)
+    to_call = legal.call_amount
+    opponents = len(live)
 
     return {
         "street": snapshot.street.name.lower(),
         "board": [str(c) for c in snapshot.board],
         "pot": snapshot.pot,
         "to_call": to_call,
-        "actual_call_amount": actual_call_amount,
-        "is_short_all_in_call": is_short_all_in_call,
+        "actual_call_amount": legal.actual_call_amount,
+        "is_short_all_in_call": legal.is_short_all_in_call,
         "opponents": opponents,
-        "equity": round(eq, 4),
-        "pot_odds": (
-            round(reference_pot_odds, 4)
-            if reference_pot_odds is not None and not is_short_all_in_call
-            else None
-        ),
-        "call_ev": reference_call_ev if not is_short_all_in_call else None,
+        "equity": round(valued.equity, 4),
+        "pot_odds": None if valued.pot_odds is None else round(valued.pot_odds, 4),
+        # 展示四舍五入到筹码单位；错误判定使用上面的浮点期望，避免一个筹码的舍入改判。
+        "call_ev": None if valued.call_ev is None else int(round(valued.call_ev)),
         "action": {"action": action.type.value, "amount": action.amount},
         "bot_action": {"action": bot_action.type.value, "amount": bot_action.amount},
-        "bot_distribution": [
-            {"action": act.type.value, "amount": act.amount, "probability": round(weight, 4)}
-            for act, weight in sorted(distribution, key=lambda item: item[1], reverse=True)
-        ],
+        "bot_distribution": _present_distribution(distribution, bot_action),
         "mistakes": _detect_mistakes(
             action=action,
-            equity=eq,
-            pot_odds=reference_pot_odds,
+            equity=valued.equity,
+            call_ev=valued.call_ev,
+            pot_odds=valued.pot_odds,
             to_call=to_call,
+            actual_call=legal.actual_call_amount,
             pot=snapshot.pot,
+            contested=valued.contested,
             can_raise=legal.can_raise,
+            opponents=opponents,
             hole_cards=hero_state.hole_cards,
             board=snapshot.board,
             big_blind=engine.big_blind,
+            reference=bot_action,
         ),
     }
 
@@ -400,11 +435,11 @@ def build_review(history: dict) -> dict:
     hole_cards: dict[int, list[Card]] = {}
     starting_stacks: dict[int, int] = {}
     human_seat: int | None = None
-    for p in history["players"]:
-        seat = p["seat"]
-        hole_cards[seat] = [card_from_str(c) for c in p["hole_cards"]]
-        starting_stacks[seat] = p["starting_stack"]
-        if p["is_human"]:
+    for player in history["players"]:
+        seat = player["seat"]
+        hole_cards[seat] = [card_from_str(c) for c in player["hole_cards"]]
+        starting_stacks[seat] = player["starting_stack"]
+        if player["is_human"]:
             human_seat = seat
     if human_seat is None:
         raise ValueError("历史中没有标记真人座位")
@@ -416,6 +451,23 @@ def build_review(history: dict) -> dict:
         engine.players[seat].stack = stack
     engine.start_hand_with(button, hole_cards, board)
 
+    # 座位集合只放真人自己，分派后的风格固定为紧手，手模式固定为标准。
+    reference_bot = MixedLocalStrategy(
+        seed=_REVIEW_SEED,
+        bot_seats=(human_seat,),
+        identifier=MIXED_STRATEGY_IDENTIFIER_V13,
+    )
+    tracker = MixedSummaryTracker()
+    tracker.begin_hand(
+        hand_number=int(history["hand_number"]),
+        num_players=num_players,
+        small_blind=small_blind,
+        big_blind=big_blind,
+        bot_seats=(human_seat,),
+        history=engine.history,
+    )
+    levels = ActionLineTracker(num_players)
+
     decisions: list[dict] = []
     for record in history["actions"]:
         if record["action"] in ("small_blind", "big_blind"):
@@ -424,13 +476,29 @@ def build_review(history: dict) -> dict:
         if engine.current_seat != seat:
             raise ValueError(f"重放状态不一致：期望座位 {seat}，实际 {engine.current_seat}")
         action = _history_action(record)
+        levels.begin_street(str(record["street"]))
         if seat == human_seat:
-            rng = random.Random(_REVIEW_SEED)
-            reference_bot = HeuristicStrategy(seed=_REVIEW_SEED)
             decisions.append(
-                _analyze_decision(engine, human_seat, action, reference_bot, rng)
+                _analyze_decision(
+                    engine,
+                    human_seat,
+                    action,
+                    reference_bot,
+                    tracker.context(),
+                    levels,
+                    random.Random(_REVIEW_SEED),
+                )
             )
+        pot_before = engine.pot
+        levels.commit(
+            seat=seat,
+            action=action.type.value,
+            amount=action.amount,
+            pot_before=pot_before,
+            big_blind=big_blind,
+        )
         engine.apply_action(_replay_action(engine, seat, action))
+        tracker.consume_after_action(engine.history)
 
     return {
         "hand_number": history["hand_number"],

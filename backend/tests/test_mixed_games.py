@@ -196,8 +196,8 @@ def test_mixed_hand_history_records_the_strategy_identity() -> None:
     assert detail["history"]["schema_version"] == "hand-history.v1"
     review = client.get(f"/hands/{ended['last_hand_id']}/review")
     assert review.status_code == 200
-    # 复盘仍使用独立的保守参考，不随新对手切换。
-    assert review.json()["reference_strategy"] == "heuristic-conservative"
+    # 复盘参考固定为紧手标准，不随本局对手策略切换。
+    assert review.json()["reference_strategy"] == "mixed-tight-normal"
 
 
 def test_summary_resets_between_hands() -> None:
