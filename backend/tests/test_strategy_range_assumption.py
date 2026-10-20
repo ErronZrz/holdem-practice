@@ -571,7 +571,7 @@ def test_contrast_coverage_stays_random_while_review_is_action_line_weighted() -
 def test_production_reference_identity_is_action_line_weighted() -> None:
     identity = reference_identity.reference_identity()
     assert identity["reference_strategy"] == "mixed-tight-normal"
-    assert identity["reference_version"] == 2
+    assert identity["reference_version"] == 3
     assert identity["evaluation_version"] == 2
 
 

@@ -241,6 +241,8 @@ class DecisionExplanation(BaseModel):
     seat: int
     street: str
     explanation: str
+    # 教练认为更合适的动作；纯文本回退或更早的缓存为空。
+    recommended_action: str | None = None
     cached: bool
     provider: str
     model: str

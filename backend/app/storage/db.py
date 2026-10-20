@@ -7,7 +7,7 @@ import os
 from collections.abc import Iterator
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
@@ -34,6 +34,19 @@ def init_db(path: str | None = None) -> None:
     )
     _session_factory = sessionmaker(bind=_engine, expire_on_commit=False)
     Base.metadata.create_all(_engine)
+    _ensure_coach_action_column(_engine)
+
+
+def _ensure_coach_action_column(engine: Engine) -> None:
+    """旧库补上建议动作列。新库已经有这一列，重复启动也不再改表。"""
+    with engine.begin() as connection:
+        rows = connection.execute(text("PRAGMA table_info(coach_explanations)")).fetchall()
+        names = {row[1] for row in rows}
+        if not names or "recommended_action" in names:
+            return
+        connection.execute(
+            text("ALTER TABLE coach_explanations ADD COLUMN recommended_action VARCHAR(16)")
+        )
 
 
 def get_db() -> Iterator[Session]:

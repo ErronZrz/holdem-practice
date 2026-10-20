@@ -389,6 +389,83 @@ def test_readonly_connection_rejects_writes(tmp_path) -> None:
         readonly.close()
 
 
+def test_stored_action_overrides_keyword_inference() -> None:
+    reading = diagnose.coach_reading(
+        "弃牌优于跟注。",
+        mode="fold",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=PROMPT_SCHEMA_VERSION,
+        recommended_action="call",
+    )
+    assert reading["preference"] == "call"
+    assert reading["opposes"] is True
+    assert reading["action_source"] == "stored"
+    assert reading["recommended_action"] == "call"
+    codes = diagnose.classify_point(_point(mode="fold", coach=reading))
+    assert "e_coach_opposes" in codes
+
+
+def test_empty_stored_action_falls_back_to_keywords() -> None:
+    reading = diagnose.coach_reading(
+        "这里应该弃牌。参考动作是加注。",
+        mode="raise",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=PROMPT_SCHEMA_VERSION,
+        recommended_action=None,
+    )
+    assert reading["preference"] == "fold"
+    assert reading["opposes"] is True
+    assert reading["action_source"] == "inferred"
+    assert reading["recommended_action"] is None
+
+
+def test_load_coach_index_reads_the_action_column(tmp_path) -> None:
+    path = tmp_path / "coach.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE coach_explanations ("
+        "hand_id TEXT, action_index INTEGER, explanation TEXT, "
+        "prompt_schema_version INTEGER, model TEXT, created_at TEXT, "
+        "recommended_action TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO coach_explanations VALUES (?, 0, ?, ?, 'm', 't', 'call')",
+        ("h", "应该弃牌。", PROMPT_SCHEMA_VERSION),
+    )
+    index = diagnose.load_coach_index(connection)
+    connection.close()
+    assert index["h"][0]["recommended_action"] == "call"
+
+
+def test_load_coach_index_without_the_action_column(tmp_path) -> None:
+    path = tmp_path / "legacy.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE coach_explanations ("
+        "hand_id TEXT, action_index INTEGER, explanation TEXT, "
+        "prompt_schema_version INTEGER, model TEXT, created_at TEXT)"
+    )
+    connection.execute(
+        "INSERT INTO coach_explanations VALUES ('h', 0, '应该弃牌。', ?, 'm', 't')",
+        (PROMPT_SCHEMA_VERSION,),
+    )
+    index = diagnose.load_coach_index(connection)
+    connection.close()
+    assert index["h"][0]["recommended_action"] is None
+    reading = diagnose.coach_reading(
+        index["h"][0]["explanation"],
+        mode="raise",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=index["h"][0]["schema"],
+        recommended_action=index["h"][0]["recommended_action"],
+    )
+    assert reading["action_source"] == "inferred"
+    assert reading["preference"] == "fold"
+
+
 def test_replay_exposes_features_and_cached_reading() -> None:
     engine = PokerEngine(2, 5, 10, 1000)
     engine.start_hand_with(

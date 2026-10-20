@@ -30,14 +30,15 @@ from app.analysis.hand_review import (  # noqa: E402
     _detect_mistakes,
     _distribution_rows,
     _fair_share,
-    _guard_negative_call,
+    _folding_gives_up_value,
+    _guard_reference_distribution,
     _history_action,
     _mode_action,
     _publish_reference,
     _replay_action,
 )
 from app.llm.coach import PROMPT_SCHEMA_VERSION  # noqa: E402
-from app.poker.actions import Action, ActionType  # noqa: E402
+from app.poker.actions import Action  # noqa: E402
 from app.poker.cards import card_from_str  # noqa: E402
 from app.poker.engine import PokerEngine  # noqa: E402
 from app.strategy.mixed_context import (  # noqa: E402
@@ -410,8 +411,12 @@ def coach_reading(
     raw_amounts: set[int],
     ignore_amounts: set[int] | None = None,
     schema: int | None = None,
+    recommended_action: str | None = None,
 ) -> dict:
-    """从一段教练正文里抽出动作倾向，并和参考众数、金额对照。"""
+    """从一段教练正文里抽出动作倾向，并和参考众数、金额对照。
+
+    库里已经记下建议动作时直接用它比较；空着才退回关键词，并标明是推断。
+    """
     spans = _reference_spans(text)
     attributed: set[str] = set()
     legacy: list[int] = []
@@ -455,8 +460,17 @@ def coach_reading(
         if len(leaders) == 1:
             preference = leaders[0]
             strength = best
-    opposes = preference is not None and strength >= 2 and preference != mode
-    accepts_other = preference is not None and strength == 1 and preference != mode
+    stored = _canonical_action(recommended_action)
+    if stored is not None:
+        preference = stored
+        strength = 3
+        opposes = stored != mode
+        accepts_other = False
+        source = "stored"
+    else:
+        opposes = preference is not None and strength >= 2 and preference != mode
+        accepts_other = preference is not None and strength == 1 and preference != mode
+        source = "inferred"
     return {
         "preference": preference,
         "strength": strength,
@@ -468,8 +482,20 @@ def coach_reading(
         "unknown_amounts": unknown,
         "schema": schema,
         "stale": schema is not None and schema != PROMPT_SCHEMA_VERSION,
+        "recommended_action": stored,
+        "action_source": source,
         "text": text,
     }
+
+
+def _canonical_action(value: object) -> str | None:
+    """只认已经落库的五个动作词。认不出就当作没有结构化动作。"""
+    if not isinstance(value, str):
+        return None
+    token = value.strip().casefold()
+    if token in {"fold", "check", "call", "bet", "raise"}:
+        return token
+    return None
 
 
 def _rows_from_pairs(pairs: list[tuple[Action, float]]) -> list[dict]:
@@ -551,16 +577,8 @@ def _inspect_decision(
     style = reference_bot.style_for(human_seat)
     selected = reference_bot.distribution_for(projected, legal, mode=HandMode.NORMAL)
     raw_pairs = _distribution_rows(selected)
-    guarded_pairs = _guard_negative_call(raw_pairs, valued.call_ev)
-    mode_action = _mode_action(guarded_pairs)
-    published_action, published_rows = _publish_reference(
-        guarded_pairs,
-        mode_action,
-        hero.street_bet,
-        hero.stack,
-    )
-    mistakes = _detect_mistakes(
-        action=action,
+    max_line = max((level for _seat, level in live), default=0)
+    bad_fold = _folding_gives_up_value(
         equity=valued.equity,
         call_ev=valued.call_ev,
         pot_odds=valued.pot_odds,
@@ -573,10 +591,27 @@ def _inspect_decision(
         hole_cards=hero.hole_cards,
         board=snapshot.board,
         big_blind=engine.big_blind,
-        reference=mode_action,
     )
-    fold_probe = _detect_mistakes(
-        action=Action(ActionType.FOLD),
+    guarded_pairs = _guard_reference_distribution(
+        raw_pairs,
+        to_call=legal.call_amount,
+        call_ev=valued.call_ev,
+        equity=valued.equity,
+        opponents=len(live),
+        postflop=len(snapshot.board) > 0,
+        max_line=max_line,
+        bad_fold=bad_fold,
+    )
+    mode_action = _mode_action(guarded_pairs)
+    published_action, published_rows = _publish_reference(
+        guarded_pairs,
+        mode_action,
+        hero.street_bet,
+        hero.stack,
+        legal.actual_call_amount,
+    )
+    mistakes = _detect_mistakes(
+        action=action,
         equity=valued.equity,
         call_ev=valued.call_ev,
         pot_odds=valued.pot_odds,
@@ -603,7 +638,7 @@ def _inspect_decision(
         "big_blind": engine.big_blind,
         "opponents": len(live),
         "opponent_levels": [{"seat": seat, "level": level} for seat, level in live],
-        "max_line": max((level for _seat, level in live), default=0),
+        "max_line": max_line,
         "equity": valued.equity,
         "pot_odds": valued.pot_odds,
         "call_ev": valued.call_ev,
@@ -616,7 +651,7 @@ def _inspect_decision(
         "raw_distribution": raw_rows,
         "mistakes": [item["code"] for item in mistakes],
         "mistake_messages": [item["message"] for item in mistakes],
-        "fold_probe_bad_fold": any(item["code"] == "bad_fold" for item in fold_probe),
+        "fold_probe_bad_fold": bad_fold,
         "style": style.value,
         **scored,
     }
@@ -629,6 +664,11 @@ def _inspect_decision(
             raw_amounts={int(item["amount"]) for item in raw_rows},
             ignore_amounts={legal.call_amount, snapshot.pot, action.amount, engine.big_blind},
             schema=schema,
+            recommended_action=(
+                str(coach_row["recommended_action"])
+                if coach_row.get("recommended_action")
+                else None
+            ),
         )
         point["coach"]["model"] = coach_row.get("model")
     else:
@@ -741,18 +781,30 @@ def _replay(history: dict, *, hand_id: str, coach_rows: dict[int, dict]) -> dict
 
 def load_coach_index(connection: sqlite3.Connection) -> dict[str, dict[int, dict]]:
     """按手牌和决策序号归并教练缓存。同一点保留较新的提示词版本。"""
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(coach_explanations)").fetchall()
+    }
+    has_action = "recommended_action" in columns
+    action_column = ", recommended_action" if has_action else ""
     rows = connection.execute(
-        "SELECT hand_id, action_index, explanation, prompt_schema_version, model, created_at "
-        "FROM coach_explanations"
+        "SELECT hand_id, action_index, explanation, prompt_schema_version, model, created_at"
+        f"{action_column} FROM coach_explanations"
     ).fetchall()
     index: dict[str, dict[int, dict]] = {}
-    for hand_id, action_index, explanation, schema, model, created_at in rows:
+    for row in rows:
+        if has_action:
+            hand_id, action_index, explanation, schema, model, created_at, recommended = row
+        else:
+            hand_id, action_index, explanation, schema, model, created_at = row
+            recommended = None
         bucket = index.setdefault(str(hand_id), {})
         incoming = {
             "explanation": explanation,
             "schema": int(schema),
             "model": model,
             "created_at": str(created_at or ""),
+            "recommended_action": recommended,
         }
         current = bucket.get(int(action_index))
         if current is None or _prefer_coach(incoming, current):
@@ -943,9 +995,10 @@ def _format_point(point: dict) -> list[str]:
     if isinstance(coach, dict):
         preference = coach.get("preference") or "-"
         referenced = "、".join(coach.get("reference_actions") or []) or "-"
+        how = "记录" if coach.get("action_source") == "stored" else "推断"
         stale = " 提示词版本较旧" if coach.get("stale") else ""
         lines.append(
-            f"    教练倾向 {preference}  文中参考动作 {referenced}{stale}"
+            f"    教练倾向 {preference}（{how}）  文中参考动作 {referenced}{stale}"
         )
         if coach.get("legacy_amounts") or coach.get("unknown_amounts"):
             lines.append(

@@ -6,7 +6,13 @@ import app.analysis.hand_review as hand_review_module
 from app.analysis.hand_review import (
     _detect_mistakes,
     _dominated_pair,
+    _fair_share,
+    _folding_gives_up_value,
+    _guard_low_equity_lead,
     _guard_negative_call,
+    _guard_reference_distribution,
+    _mode_action,
+    _publish_reference,
     _reference_chips,
     _weak_kicker_top_pair,
     build_review,
@@ -202,7 +208,11 @@ def test_review_short_call_reports_layered_price(
     assert flop["actual_call_amount"] == 90
     assert flop["pot_odds"] is not None
     assert flop["call_ev"] is not None
-    assert captured == [(100, pytest.approx(flop["pot_odds"]))]
+    # 弃牌探针和正式判据各看一次，两次都按完整欠注，不按短码实付。
+    assert captured == [
+        (100, pytest.approx(flop["pot_odds"])),
+        (100, pytest.approx(flop["pot_odds"])),
+    ]
 
 
 def test_review_reference_counts_all_in_opponent() -> None:
@@ -567,13 +577,38 @@ def _prob(distribution: list[tuple[Action, float]], action_type: ActionType) -> 
     return sum(weight for action, weight in distribution if action.type == action_type)
 
 
-def test_negative_call_ev_moves_only_call_mass_to_fold() -> None:
-    # 众数是跟注且期望为负时，跟注质量挪到弃牌，加注权重保留。
+def _guard_call(distribution, call_ev, *, to_call=40, equity=0.8, opponents=1):
+    return _guard_negative_call(
+        distribution,
+        call_ev,
+        to_call=to_call,
+        equity=equity,
+        opponents=opponents,
+    )
+
+
+def test_negative_call_ev_moves_call_mass_onto_an_existing_fold() -> None:
+    # 份额不低于平均时只挪跟注。弃牌已经在分布里，就累加到那一条，不再另起一条。
+    baseline = [
+        (Action(ActionType.FOLD), 0.1),
+        (Action(ActionType.CALL), 0.6),
+        (Action(ActionType.RAISE, 40), 0.3),
+    ]
+    guarded = _guard_call(baseline, -1.0, equity=0.8)
+    folds = [item for item in guarded if item[0].type == ActionType.FOLD]
+    assert len(folds) == 1
+    assert folds[0][1] == pytest.approx(0.7)
+    assert _prob(guarded, ActionType.CALL) == 0.0
+    assert _prob(guarded, ActionType.RAISE) == pytest.approx(0.3)
+    assert _mode_action(guarded).type == ActionType.FOLD
+
+
+def test_negative_call_ev_adds_fold_when_the_distribution_has_none() -> None:
     baseline = [
         (Action(ActionType.CALL), 0.7),
         (Action(ActionType.RAISE, 40), 0.3),
     ]
-    guarded = _guard_negative_call(baseline, -1.0)
+    guarded = _guard_call(baseline, -1.0, equity=0.8)
     assert _prob(guarded, ActionType.FOLD) == pytest.approx(0.7)
     assert _prob(guarded, ActionType.CALL) == 0.0
     assert _prob(guarded, ActionType.RAISE) == pytest.approx(0.3)
@@ -581,17 +616,160 @@ def test_negative_call_ev_moves_only_call_mass_to_fold() -> None:
 
 def test_non_negative_call_ev_keeps_the_call() -> None:
     baseline = [(Action(ActionType.CALL), 1.0)]
-    assert _guard_negative_call(baseline, 0.0) == baseline
-    assert _guard_negative_call(baseline, None) == baseline
+    assert _guard_call(baseline, 0.0) == baseline
+    assert _guard_call(baseline, None) == baseline
+    assert _guard_call(baseline, -1.0, to_call=0) == baseline
 
 
-def test_raise_mode_is_not_rewritten_by_negative_call_ev() -> None:
-    # 加注的弃牌权益不在跟注到摊牌这个情景里，负的跟注期望不改写加注众数。
+def test_negative_raise_stays_when_equity_is_not_below_fair_share() -> None:
+    # 份额不低于平均时，负的跟注期望只清跟注，加注众数保留。
     baseline = [
         (Action(ActionType.RAISE, 40), 0.6),
         (Action(ActionType.CALL), 0.4),
     ]
-    assert _guard_negative_call(baseline, -5.0) == baseline
+    fair = _fair_share(1)
+    guarded = _guard_call(baseline, -5.0, equity=fair)
+    assert _prob(guarded, ActionType.RAISE) == pytest.approx(0.6)
+    assert _prob(guarded, ActionType.CALL) == 0.0
+    assert _prob(guarded, ActionType.FOLD) == pytest.approx(0.4)
+    assert _mode_action(guarded).type == ActionType.RAISE
+
+
+def test_negative_raise_moves_to_fold_when_equity_is_below_fair_share() -> None:
+    # 份额低于平均时，跟注和加注都归并到同一条弃牌，归并完再取众数。
+    baseline = [
+        (Action(ActionType.RAISE, 40), 0.34),
+        (Action(ActionType.RAISE, 80), 0.33),
+        (Action(ActionType.CALL), 0.33),
+    ]
+    guarded = _guard_call(baseline, -5.0, equity=_fair_share(1) - 0.01)
+    assert len(guarded) == 1
+    assert guarded[0][0].type == ActionType.FOLD
+    assert guarded[0][1] == pytest.approx(1.0)
+    assert _mode_action(guarded).type == ActionType.FOLD
+
+
+def test_low_equity_lead_moves_aggression_onto_check() -> None:
+    baseline = [
+        (Action(ActionType.BET, 180), 0.41),
+        (Action(ActionType.CHECK), 0.24),
+        (Action(ActionType.RAISE, 400), 0.35),
+    ]
+    # 单挑空气线是 0.25。低于这条线时，主动质量收进已有的过牌。
+    below_air = _guard_low_equity_lead(
+        baseline,
+        to_call=0,
+        postflop=True,
+        equity=0.18,
+        opponents=1,
+        max_line=0,
+    )
+    checks = [item for item in below_air if item[0].type == ActionType.CHECK]
+    assert len(checks) == 1
+    assert checks[0][1] == pytest.approx(1.0)
+    assert _mode_action(below_air).type == ActionType.CHECK
+    # 份额高于空气线、但行动线已经偏高且低于平均时，同样收成过牌。
+    high_line = _guard_low_equity_lead(
+        baseline,
+        to_call=0,
+        postflop=True,
+        equity=0.33,
+        opponents=1,
+        max_line=3,
+    )
+    assert _prob(high_line, ActionType.CHECK) == pytest.approx(1.0)
+    assert len([item for item in high_line if item[0].type == ActionType.CHECK]) == 1
+
+
+def test_thin_value_and_preflop_leads_stay() -> None:
+    baseline = [
+        (Action(ActionType.BET, 40), 0.6),
+        (Action(ActionType.CHECK), 0.4),
+    ]
+    # 单挑份额约三分之一、行动线只有溜入档，主动下注保留。
+    thin = _guard_low_equity_lead(
+        baseline,
+        to_call=0,
+        postflop=True,
+        equity=0.33,
+        opponents=1,
+        max_line=1,
+    )
+    assert thin == baseline
+    preflop = _guard_low_equity_lead(
+        [(Action(ActionType.RAISE, 60), 1.0)],
+        to_call=0,
+        postflop=False,
+        equity=0.2,
+        opponents=3,
+        max_line=0,
+    )
+    assert preflop == [(Action(ActionType.RAISE, 60), 1.0)]
+    facing = _guard_low_equity_lead(
+        baseline,
+        to_call=20,
+        postflop=True,
+        equity=0.1,
+        opponents=1,
+        max_line=5,
+    )
+    assert facing == baseline
+
+
+def test_bad_fold_probe_moves_fold_mass_onto_call() -> None:
+    hole = [card("2c"), card("3d")]
+    board = [card("7c"), card("Ah"), card("8h"), card("9c"), card("8s")]
+    shared = {
+        "equity": 0.64,
+        "call_ev": 200.0,
+        "pot_odds": 0.2,
+        "to_call": 100,
+        "actual_call": 100,
+        "pot": 400,
+        "contested": 500,
+        "can_raise": True,
+        "opponents": 1,
+        "hole_cards": hole,
+        "board": board,
+        "big_blind": 20,
+    }
+    assert _folding_gives_up_value(**shared) is True
+    baseline = [
+        (Action(ActionType.FOLD), 0.7),
+        (Action(ActionType.CALL), 0.3),
+    ]
+    guarded = _guard_reference_distribution(
+        baseline,
+        to_call=100,
+        call_ev=200.0,
+        equity=0.64,
+        opponents=1,
+        postflop=True,
+        max_line=0,
+        bad_fold=True,
+    )
+    calls = [item for item in guarded if item[0].type == ActionType.CALL]
+    assert len(calls) == 1
+    assert calls[0][1] == pytest.approx(1.0)
+    assert _mode_action(guarded).type == ActionType.CALL
+    # 翻前补盲这种廉价正期望，探针不触发，弃牌保留。
+    assert (
+        _folding_gives_up_value(
+            equity=0.30,
+            call_ev=4.0,
+            pot_odds=0.25,
+            to_call=10,
+            actual_call=10,
+            pot=30,
+            contested=40,
+            can_raise=True,
+            opponents=1,
+            hole_cards=[card("7c"), card("2d")],
+            board=[],
+            big_blind=20,
+        )
+        is False
+    )
 
 
 def test_review_equity_ignores_opponent_hole_cards() -> None:
@@ -634,9 +812,27 @@ def _player(seat: int, hole: str, stack: int, *, human: bool = False) -> dict:
 
 def test_reference_raise_is_published_as_chips_added() -> None:
     # 策略内部的加注额是本街总额；对外要换成这一下投入的筹码，且不能超过剩余筹码。
-    assert _reference_chips(Action(ActionType.RAISE, 1320), 200, 1280) == 1120
-    assert _reference_chips(Action(ActionType.RAISE, 2000), 200, 1280) == 1280
-    assert _reference_chips(Action(ActionType.BET, 1480), 0, 1480) == 1480
+    assert _reference_chips(Action(ActionType.RAISE, 1320), 200, 1280, 160) == 1120
+    assert _reference_chips(Action(ActionType.RAISE, 2000), 200, 1280, 160) == 1280
+    assert _reference_chips(Action(ActionType.BET, 1480), 0, 1480, 160) == 1480
+
+
+def test_reference_call_uses_the_actual_payment() -> None:
+    # 候选里的跟注额是 0。对外改成当时实际要付的筹码，短码不能超过剩余筹码。
+    assert _reference_chips(Action(ActionType.CALL, 0), 40, 500, 160) == 160
+    assert _reference_chips(Action(ActionType.CALL, 0), 40, 100, 160) == 100
+    assert _reference_chips(Action(ActionType.FOLD), 40, 500, 160) == 0
+    mode = Action(ActionType.CALL, 0)
+    published, rows = _publish_reference(
+        [(mode, 0.55), (Action(ActionType.FOLD), 0.45)],
+        mode,
+        40,
+        500,
+        160,
+    )
+    assert published == {"action": "call", "amount": 160}
+    assert rows[0]["action"] == "call"
+    assert rows[0]["amount"] == 160
 
 
 def test_all_in_reraise_reference_does_not_spend_more_than_the_stack() -> None:

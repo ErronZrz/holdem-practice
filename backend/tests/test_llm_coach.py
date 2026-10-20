@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import sqlite3
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -17,6 +18,7 @@ from app.analysis.hand_review import build_review
 from app.api.hands import get_coach_provider
 from app.llm.coach import (
     PROMPT_SCHEMA_VERSION,
+    _one_card_outs,
     build_decision_payload,
     input_digest,
     render_messages,
@@ -208,6 +210,7 @@ def _batch_reply(messages: list[dict[str, str]]) -> str:
             "explanations": [
                 {
                     "action_index": item["action_index"],
+                    "recommended_action": "fold",
                     "explanation": (
                         f"决策{item['action_index']}结合公开行动线看，这一手不必追加被动投入。"
                     ),
@@ -244,6 +247,7 @@ def _seed_explanation(hand_id: str, history: dict, index: int, explanation: str)
             model=FakeProvider.model_name,
             prompt_schema_version=PROMPT_SCHEMA_VERSION,
             explanation=explanation,
+            recommended_action=None,
             reasoning_summary=None,
             prompt_tokens=0,
             completion_tokens=0,
@@ -354,6 +358,7 @@ def test_deepseek_request_keeps_thinking_enabled() -> None:
     assert body["thinking"] == {"type": "enabled"}
     assert body["reasoning_effort"] == "high"
     assert body["stream"] is False
+    assert body["response_format"] == {"type": "json_object"}
     assert "temperature" not in body
     assert "frequency_penalty" not in body
     assert "presence_penalty" not in body
@@ -508,9 +513,12 @@ def test_prompt_forbids_solver_wording_without_hiding_the_reference() -> None:
     assert "求解器范围" in system
     assert "call_ev" in system
     assert "不含加注的弃牌权益" in system
-    assert "跟注是众数" in system
+    assert "call_ev < 0" in system
+    assert "one_card_outs" in system
+    assert "不要把这手写成听牌" in system
+    assert "recommended_action" in system
     assert "本身不构成错误" in system
-    assert PROMPT_SCHEMA_VERSION == 3
+    assert PROMPT_SCHEMA_VERSION == 4
     body = _request_body(messages)
     assert "As" in body["hand"]["hero_hole_cards"]
     assert body["hand"]["revealed_hands"] == []
@@ -518,8 +526,9 @@ def test_prompt_forbids_solver_wording_without_hiding_the_reference() -> None:
     assert decision["action_index"] == 0
     assert "hero_hole_cards" not in decision
     assert "revealed_hands" not in decision
-    for field in ("equity", "pot_odds", "call_ev"):
+    for field in ("equity", "pot_odds", "call_ev", "one_card_outs"):
         assert field in decision
+    assert decision["one_card_outs"] == 0
 
 
 def test_solver_claims_are_removed_before_storage(fake_provider: FakeProvider) -> None:
@@ -567,6 +576,8 @@ def test_multiple_decisions_share_one_upstream_call(fake_provider: FakeProvider)
     assert all(row.hand_id == hand_id and row.cache_key != hand_id for row in rows)
     assert all(row.cache_key.split("|")[2] == str(row.action_index) for row in rows)
     assert all(row.prompt_schema_version == PROMPT_SCHEMA_VERSION for row in rows)
+    assert all(row.recommended_action == "fold" for row in rows)
+    assert all(item["recommended_action"] == "fold" for item in decisions)
     assert all(row.prompt_tokens == 11 and row.total_tokens == 30 for row in rows)
 
     second = client.post(f"/hands/{hand_id}/explain")
@@ -611,7 +622,9 @@ def test_fenced_json_is_split_and_sanitized_per_decision(fake_provider: FakeProv
     rows = []
     for index in indexes:
         text = "按 GTO 这是最优均衡。" if index == 0 else f"决策{index}可以少投入。"
-        rows.append({"action_index": index, "explanation": text})
+        rows.append(
+            {"action_index": index, "recommended_action": "check", "explanation": text}
+        )
     fake_provider.content = "```json\n" + json.dumps(
         {"explanations": rows}, ensure_ascii=False
     ) + "\n```"
@@ -632,6 +645,7 @@ def test_fenced_json_is_split_and_sanitized_per_decision(fake_provider: FakeProv
     by_index = {row.action_index: row.explanation for row in stored}
     assert by_index[0] == decisions[0]["explanation"]
     assert "gto" not in by_index[0].lower()
+    assert all(row.recommended_action == "check" for row in stored)
 
 
 def test_blank_or_unstructured_batch_returns_503_and_keeps_review(
@@ -662,6 +676,7 @@ def test_blank_or_unstructured_batch_returns_503_and_keeps_review(
             "explanations": [
                 {
                     "action_index": index,
+                    "recommended_action": "fold",
                     "explanation": "   " if index == pending[-1] else f"决策{index}可以少投入。",
                 }
                 for index in pending
@@ -679,18 +694,168 @@ def test_blank_or_unstructured_batch_returns_503_and_keeps_review(
 def test_single_decision_accepts_plain_text_and_bare_json(fake_provider: FakeProvider) -> None:
     fake_provider.content = "翻前面对加注，弃牌可以少投入。"
     client = TestClient(app)
-    plain = client.post(f"/hands/{_persist(_human_fold_history())}/explain")
+    plain_id = _persist(_human_fold_history())
+    plain = client.post(f"/hands/{plain_id}/explain")
     assert plain.status_code == 200, plain.text
     assert plain.json()["decisions"][0]["explanation"] == "翻前面对加注，弃牌可以少投入。"
+    assert plain.json()["decisions"][0]["recommended_action"] is None
+    assert _coach_rows(plain_id)[0].recommended_action is None
 
     fake_provider.content = json.dumps(
         {"action_index": 0, "explanation": "这手翻前弃牌更稳妥。"},
         ensure_ascii=False,
     )
-    bare = client.post(f"/hands/{_persist(_human_fold_history())}/explain")
+    bare_id = _persist(_human_fold_history())
+    bare = client.post(f"/hands/{bare_id}/explain")
     assert bare.status_code == 200, bare.text
     assert bare.json()["decisions"][0]["explanation"] == "这手翻前弃牌更稳妥。"
+    assert bare.json()["decisions"][0]["recommended_action"] is None
+    assert _coach_rows(bare_id)[0].recommended_action is None
     assert fake_provider.calls == 2
+
+
+def test_batch_rejects_missing_illegal_or_mismatched_actions(fake_provider: FakeProvider) -> None:
+    history = _heads_up_checked_down()
+    hand_id = _persist(history)
+    review = build_review(history)
+    indexes = list(range(len(review["decisions"])))
+    client = TestClient(app)
+
+    fake_provider.content = json.dumps(
+        {
+            "explanations": [
+                {"action_index": index, "explanation": f"决策{index}可以少投入。"}
+                for index in indexes
+            ]
+        },
+        ensure_ascii=False,
+    )
+    missing = client.post(f"/hands/{hand_id}/explain")
+    assert missing.status_code == 503
+    assert _coach_rows(hand_id) == []
+
+    fake_provider.content = json.dumps(
+        {
+            "explanations": [
+                {
+                    "action_index": index,
+                    "recommended_action": "all-in",
+                    "explanation": f"决策{index}可以少投入。",
+                }
+                for index in indexes
+            ]
+        },
+        ensure_ascii=False,
+    )
+    illegal = client.post(f"/hands/{hand_id}/explain")
+    assert illegal.status_code == 503
+    assert _coach_rows(hand_id) == []
+
+    fake_provider.content = json.dumps(
+        {
+            "explanations": [
+                {
+                    "action_index": index + 1,
+                    "recommended_action": "fold",
+                    "explanation": f"决策{index}可以少投入。",
+                }
+                for index in indexes
+            ]
+        },
+        ensure_ascii=False,
+    )
+    mismatched = client.post(f"/hands/{hand_id}/explain")
+    assert mismatched.status_code == 503
+    assert _coach_rows(hand_id) == []
+    assert client.get(f"/hands/{hand_id}/review").status_code == 200
+
+
+def test_chinese_actions_are_stored_as_enums(fake_provider: FakeProvider) -> None:
+    history = _heads_up_checked_down()
+    review = build_review(history)
+    indexes = list(range(len(review["decisions"])))
+    words = ["弃牌", "过牌", "跟注", "下注", "加注", "再加注"]
+    expected = ["fold", "check", "call", "bet", "raise", "raise"]
+    fake_provider.content = json.dumps(
+        {
+            "explanations": [
+                {
+                    "action_index": index,
+                    "recommended_action": words[index % len(words)],
+                    "explanation": f"决策{index}可以少投入。",
+                }
+                for index in indexes
+            ]
+        },
+        ensure_ascii=False,
+    )
+    hand_id = _persist(history)
+    response = TestClient(app).post(f"/hands/{hand_id}/explain")
+    assert response.status_code == 200, response.text
+    stored = {row.action_index: row.recommended_action for row in _coach_rows(hand_id)}
+    assert stored == {index: expected[index % len(expected)] for index in indexes}
+
+
+def test_one_card_outs_count_only_straight_and_flush_completions() -> None:
+    # 翻前和河牌固定为 0，避免牌张不够或已经发完时去评估。
+    assert _one_card_outs(["As", "Kd"], []) == 0
+    assert _one_card_outs(["As", "Kd"], ["2c", "7d", "9h", "Ts", "3c"]) == 0
+    # 后门花完不成，听牌补牌是 0。
+    assert _one_card_outs(["Kc", "Jh"], ["Kh", "Qh", "5c"]) == 0
+    # 四张红桃再加顺子补牌。红桃十已算在同花里，另外三张十只补顺子。
+    assert _one_card_outs(["Ah", "Kh"], ["Qh", "Jh", "2c"]) == 12
+    # 两对升葫芦、三条升葫芦都不算听牌补牌。
+    assert _one_card_outs(["Ah", "Kd"], ["As", "Kc", "2d"]) == 0
+    assert _one_card_outs(["Ah", "Ad"], ["Ac", "7d", "2c"]) == 0
+    # 已经成顺时不再把更高的牌记成补牌。
+    assert _one_card_outs(["9h", "8c"], ["7d", "6s", "5c"]) == 0
+    # 开放式顺子听牌是八张。
+    assert _one_card_outs(["9h", "8d"], ["7c", "6s", "2d"]) == 8
+
+
+def test_old_coach_table_gains_recommended_action(tmp_path) -> None:
+    fresh = tmp_path / "test.db"
+    with sqlite3.connect(fresh) as raw:
+        columns = [row[1] for row in raw.execute("PRAGMA table_info(coach_explanations)")]
+    assert "recommended_action" in columns
+
+    legacy = tmp_path / "legacy.db"
+    with sqlite3.connect(legacy) as raw:
+        raw.execute(
+            """
+            CREATE TABLE coach_explanations (
+                cache_key VARCHAR(512) PRIMARY KEY,
+                hand_id VARCHAR(32) NOT NULL,
+                action_index INTEGER NOT NULL,
+                seat INTEGER NOT NULL,
+                provider VARCHAR(32) NOT NULL,
+                model VARCHAR(64) NOT NULL,
+                prompt_schema_version INTEGER NOT NULL,
+                explanation TEXT NOT NULL,
+                reasoning_summary TEXT,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME
+            )
+            """
+        )
+        raw.execute(
+            "INSERT INTO coach_explanations "
+            "(cache_key, hand_id, action_index, seat, provider, model, "
+            "prompt_schema_version, explanation) "
+            "VALUES ('k', 'h', 0, 0, 'fake', 'stub', 3, '旧解读')"
+        )
+    init_db(str(legacy))
+    init_db(str(legacy))
+    with sqlite3.connect(legacy) as raw:
+        columns = [row[1] for row in raw.execute("PRAGMA table_info(coach_explanations)")]
+        saved = raw.execute(
+            "SELECT recommended_action, explanation FROM coach_explanations"
+        ).fetchone()
+    assert columns.count("recommended_action") == 1
+    assert saved == (None, "旧解读")
 
 
 def test_no_human_decision_skips_upstream_even_without_a_key(monkeypatch, tmp_path) -> None:
@@ -826,6 +991,7 @@ def test_live_deepseek_smoke() -> None:
     assert sent["thinking"] == {"type": "enabled"}
     assert sent["reasoning_effort"] == "high"
     assert sent["stream"] is False
+    assert sent["response_format"] == {"type": "json_object"}
     assert "temperature" not in sent
     assert "frequency_penalty" not in sent
     assert "presence_penalty" not in sent

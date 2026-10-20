@@ -76,6 +76,7 @@ class CoachExplanationModel(Base):
     model: Mapped[str] = mapped_column(String(64), nullable=False)
     prompt_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
+    recommended_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
     reasoning_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

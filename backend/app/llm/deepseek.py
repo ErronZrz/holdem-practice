@@ -52,7 +52,7 @@ class DeepSeekProvider:
         self._opener = opener
 
     def complete(self, messages: list[dict[str, str]]) -> Completion:
-        """发送一次非流式补全。思考模式固定开启，不附带会被忽略的采样参数。"""
+        """发送一次非流式补全。思考模式固定开启，并要求上游返回 JSON 对象。"""
         api_key = self._current_key()
         if not api_key:
             raise CoachUnavailableError(_MISSING_KEY)
@@ -62,6 +62,7 @@ class DeepSeekProvider:
             "thinking": {"type": "enabled"},
             "reasoning_effort": "high",
             "stream": False,
+            "response_format": {"type": "json_object"},
         }
         request = urllib.request.Request(
             f"{self._base_url}/chat/completions",

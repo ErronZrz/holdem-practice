@@ -1,10 +1,12 @@
 """复盘分析：从一手牌历史确定性重放，对真人每个决策点做份额估计与错误检测。
 
 复盘只在牌局结束后进行，重放整手动作以重建每个决策点。份额与跟注期望只使用英雄底牌、
-公共牌和截至该决策点的公开行动，不读取对手真实底牌。参考动作来自紧手标准模式；
-跟注是众数且跟注期望为负时，把跟注质量挪到弃牌。加注不因跟注期望被改写。
-错误来自份额、跟注期望和牌力门槛；与参考众数不同本身不是错误，参考动作只用来否决
-与参考自己方向相反的标记。
+公共牌和截至该决策点的公开行动，不读取对手真实底牌。参考动作来自紧手标准模式，
+发布前会收回和这些指标打架的质量：面对下注且跟注期望为负时，跟注质量挪到弃牌，
+份额低于平均时下注和加注也挪到弃牌；翻后无人下注且份额过低或行动线已经偏高时，
+主动质量挪到过牌；弃牌会被标成放弃正期望时，弃牌质量挪到跟注。跟注的对外金额
+是当时实际要投入的筹码。错误来自份额、跟注期望和牌力门槛；与参考众数不同本身不是错误，
+参考动作只用来否决与参考自己方向相反的标记。
 
 本模块只读引擎公开状态，不修改引擎。
 """
@@ -38,6 +40,8 @@ _BAD_CALL_FRACTION = 0.03
 _VALUE_FAIR_SCALE = 1.6
 _SLOWPLAY_FAIR_SCALE = 1.8
 _AIR_FAIR_SCALE = 0.5
+# 公开行动线达到这一档，说明此前已经出现再加注或翻后较大的主动投入。
+_HIGH_ACTION_LINE = 3
 # 下注额小于底池的这个比例视为过小。
 _UNDERBET_DEN = 2
 # 强听牌补牌数下限（开放式顺子 / 同花听牌）。
@@ -147,31 +151,145 @@ def _mode_action(distribution: list[tuple[Action, float]]) -> Action:
     return max(distribution, key=lambda item: item[1])[0]
 
 
-def _move_call_mass_to_fold(
+def _move_mass(
     distribution: list[tuple[Action, float]],
+    sources: frozenset[ActionType],
+    target: ActionType,
 ) -> list[tuple[Action, float]]:
-    """把跟注概率质量挪到弃牌。没有跟注质量时原样返回。"""
-    moved = sum(weight for action, weight in distribution if action.type == ActionType.CALL)
+    """把若干动作的概率质量归并到目标动作。目标已在分布里就累加，否则追加一条。"""
+    moved = sum(weight for action, weight in distribution if action.type in sources)
     if moved <= 0.0:
         return distribution
-    kept = [(action, weight) for action, weight in distribution if action.type != ActionType.CALL]
+    kept = [(action, weight) for action, weight in distribution if action.type not in sources]
     for index, (action, weight) in enumerate(kept):
-        if action.type == ActionType.FOLD:
+        if action.type == target:
             kept[index] = (action, weight + moved)
             return kept
-    return [*kept, (Action(ActionType.FOLD), moved)]
+    return [*kept, (Action(target), moved)]
 
 
 def _guard_negative_call(
     distribution: list[tuple[Action, float]],
     call_ev: float | None,
+    *,
+    to_call: int,
+    equity: float,
+    opponents: int,
 ) -> list[tuple[Action, float]]:
-    """众数是跟注且跟注期望为负时，把跟注质量挪到弃牌。加注保持不动。"""
-    if call_ev is None or call_ev >= 0.0:
+    """面对下注且跟注期望为负时，把继续质量收成弃牌。
+
+    跟注一律挪走。份额低于当前人数的平均份额时，下注和加注也一并挪走；
+    份额并不低时加注保留，因为跟注期望不含加注后的弃牌权益。
+    """
+    if to_call <= 0 or call_ev is None or call_ev >= 0.0:
         return distribution
-    if _mode_action(distribution).type != ActionType.CALL:
+    sources = {ActionType.CALL}
+    if equity < _fair_share(opponents):
+        sources.update((ActionType.BET, ActionType.RAISE))
+    return _move_mass(distribution, frozenset(sources), ActionType.FOLD)
+
+
+def _guard_low_equity_lead(
+    distribution: list[tuple[Action, float]],
+    *,
+    to_call: int,
+    postflop: bool,
+    equity: float,
+    opponents: int,
+    max_line: int,
+) -> list[tuple[Action, float]]:
+    """翻后无人下注时，把过低份额或高行动线下的主动质量收成过牌。"""
+    if not postflop or to_call != 0:
         return distribution
-    return _move_call_mass_to_fold(distribution)
+    fair = _fair_share(opponents)
+    below_air = equity < _AIR_FAIR_SCALE * fair
+    high_line = max_line >= _HIGH_ACTION_LINE and equity < fair
+    if not below_air and not high_line:
+        return distribution
+    return _move_mass(
+        distribution,
+        frozenset({ActionType.BET, ActionType.RAISE}),
+        ActionType.CHECK,
+    )
+
+
+def _guard_bad_fold(
+    distribution: list[tuple[Action, float]],
+    *,
+    to_call: int,
+    bad_fold: bool,
+) -> list[tuple[Action, float]]:
+    """弃牌会被标成放弃正期望时，把弃牌质量挪到跟注。"""
+    if to_call <= 0 or not bad_fold:
+        return distribution
+    return _move_mass(distribution, frozenset({ActionType.FOLD}), ActionType.CALL)
+
+
+def _folding_gives_up_value(
+    *,
+    equity: float,
+    call_ev: float | None,
+    pot_odds: float | None,
+    to_call: int,
+    actual_call: int,
+    pot: int,
+    contested: int,
+    can_raise: bool,
+    opponents: int,
+    hole_cards: Sequence[Card],
+    board: Sequence[Card],
+    big_blind: int,
+) -> bool:
+    """用弃牌探针判断这一下会不会被标成放弃正期望。"""
+    if to_call <= 0:
+        return False
+    found = _detect_mistakes(
+        action=Action(ActionType.FOLD),
+        equity=equity,
+        call_ev=call_ev,
+        pot_odds=pot_odds,
+        to_call=to_call,
+        actual_call=actual_call,
+        pot=pot,
+        contested=contested,
+        can_raise=can_raise,
+        opponents=opponents,
+        hole_cards=hole_cards,
+        board=board,
+        big_blind=big_blind,
+        reference=Action(ActionType.FOLD),
+    )
+    return any(item["code"] == "bad_fold" for item in found)
+
+
+def _guard_reference_distribution(
+    distribution: list[tuple[Action, float]],
+    *,
+    to_call: int,
+    call_ev: float | None,
+    equity: float,
+    opponents: int,
+    postflop: bool,
+    max_line: int,
+    bad_fold: bool,
+) -> list[tuple[Action, float]]:
+    """发布前收回和份额、跟注期望打架的质量。调用方在全部归并之后再取众数。"""
+    guarded = _guard_negative_call(
+        distribution,
+        call_ev,
+        to_call=to_call,
+        equity=equity,
+        opponents=opponents,
+    )
+    guarded = _guard_low_equity_lead(
+        guarded,
+        to_call=to_call,
+        postflop=postflop,
+        equity=equity,
+        opponents=opponents,
+        max_line=max_line,
+    )
+    return _guard_bad_fold(guarded, to_call=to_call, bad_fold=bad_fold)
 
 
 def _distribution_rows(selected: MixedDistribution) -> list[tuple[Action, float]]:
@@ -185,16 +303,23 @@ def _distribution_rows(selected: MixedDistribution) -> list[tuple[Action, float]
     return rows
 
 
-def _reference_chips(action: Action, street_bet: int, stack: int) -> int:
+def _reference_chips(
+    action: Action,
+    street_bet: int,
+    stack: int,
+    actual_call_amount: int,
+) -> int:
     """把参考动作金额换成与历史相同的本次投入，且不超过当时剩余筹码。
 
-    策略里的加注额是本街总额。历史记录和牌桌展示用的是这一下实际投入的筹码。
-    直接拿总额去减剩余筹码，会在已经有本街投入时得到负数。
+    策略里的加注额是本街总额，跟注额固定写成 0。历史和牌桌展示用的是这一下实际投入。
+    跟注改为当时要支付的筹码；下注和加注仍按本次投入换算。
     """
     if action.type == ActionType.RAISE:
         chips = action.amount - street_bet
-    elif action.type in (ActionType.BET, ActionType.CALL):
+    elif action.type == ActionType.BET:
         chips = action.amount
+    elif action.type == ActionType.CALL:
+        chips = actual_call_amount
     else:
         chips = 0
     if chips < 0:
@@ -207,14 +332,20 @@ def _publish_reference(
     mode: Action,
     street_bet: int,
     stack: int,
+    actual_call_amount: int,
 ) -> tuple[dict, list[dict]]:
-    """发布参考动作与分布。加注额改成本次投入，相同投入合并概率。"""
+    """发布参考动作与分布。加注额改成本次投入，跟注额改为实际支付，相同投入合并概率。"""
     presented = _present_distribution(distribution, mode)
     merged: dict[tuple[str, int], float] = {}
     order: list[tuple[str, int]] = []
     for item in presented:
         kind = item["action"]
-        amount = _reference_chips(Action(ActionType(kind), int(item["amount"])), street_bet, stack)
+        amount = _reference_chips(
+            Action(ActionType(kind), int(item["amount"])),
+            street_bet,
+            stack,
+            actual_call_amount,
+        )
         key = (kind, amount)
         if key not in merged:
             order.append(key)
@@ -224,7 +355,7 @@ def _publish_reference(
         {"action": kind, "amount": amount, "probability": round(merged[(kind, amount)], 4)}
         for kind, amount in order
     ]
-    mode_amount = _reference_chips(mode, street_bet, stack)
+    mode_amount = _reference_chips(mode, street_bet, stack, actual_call_amount)
     return {"action": mode.type.value, "amount": mode_amount}, rows
 
 
@@ -426,10 +557,34 @@ def _analyze_decision(
     projected = mixed_state(project_for_actor(snapshot), context)
     selected = reference_bot.distribution_for(projected, legal, mode=HandMode.NORMAL)
     baseline = _distribution_rows(selected)
-    distribution = _guard_negative_call(baseline, valued.call_ev)
-    bot_action = _mode_action(distribution)
     to_call = legal.call_amount
     opponents = len(live)
+    max_line = max((level for _seat, level in live), default=0)
+    bad_fold = _folding_gives_up_value(
+        equity=valued.equity,
+        call_ev=valued.call_ev,
+        pot_odds=valued.pot_odds,
+        to_call=to_call,
+        actual_call=legal.actual_call_amount,
+        pot=snapshot.pot,
+        contested=valued.contested,
+        can_raise=legal.can_raise,
+        opponents=opponents,
+        hole_cards=hero_state.hole_cards,
+        board=snapshot.board,
+        big_blind=engine.big_blind,
+    )
+    distribution = _guard_reference_distribution(
+        baseline,
+        to_call=to_call,
+        call_ev=valued.call_ev,
+        equity=valued.equity,
+        opponents=opponents,
+        postflop=len(snapshot.board) > 0,
+        max_line=max_line,
+        bad_fold=bad_fold,
+    )
+    bot_action = _mode_action(distribution)
     paid = 0
     if action.type in (ActionType.BET, ActionType.CALL, ActionType.RAISE):
         paid = max(0, action.amount)
@@ -440,6 +595,7 @@ def _analyze_decision(
         bot_action,
         hero_state.street_bet,
         hero_state.stack,
+        legal.actual_call_amount,
     )
 
     return {
