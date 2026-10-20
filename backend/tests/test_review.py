@@ -7,6 +7,7 @@ from app.analysis.hand_review import (
     _detect_mistakes,
     _dominated_pair,
     _guard_negative_call,
+    _reference_chips,
     _weak_kicker_top_pair,
     build_review,
 )
@@ -619,3 +620,68 @@ def test_review_equity_ignores_opponent_hole_cards() -> None:
     assert [item["call_ev"] for item in original["decisions"]] == [
         item["call_ev"] for item in swapped["decisions"]
     ]
+
+
+def _player(seat: int, hole: str, stack: int, *, human: bool = False) -> dict:
+    return {
+        "seat": seat,
+        "name": f"玩家{seat}",
+        "is_human": human,
+        "hole_cards": hole.split(),
+        "starting_stack": stack,
+    }
+
+
+def test_reference_raise_is_published_as_chips_added() -> None:
+    # 策略内部的加注额是本街总额；对外要换成这一下投入的筹码，且不能超过剩余筹码。
+    assert _reference_chips(Action(ActionType.RAISE, 1320), 200, 1280) == 1120
+    assert _reference_chips(Action(ActionType.RAISE, 2000), 200, 1280) == 1280
+    assert _reference_chips(Action(ActionType.BET, 1480), 0, 1480) == 1480
+
+
+def test_all_in_reraise_reference_does_not_spend_more_than_the_stack() -> None:
+    # 真人翻牌加注到全下后，参考加注若仍用本街总额，会比剩余筹码多出一截。
+    history = {
+        "hand_number": 36,
+        "num_players": 6,
+        "small_blind": 10,
+        "big_blind": 20,
+        "button": 5,
+        "board": ["Kh", "8h", "9h", "7s", "4h"],
+        "players": [
+            _player(0, "Th Ah", 1500, human=True),
+            _player(1, "7c 2d", 1960),
+            _player(2, "Qs Kd", 1970),
+            _player(3, "8c 4c", 2180),
+            _player(4, "Js Ac", 3000),
+            _player(5, "Ks Tc", 1390),
+        ],
+        "actions": [
+            {"street": "preflop", "seat": 0, "action": "small_blind", "amount": 10},
+            {"street": "preflop", "seat": 1, "action": "big_blind", "amount": 20},
+            {"street": "preflop", "seat": 2, "action": "call", "amount": 20},
+            {"street": "preflop", "seat": 3, "action": "fold", "amount": 0},
+            {"street": "preflop", "seat": 4, "action": "call", "amount": 20},
+            {"street": "preflop", "seat": 5, "action": "call", "amount": 20},
+            {"street": "preflop", "seat": 0, "action": "call", "amount": 10},
+            {"street": "preflop", "seat": 1, "action": "check", "amount": 0},
+            {"street": "flop", "seat": 0, "action": "bet", "amount": 200},
+            {"street": "flop", "seat": 1, "action": "fold", "amount": 0},
+            {"street": "flop", "seat": 2, "action": "call", "amount": 200},
+            {"street": "flop", "seat": 4, "action": "fold", "amount": 0},
+            {"street": "flop", "seat": 5, "action": "raise", "amount": 730},
+            {"street": "flop", "seat": 0, "action": "raise", "amount": 1280},
+            {"street": "flop", "seat": 2, "action": "call", "amount": 1280},
+            {"street": "flop", "seat": 5, "action": "call", "amount": 640},
+        ],
+    }
+    review = build_review(history)
+    all_in = review["decisions"][2]
+    assert all_in["action"] == {"action": "raise", "amount": 1280}
+    assert all_in["stack_after"] == 0
+    assert all_in["bot_action"]["action"] == "raise"
+    assert all_in["bot_action"]["amount"] == 1120
+    stack_before = all_in["stack_after"] + all_in["action"]["amount"]
+    for item in all_in["bot_distribution"]:
+        if item["action"] in ("bet", "raise", "call"):
+            assert item["amount"] <= stack_before

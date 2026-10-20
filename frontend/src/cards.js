@@ -28,13 +28,13 @@ export const STREET_CN = {
 }
 
 export const ACTION_CN = {
-  fold: '弃牌',
-  check: '过牌',
-  call: '跟注',
-  bet: '下注',
-  raise: '加注',
-  small_blind: '小盲',
-  big_blind: '大盲',
+  fold: 'Fold',
+  check: 'Check',
+  call: 'Call',
+  bet: 'Bet',
+  raise: 'Raise',
+  small_blind: 'SB',
+  big_blind: 'BB',
 }
 
 export function actionText(action) {
@@ -42,7 +42,29 @@ export function actionText(action) {
   return action.amount ? `${label} ${action.amount}` : label
 }
 
-// 把复盘的参考动作分布渲染成一行文本；确定性分支（只有一项）返回空串不展示。
+// 按连续街道把动作收成组，并带上座位名称与是否真人，供时间线分色展示。
+export function groupHandActions(actions, players) {
+  const bySeat = new Map()
+  for (const player of players || []) bySeat.set(player.seat, player)
+  const groups = []
+  for (const action of actions || []) {
+    const player = bySeat.get(action.seat)
+    const item = {
+      seat: action.seat,
+      street: action.street,
+      action: action.action,
+      amount: action.amount,
+      name: player && player.name ? player.name : `座位 ${action.seat}`,
+      isHuman: Boolean(player && player.is_human),
+    }
+    const last = groups[groups.length - 1]
+    if (!last || last.street !== action.street) groups.push({ street: action.street, items: [item] })
+    else last.items.push(item)
+  }
+  return groups
+}
+
+// 参考分布的一行摘要；只有一项时返回空串，色条展示时留给读屏。
 export function distributionText(decision) {
   const dist = decision.bot_distribution || []
   if (dist.length <= 1) return ''

@@ -185,6 +185,49 @@ def _distribution_rows(selected: MixedDistribution) -> list[tuple[Action, float]
     return rows
 
 
+def _reference_chips(action: Action, street_bet: int, stack: int) -> int:
+    """把参考动作金额换成与历史相同的本次投入，且不超过当时剩余筹码。
+
+    策略里的加注额是本街总额。历史记录和牌桌展示用的是这一下实际投入的筹码。
+    直接拿总额去减剩余筹码，会在已经有本街投入时得到负数。
+    """
+    if action.type == ActionType.RAISE:
+        chips = action.amount - street_bet
+    elif action.type in (ActionType.BET, ActionType.CALL):
+        chips = action.amount
+    else:
+        chips = 0
+    if chips < 0:
+        chips = 0
+    return min(chips, max(0, stack))
+
+
+def _publish_reference(
+    distribution: list[tuple[Action, float]],
+    mode: Action,
+    street_bet: int,
+    stack: int,
+) -> tuple[dict, list[dict]]:
+    """发布参考动作与分布。加注额改成本次投入，相同投入合并概率。"""
+    presented = _present_distribution(distribution, mode)
+    merged: dict[tuple[str, int], float] = {}
+    order: list[tuple[str, int]] = []
+    for item in presented:
+        kind = item["action"]
+        amount = _reference_chips(Action(ActionType(kind), int(item["amount"])), street_bet, stack)
+        key = (kind, amount)
+        if key not in merged:
+            order.append(key)
+            merged[key] = 0.0
+        merged[key] += float(item["probability"])
+    rows = [
+        {"action": kind, "amount": amount, "probability": round(merged[(kind, amount)], 4)}
+        for kind, amount in order
+    ]
+    mode_amount = _reference_chips(mode, street_bet, stack)
+    return {"action": mode.type.value, "amount": mode_amount}, rows
+
+
 def _present_distribution(
     distribution: list[tuple[Action, float]],
     mode: Action,
@@ -387,6 +430,17 @@ def _analyze_decision(
     bot_action = _mode_action(distribution)
     to_call = legal.call_amount
     opponents = len(live)
+    paid = 0
+    if action.type in (ActionType.BET, ActionType.CALL, ActionType.RAISE):
+        paid = max(0, action.amount)
+    paid = min(paid, hero_state.stack)
+    stack_after = hero_state.stack - paid
+    published_action, published_distribution = _publish_reference(
+        distribution,
+        bot_action,
+        hero_state.street_bet,
+        hero_state.stack,
+    )
 
     return {
         "street": snapshot.street.name.lower(),
@@ -401,8 +455,9 @@ def _analyze_decision(
         # 展示四舍五入到筹码单位；错误判定使用上面的浮点期望，避免一个筹码的舍入改判。
         "call_ev": None if valued.call_ev is None else int(round(valued.call_ev)),
         "action": {"action": action.type.value, "amount": action.amount},
-        "bot_action": {"action": bot_action.type.value, "amount": bot_action.amount},
-        "bot_distribution": _present_distribution(distribution, bot_action),
+        "stack_after": stack_after,
+        "bot_action": published_action,
+        "bot_distribution": published_distribution,
         "mistakes": _detect_mistakes(
             action=action,
             equity=valued.equity,

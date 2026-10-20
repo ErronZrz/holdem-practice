@@ -205,6 +205,8 @@ class DecisionReview(BaseModel):
     pot_odds: float | None
     call_ev: int | None
     action: ActionChoice
+    # 玩家执行本次动作后手里还剩的筹码。
+    stack_after: int
     bot_action: ActionChoice
     bot_distribution: list[ActionProbability] = Field(default_factory=list)
     mistakes: list[Mistake]

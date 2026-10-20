@@ -106,3 +106,46 @@ select {
   padding: 10px 12px;
   margin: 12px 0;
 }
+
+/* 动作时间线与复盘卡片共用的阶段色、动作语义色。 */
+:root {
+  --street-preflop: #4f46e5;
+  --street-flop: #059669;
+  --street-turn: #d97706;
+  --street-river: #e11d48;
+  --street-showdown: #475569;
+  --act-fold-bg: #e2e8f0;
+  --act-fold-fg: #64748b;
+  --act-check-bg: #e7eef6;
+  --act-check-fg: #3d516c;
+  --act-call-bg: #d1fae5;
+  --act-call-fg: #047857;
+  --act-bet-bg: #fef3c7;
+  --act-bet-fg: #b45309;
+  --act-raise-bg: #ffedd5;
+  --act-raise-fg: #c2410c;
+  --act-blind-bg: #f8fafc;
+  --act-blind-fg: #64748b;
+}
+
+.street-preflop { --street: var(--street-preflop); }
+.street-flop { --street: var(--street-flop); }
+.street-turn { --street: var(--street-turn); }
+.street-river { --street: var(--street-river); }
+.street-showdown { --street: var(--street-showdown); }
+
+.tone-fold { background: var(--act-fold-bg); color: var(--act-fold-fg); }
+.tone-check { background: var(--act-check-bg); color: var(--act-check-fg); }
+.tone-call { background: var(--act-call-bg); color: var(--act-call-fg); }
+.tone-bet { background: var(--act-bet-bg); color: var(--act-bet-fg); }
+.tone-raise { background: var(--act-raise-bg); color: var(--act-raise-fg); }
+.tone-small_blind,
+.tone-big_blind {
+  background: var(--act-blind-bg);
+  color: var(--act-blind-fg);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}

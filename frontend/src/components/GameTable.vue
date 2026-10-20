@@ -11,7 +11,7 @@ import {
   watch,
 } from 'vue'
 import { api } from '../api.js'
-import { actionText, distributionText, HAND_CATEGORY_CN, STREET_CN } from '../cards.js'
+import { groupHandActions, HAND_CATEGORY_CN, STREET_CN } from '../cards.js'
 import { copyText } from '../clipboard.js'
 import { referenceLimitationText, referenceScopeText, referenceText } from '../reviewText.js'
 import {
@@ -27,7 +27,10 @@ import {
   SEAT_ROW_GAP,
   SEAT_ROW_HEIGHTS,
 } from '../seatLayout.js'
+import HandActionTimeline from './HandActionTimeline.vue'
 import PlayingCard from './PlayingCard.vue'
+import ReviewDecisionCard from './ReviewDecisionCard.vue'
+import ReviewFrame from './ReviewFrame.vue'
 
 const emit = defineEmits(['navigate'])
 
@@ -202,16 +205,7 @@ const streetLabel = computed(() => STREET_CN[game.value?.street] || game.value?.
 
 const handActionGroups = computed(() => {
   if (!game.value) return []
-  const groups = []
-  for (const a of game.value.hand_actions) {
-    const last = groups[groups.length - 1]
-    if (!last || last.street !== a.street) {
-      groups.push({ street: a.street, items: [a] })
-    } else {
-      last.items.push(a)
-    }
-  }
-  return groups
+  return groupHandActions(game.value.hand_actions, game.value.players)
 })
 
 function playerNameOf(seat) {
@@ -225,18 +219,6 @@ function showdownHand(seat) {
 
 function netOf(seat) {
   return game.value?.last_net?.[seat] ?? 0
-}
-
-function pct(x) {
-  return x == null ? '—' : `${(x * 100).toFixed(0)}%`
-}
-
-function evText(x) {
-  return x == null ? '—' : (x > 0 ? '+' : '') + x
-}
-
-function mistakeClass(severity) {
-  return { error: 'mistake-error', warning: 'mistake-warning', info: 'mistake-info' }[severity] || ''
 }
 
 function resetCoach() {
@@ -920,101 +902,85 @@ onUnmounted(() => {
       <div class="panel hand-actions">
         <h3>本手动作</h3>
         <div v-if="!handActionGroups.length" class="muted">暂无动作</div>
-        <div v-for="g in handActionGroups" :key="g.street" class="ha-street">
-          <div class="ha-street-title">{{ STREET_CN[g.street] || g.street }}</div>
-          <div v-for="(a, i) in g.items" :key="i" class="ha-line">
-            {{ playerNameOf(a.seat) }} {{ actionText(a) }}
-          </div>
-        </div>
+        <HandActionTimeline v-else :groups="handActionGroups" />
       </div>
 
       <div v-if="game.hand_over && showReview" class="panel review-panel">
-        <h3>本手复盘</h3>
-        <p v-if="!review" class="muted">复盘生成中…</p>
-        <template v-else>
-          <p class="muted">{{ referenceText(review) }}</p>
-          <p v-if="referenceScopeText(review)" class="muted">{{ referenceScopeText(review) }}</p>
-          <p v-if="referenceLimitationText(review)" class="muted">
-            {{ referenceLimitationText(review) }}
-          </p>
-          <p class="muted">共 {{ review.decisions.length }} 个决策点 · 命中 {{ review.mistake_count }} 处问题</p>
-          <p class="muted hand-id-line">
-            手牌 ID：<code class="hand-id">{{ review.hand_id }}</code>
-            <button
-              class="copy-id"
-              :class="{ copied: copiedHandId === review.hand_id }"
-              type="button"
-              :title="copiedHandId === review.hand_id ? '已复制' : '复制手牌 ID'"
-              aria-label="复制手牌 ID"
-              @click="copyHandId(review.hand_id)"
-            >
-              <svg
-                viewBox="0 0 24 24"
-                width="17"
-                height="17"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.8"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                aria-hidden="true"
-              >
-                <path
-                  v-if="copiedHandId === review.hand_id"
-                  d="m5.5 12.5 4 4 9-9"
-                  stroke-width="2.2"
-                />
-                <g v-else>
-                  <!-- 后层：靠近前层的位置断开 -->
-                  <path d="M13 5H7a2 2 0 0 0-2 2v6" />
-                  <path d="M15 8V7a2 2 0 0 0-2-2" />
-                  <path d="M8 15H7a2 2 0 0 1-2-2" />
-
-                  <!-- 前层：接近正方形 -->
-                  <rect x="8.7" y="8.7" width="10.3" height="10.3" rx="2" />
-                </g>
-              </svg>
-            </button>
-          </p>
-          <div class="coach-bar">
-            <button type="button" :disabled="coachLoading" @click="loadCoach">
-              {{ coachLoading ? '教练正在思考…' : 'AI 教练解读' }}
-            </button>
-            <span v-if="coachError" class="coach-error">{{ coachError }}</span>
-          </div>
-          <p v-if="coach && !coach.decisions.length" class="muted">本手没有可解读的决策点。</p>
-          <div v-for="(d, i) in review.decisions" :key="i" class="review-decision">
-            <div class="review-street">
-              <strong>{{ STREET_CN[d.street] || d.street }}</strong>
-              <span v-if="d.board.length" class="cards-mini">
-                <PlayingCard v-for="(c, j) in d.board" :key="j" :code="c" small />
-              </span>
-              <span class="muted">
-                底池 {{ d.pot }} · 完整欠注 {{ d.to_call }}
-                <template v-if="d.is_short_all_in_call">· 实际全下 {{ d.actual_call_amount }}</template>
-              </span>
-            </div>
-            <div class="review-row">
-              <span>你：{{ actionText(d.action) }}</span>
-              <span>参考：{{ actionText(d.bot_action) }}</span>
-            </div>
-            <div v-if="distributionText(d)" class="review-row muted">
-              <span>参考分布：{{ distributionText(d) }}</span>
-            </div>
-            <div class="review-row muted">
-              <span>胜率 {{ pct(d.equity) }}</span>
-              <span v-if="d.pot_odds != null">赔率 {{ pct(d.pot_odds) }}</span>
-              <span v-if="d.call_ev != null">跟注 EV {{ evText(d.call_ev) }}</span>
-            </div>
-            <div v-for="(m, k) in d.mistakes" :key="k" class="mistake" :class="mistakeClass(m.severity)">
-              {{ m.message }}
-            </div>
-            <div v-if="coachFor(i)" class="coach-note">
-              <div>{{ coachFor(i).explanation }}</div>
-              <div class="muted">{{ coachFor(i).model }} · {{ coachFor(i).cached ? '已缓存' : '新生成' }}</div>
-            </div>
-          </div>
+        <template v-if="!review">
+          <h3>本手复盘</h3>
+          <p class="muted">复盘生成中…</p>
         </template>
+        <ReviewFrame v-else>
+          <template #head>
+            <div class="review-title-row">
+              <h3>本手复盘</h3>
+              <div class="review-counts">
+                <span class="count-pill">{{ review.decisions.length }} 个决策点</span>
+                <span class="issue-pill" :class="{ clear: review.mistake_count === 0 }">
+                  {{ review.mistake_count }} 处问题
+                </span>
+              </div>
+            </div>
+            <div class="review-tools">
+              <p class="muted hand-id-line">
+                手牌 ID：<code class="hand-id">{{ review.hand_id }}</code>
+                <button
+                  class="copy-id"
+                  :class="{ copied: copiedHandId === review.hand_id }"
+                  type="button"
+                  :title="copiedHandId === review.hand_id ? '已复制' : '复制手牌 ID'"
+                  aria-label="复制手牌 ID"
+                  @click="copyHandId(review.hand_id)"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    width="17"
+                    height="17"
+                    fill="none"
+                    stroke="currentColor"
+                    stroke-width="1.8"
+                    stroke-linecap="round"
+                    stroke-linejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path
+                      v-if="copiedHandId === review.hand_id"
+                      d="m5.5 12.5 4 4 9-9"
+                      stroke-width="2.2"
+                    />
+                    <g v-else>
+                      <!-- 后层：靠近前层的位置断开 -->
+                      <path d="M13 5H7a2 2 0 0 0-2 2v6" />
+                      <path d="M15 8V7a2 2 0 0 0-2-2" />
+                      <path d="M8 15H7a2 2 0 0 1-2-2" />
+
+                      <!-- 前层：接近正方形 -->
+                      <rect x="8.7" y="8.7" width="10.3" height="10.3" rx="2" />
+                    </g>
+                  </svg>
+                </button>
+              </p>
+              <div class="coach-bar">
+                <button type="button" :disabled="coachLoading" @click="loadCoach">
+                  {{ coachLoading ? '教练正在思考…' : 'AI 教练解读' }}
+                </button>
+                <span v-if="coachError" class="coach-error">{{ coachError }}</span>
+              </div>
+            </div>
+          </template>
+          <p v-if="coach && !coach.decisions.length" class="muted">本手没有可解读的决策点。</p>
+          <ReviewDecisionCard
+            v-for="(d, i) in review.decisions"
+            :key="i"
+            :decision="d"
+            :coach="coachFor(i)"
+          />
+          <template #notes>
+            <p>{{ referenceText(review) }}</p>
+            <p v-if="referenceScopeText(review)">{{ referenceScopeText(review) }}</p>
+            <p v-if="referenceLimitationText(review)">{{ referenceLimitationText(review) }}</p>
+          </template>
+        </ReviewFrame>
       </div>
 
     </template>
@@ -1253,28 +1219,15 @@ onUnmounted(() => {
   padding: 1px 7px;
 }
 
-.hand-actions h3 {
+.hand-actions h3,
+.review-panel h3 {
   margin-top: 0;
+  font-size: 1.17em;
+  font-weight: 700;
 }
 
 .muted {
   color: var(--muted);
-}
-
-.ha-street {
-  margin-bottom: 8px;
-}
-
-.ha-street-title {
-  font-weight: 600;
-  color: var(--accent);
-  margin-bottom: 3px;
-}
-
-.ha-line {
-  padding-left: 12px;
-  color: #334155;
-  font-size: 14px;
 }
 
 .controls {
@@ -1374,12 +1327,8 @@ onUnmounted(() => {
   user-select: none;
 }
 
-.review-panel h3 {
-  margin-top: 0;
-}
-
 .hand-id-line {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 12px;
 }
 
@@ -1408,71 +1357,11 @@ onUnmounted(() => {
   color: #16a34a;
 }
 
-.review-decision {
-  padding: 10px 0;
-  border-bottom: 1px dashed #e2e8f0;
-}
-
-.review-street {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-bottom: 4px;
-}
-
-.cards-mini {
-  display: flex;
-  gap: 3px;
-}
-
-.review-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 16px;
-  font-size: 14px;
-  color: #334155;
-}
-
-.mistake {
-  margin-top: 6px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  font-size: 13px;
-}
-
-.mistake-error {
-  background: #fee2e2;
-  color: #b91c1c;
-}
-
-.mistake-warning {
-  background: #fef3c7;
-  color: #b45309;
-}
-
-.mistake-info {
-  background: #e0e7ff;
-  color: #3730a3;
-}
-
 .coach-bar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin: 8px 0;
-}
-
-.coach-note {
-  margin-top: 6px;
-  padding: 6px 8px;
-  border-radius: 6px;
-  background: #f8fafc;
-  font-size: 13px;
-  color: #1e293b;
-  line-height: 1.5;
-  white-space: pre-wrap;
 }
 
 .coach-error {
