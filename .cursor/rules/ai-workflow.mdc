@@ -13,7 +13,7 @@ alwaysApply: true
 - **Reviewer Subagent（独立只读审查）**：
   - 通过 `Task` 工具调用：`subagent_type="generalPurpose"`，固定指定 **Gemini 4 Argon**（`model="gemini-4-argon-high"`）。
   - **只读约束**：Reviewer 严禁修改文件；必须独立读取需求、`AGENTS.md`、相关文档、源码与 `git diff`。
-  - **会话连续性**：首次创建后将 Subagent ID 记录于 `.tmp/review-log.md`；同一任务后续复审优先使用 `resume="<agent_id>"` 恢复同一 Reviewer，最多自动循环 **3 轮**。
+  - **会话连续性**：首次创建后将 Subagent ID 记录于 `.workflow/review-log.md`；同一任务后续复审优先使用 `resume="<agent_id>"` 恢复同一 Reviewer，最多自动循环 **3 轮**。
   - **结构化输出**：Reviewer 输出必须包含 `VERDICT: PASS / FAIL`、`FINDINGS`（Severity / Location / Problem / Suggestion）、`PREVIOUS FINDINGS` 与 `REMAINING RISKS`。
 
 ## 2. 技术决策授权与反公文化（免打扰原则）
@@ -26,9 +26,13 @@ alwaysApply: true
   2. 连续 3 轮 Reviewer 审查仍无法收敛的架构冲突；
   3. 阶段性里程碑闭环后的最终验收，或执行 `git push` 等远端/不可逆操作（已授权推送时，优先使用不带分支参数的 `git push` 以配合上游追踪分支与 Allowlist）。
 
-## 3. 上下文与状态文件（`.tmp/`）
+## 3. 上下文与状态文件（`.workflow/`）
 
-- `.tmp/` 目录已在 `.gitignore` 中被 Git 忽略，永久不入库。**严禁**在修改或提交前后单独运行命令核验 `.tmp/` 是否被忽略，直接读写 `.tmp/` 下的文件即可。
-- `.tmp/task-brief.md`：维护当前阶段目标、不可违反的架构护栏、当前进展与下一步计划（控制在 100 行以内，供新对话快速接手）。
-  - **重要纪律**：每次更新 `.tmp/task-brief.md` 时，`## 4. 下一步计划` 必须始终保留朝向最终目标的**具体可执行步骤队列**（已完成项移入 `## 3. 当前仓库与进展`），**严禁**将 `## 4. 下一步计划` 覆盖为「等待用户的下一步指示」，以便下一个新对话读取后可直接推进。
-- `.tmp/review-log.md`：记录当前任务 Reviewer Subagent ID、历轮审查结论与修复状态。
+- `.workflow/` 目录已在 `.gitignore` 中被 Git 忽略，永久不入库。**严禁**在修改或提交前后单独运行命令核验 `.workflow/` 是否被忽略，直接读写 `.workflow/` 下的文件即可。
+- 目录分层约定（禁止在 `.workflow/` 顶层遗留一次性 `.db` / `.out` 等临时垃圾文件）：
+  - `.workflow/task-brief.md`：维护当前阶段目标、不可违反的架构护栏、当前进展与下一步计划（控制在 100 行以内，供新对话快速接手）。
+    - **重要纪律**：每次更新 `.workflow/task-brief.md` 时，`## 4. 下一步计划` 必须始终保留朝向最终目标的**具体可执行步骤队列**（已完成项移入 `## 3. 当前仓库与进展`），**严禁**将 `## 4. 下一步计划` 覆盖为「等待用户的下一步指示」，以便下一个新对话读取后可直接推进。
+  - `.workflow/review-log.md`：记录当前任务 Reviewer Subagent ID、历轮审查结论与修复状态。
+  - `.workflow/deepseek-api-basic-guide.md`：DeepSeek API 基础调用指南。
+  - `.workflow/research/`：存放当轮活跃的技术调研与方案文档。
+  - `.workflow/archive/`：按 `<日期-主题>` 子目录归档已完成阶段的历史调研与标定材料。

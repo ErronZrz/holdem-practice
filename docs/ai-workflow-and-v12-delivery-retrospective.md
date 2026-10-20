@@ -141,7 +141,7 @@
 - **工作流配置文件**：
   - `.cursor/rules/ai-workflow.mdc`：Orchestrator + Executor（Grok 4.7）+ Reviewer Subagent（Gemini 4 Argon）闭环规范；
   - `.cursor/permissions.json`：Git 提交与推送自动放行规则；
-  - `.tmp/task-brief.md` 与 `.tmp/review-log.md`：轻量任务状态与 Reviewer 会话追踪。
+  - `.workflow/task-brief.md` 与 `.workflow/review-log.md`（原 `.tmp/`，2026-10-20 重命名为 `.workflow/` 并增加 `research/` 与 `archive/` 分层）：轻量任务状态与 Reviewer 会话追踪。
 
 ### 5.2 后续可选择的演进方向（供下一阶段统筹）
 1. **方向一：真实对局体验与复盘教练层（Analysis + DeepSeek LLM）打磨**
