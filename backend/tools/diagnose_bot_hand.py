@@ -41,6 +41,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _STRONG_PREFLOP_BASE,
     _STRONG_VALUE_BONUS,
     _THIN_VALUE_BASE,
+    _TRAP_RELEASE,
     _VALUE_GATE_TOLERANCE,
     _VALUE_THRESHOLDS,
     STYLE_PARAMETERS,
@@ -50,13 +51,16 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _active_candidates,
     _active_gate,
     _checked_value_floor,
+    _facing_draw_support,
     _full_ring_call_penalty,
     _large_commit_penalty,
     _non_value_quality,
     _score,
     _size_preferences,
+    _story_quality,
     _strong_preflop_continuation,
     _strong_value_hand,
+    _trap_budget,
     build_distribution,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
@@ -203,8 +207,18 @@ def _resolve_rules(history: dict, identity: str | None) -> tuple[str, MixedPolic
     return chosen, rules_for_identifier(chosen)
 
 
-def _explain(features, legal, style: str, mode: HandMode, rules: MixedPolicyRules) -> dict:
-    """按同一次分布计算拆开评分、门槛、尺度和过滤后的候选。"""
+def _explain(
+    features,
+    legal,
+    style: str,
+    mode: HandMode,
+    rules: MixedPolicyRules,
+    trap_roll: int | None = None,
+) -> dict:
+    """按同一次分布计算拆开评分、门槛、尺度和过滤后的候选。
+
+    未传入设伏隐变量时设伏保持关闭，与没有座位键的分布观测同一口径。
+    """
     style_value = MixedStyle(style)
     parameters = STYLE_PARAMETERS[style_value]
     score = _score(features, parameters, mode, rules)
@@ -246,11 +260,43 @@ def _explain(features, legal, style: str, mode: HandMode, rules: MixedPolicyRule
     if aggression_zeroed:
         value_quality = 0
         bluff_quality = 0
+    draw_support = 0
+    draw_coverage = 0
+    draw_survival = 1000
+    penalties_clear = not aggression_zeroed
+    if (
+        penalties_clear
+        and rules.effective_draw_support
+        and features.base < 400
+        and value_quality == 0
+    ):
+        supported = _facing_draw_support(features, rules)
+        if supported is not None:
+            draw_support, draw_coverage = supported
+            passive += draw_support
+            opening = max(0, passive - call_threshold + 160)
+            draw_survival = min(draw_coverage, opening * 1000 // 160)
+            bluff_quality = bluff_quality * draw_survival // 1000
+            fold_weight = max(0, call_threshold - passive + 160) * parameters.fold_percent
+            call_weight = max(0, passive - call_threshold + 160) * parameters.call_percent
+    story_quality = _story_quality(features, rules) if penalties_clear else 0
+    bluff_quality += story_quality
+    trap_budget = _trap_budget(features, rules)
+    trap_hit = trap_roll is not None and 0 <= trap_roll < trap_budget
+    if trap_hit and legal.can_check:
+        value_quality = 0
+        bluff_quality = 0
+    if trap_hit and features.actor_checks > 0 and features.actual_call > 0:
+        passive += _TRAP_RELEASE
+        fold_weight = max(0, call_threshold - passive + 160) * parameters.fold_percent
+        call_weight = max(0, passive - call_threshold + 160) * parameters.call_percent
     preferences = _size_preferences(features, parameters, rules)
     active = _active_candidates(
         features, legal, score, value_quality, bluff_quality, preferences, rules
     )
-    distribution = build_distribution(features, legal, style_value, mode, rules)
+    distribution = build_distribution(
+        features, legal, style_value, mode, rules, trap_roll=trap_roll
+    )
     rows = [
         {
             "action": item.action.value,
@@ -286,6 +332,12 @@ def _explain(features, legal, style: str, mode: HandMode, rules: MixedPolicyRule
         "value_quality_after_guards": value_quality,
         "bluff_raw": bluff_raw,
         "bluff_quality_after_guards": bluff_quality,
+        "draw_support": draw_support,
+        "draw_coverage": draw_coverage,
+        "draw_survival": draw_survival,
+        "story_quality": story_quality,
+        "trap_budget": trap_budget,
+        "trap_hit": trap_hit,
         "aggression_zeroed_by_penalty": aggression_zeroed,
         "size_preferences_small_medium_large_allin": list(preferences),
         "dangerous_pot_multiple": _DANGEROUS_POT_MULTIPLE,
@@ -300,6 +352,24 @@ def _explain(features, legal, style: str, mode: HandMode, rules: MixedPolicyRule
         ],
         "distribution": rows,
     }
+
+
+def _marginal_rows(modes: list[dict]) -> list[dict]:
+    """按 80/10/10 把三种手模式的单位合成边缘分布，避免先四舍五入再加权。"""
+    marginal: dict[tuple[str, int], int] = {}
+    for mode_row, mode in zip(modes, _MODES, strict=True):
+        weight = _MODE_WEIGHT[mode]
+        for item in mode_row["distribution"]:
+            key = (item["action"], item["amount"])
+            marginal[key] = marginal.get(key, 0) + item["units"] * weight
+    return [
+        {
+            "action": action,
+            "amount": amount_key,
+            "pct": round(units / 1_000_000, 2),
+        }
+        for (action, amount_key), units in sorted(marginal.items(), key=lambda item: -item[1])
+    ]
 
 
 def _match_amount(action: str, recorded_amount: int, street_bet: int) -> int:
@@ -462,16 +532,7 @@ def _capture(
     category = _CATEGORY_ZH[evaluate_fast([*holes, *board_now]).category] if board_now else None
     modes = [_explain(features, legal, style, mode, rules) for mode in _MODES]
     actual_amount = _match_amount(token, amount, street_bet)
-    marginal: dict[tuple[str, int], float] = {}
-    for mode_row, mode in zip(modes, _MODES, strict=True):
-        weight = _MODE_WEIGHT[mode]
-        for item in mode_row["distribution"]:
-            key = (item["action"], item["amount"])
-            marginal[key] = marginal.get(key, 0.0) + item["pct"] * weight / 100
-    marginal_rows = [
-        {"action": action, "amount": amount_key, "pct": round(pct, 2)}
-        for (action, amount_key), pct in sorted(marginal.items(), key=lambda item: -item[1])
-    ]
+    marginal_rows = _marginal_rows(modes)
     hit = next(
         (
             item
@@ -480,6 +541,13 @@ def _capture(
         ),
         None,
     )
+    trap_budget = _trap_budget(features, rules)
+    trap_hit_marginal: list[dict] = []
+    if trap_budget > 0:
+        hit_modes = [
+            _explain(features, legal, style, mode, rules, trap_roll=0) for mode in _MODES
+        ]
+        trap_hit_marginal = _marginal_rows(hit_modes)
     return {
         "street": street,
         "street_zh": _STREET_ZH[street],
@@ -512,10 +580,15 @@ def _capture(
             "preflop_unraised": features.preflop_unraised,
             "shared_board_locked": features.shared_board_locked,
             "seat_count": features.seat_count,
+            "actor_checks": features.actor_checks,
+            "prior_street_aggressor": features.prior_street_aggressor,
+            "prior_street_aggression": features.prior_street_aggression,
+            "trap_budget": trap_budget,
             "made_tier": _tier(features.base, street),
         },
         "modes": modes,
         "marginal_80_10_10": marginal_rows,
+        "trap_hit_marginal_80_10_10": trap_hit_marginal,
         "actual_marginal_pct": None if hit is None else hit["pct"],
     }
 
@@ -613,23 +686,41 @@ def _print_decision(decision: dict) -> None:
         f"    基础分={features['base']}  听牌分={features['draw']}  "
         f"位置={features['position']}  牌面风险={features['texture']}  "
         f"对手={features['contenders']}  价格={features['price']}  "
+        f"本街过牌={features['actor_checks']}  "
+        f"上街进攻={'是' if features['prior_street_aggressor'] else '否'}"
+        f"/{features['prior_street_aggression']}  "
+        f"设伏预算={features['trap_budget']}  "
         f"档位={features['made_tier']}"
     )
     for mode in decision["modes"]:
         dist = "  ".join(
             f"{item['action']}{item['amount']}:{item['pct']}%" for item in mode["distribution"]
         )
+        extra = ""
+        if mode["draw_support"] or mode["story_quality"] or mode["trap_hit"]:
+            extra = (
+                f"  听牌支撑={mode['draw_support']}/{mode['draw_coverage']}"
+                f"  存活={mode['draw_survival']}"
+                f"  续枪={mode['story_quality']}"
+                f"  设伏={'中' if mode['trap_hit'] else '未中'}"
+            )
         print(
             f"    {mode['mode']:9} 评分={mode['score']}  被动={mode['passive_score']}"
             f"/{mode['call_threshold']}  价值质量={mode['value_quality_after_guards']}"
             f"  非价值={mode['bluff_quality_after_guards']}"
-            f"  尺度={mode['size_preferences_small_medium_large_allin']}  {dist}"
+            f"  尺度={mode['size_preferences_small_medium_large_allin']}  {dist}{extra}"
         )
     top = "  ".join(
         f"{item['action']}{item['amount']}:{item['pct']}%"
         for item in decision["marginal_80_10_10"][:4]
     )
-    print(f"    边缘化(80/10/10)  {top}")
+    print(f"    边缘化(80/10/10，未设伏)  {top}")
+    if decision["trap_hit_marginal_80_10_10"]:
+        trapped = "  ".join(
+            f"{item['action']}{item['amount']}:{item['pct']}%"
+            for item in decision["trap_hit_marginal_80_10_10"][:4]
+        )
+        print(f"    边缘化(80/10/10，设伏命中)  {trapped}")
 
 
 def main(argv: list[str] | None = None) -> int:

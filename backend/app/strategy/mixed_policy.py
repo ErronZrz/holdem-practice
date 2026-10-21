@@ -77,6 +77,26 @@ _MULTIWAY_VALUE_CONTENDERS = 3
 _STRONG_PREFLOP_BASE = 780
 # 强成牌的主动附加量：与成牌托底跨度同阶，用来把价值下注抬到免费过牌之上。
 _STRONG_VALUE_BONUS = 160
+# 设伏预算按牌面风险与人数递减，封顶后不再升高。
+_TRAP_TEXTURE_DIVISOR = 10
+_TRAP_BUDGET_CAP = 40
+# 设伏过牌后再面对下注时，补回半段强牌加分，避免只剩加注。
+_TRAP_RELEASE = 80
+# 续枪只记住上一街有限次进攻，并按牌面风险折减。
+_STORY_COUNT_CAP = 2
+_STORY_COUNT_STEP = 2
+_STORY_TEXTURE_DIVISOR = 8
+# 听牌支撑只覆盖基础分低于这条线的听牌，人数再多也至少留下四成覆盖率。
+_DRAW_SUPPORT_BASE = 400
+_DRAW_RETENTION_FLOOR = 400
+_DRAW_CROWD_STEP = 150
+# 听牌分整除还原补牌数时使用的权重与未见牌张数，翻牌与转牌分开。
+_DRAW_FLOP_OUTS_WEIGHT = 12
+_DRAW_TURN_OUTS_WEIGHT = 8
+_DRAW_FLOP_UNSEEN = 47
+_DRAW_TURN_UNSEEN = 46
+# 跟注开口与弃牌、跟注权重里的缓冲是同一跨度。
+_PASSIVE_SLACK = 160
 # 翻前强牌的继续偏移：大约抵消一次弃牌缓冲，避免强牌在有价格时直接弃掉。
 _STRONG_PREFLOP_CONTINUATION = 180
 # 强成牌的尺度偏好：小注只留一点，中注与大注占多数，不把整叠当作默认尺度。
@@ -160,6 +180,20 @@ class MixedPolicyRules:
     guarded_strong_commitment: bool = False
     # 主动尺度是否先按小盲对齐再夹紧。默认关闭，既有身份的候选金额逐位不变。
     align_bet_to_small_blind: bool = False
+    # 翻牌与转牌的强成牌是否按手牌级隐变量整段过牌。默认关闭。
+    trap_allocation: bool = False
+    # 单挑、牌面风险为 0 时的设伏预算百分数，再按人数与牌面往下减。
+    trap_base_percent: int = 24
+    # 每多一名对手从设伏预算里扣掉的百分数。
+    trap_crowd_percent: int = 8
+    # 上一街由自己收尾进攻后，这一街是否给无阻断空气补一点下注质量。默认关闭。
+    story_momentum: bool = False
+    # 续枪质量的起点，再按上一街进攻次数上调、按牌面风险下调。
+    story_quality_base: int = 10
+    # 听牌面对下注时是否按覆盖率抬跟注并收口加注。默认关闭。
+    effective_draw_support: bool = False
+    # 覆盖率满额时加进被动分的跨度。
+    draw_support_span: int = 360
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -228,6 +262,13 @@ MIXED_LOCAL_V12_RULES = replace(
 MIXED_LOCAL_V13_RULES = replace(
     MIXED_LOCAL_V12_RULES,
     align_bet_to_small_blind=True,
+)
+# 第十四版口径：在第十三版上打开设伏、续枪与听牌覆盖率。整型系数沿用默认值。
+MIXED_LOCAL_V14_RULES = replace(
+    MIXED_LOCAL_V13_RULES,
+    trap_allocation=True,
+    story_momentum=True,
+    effective_draw_support=True,
 )
 
 
@@ -361,8 +402,12 @@ def build_distribution(
     style: MixedStyle,
     mode: HandMode,
     rules: MixedPolicyRules = MIXED_LOCAL_V1_RULES,
+    trap_roll: int | None = None,
 ) -> MixedDistribution:
-    """按固定规则计算当前局面的联合动作/尺度分布。"""
+    """按固定规则计算当前局面的联合动作/尺度分布。
+
+    ``trap_roll`` 缺省时设伏保持关闭，避免没有座位键的查询路径自行抽数。
+    """
     _require_coherent_legal(legal)
     parameters = STYLE_PARAMETERS[style]
     score = _score(features, parameters, mode, rules)
@@ -410,6 +455,44 @@ def build_distribution(
         # 同一笔不该跟的承诺上不再加注，避免把中等牌力打成更大的底池。
         value_quality = 0
         bluff_quality = 0
+    penalties_clear = commit_penalty == 0 and ring_penalty == 0
+    if (
+        penalties_clear
+        and rules.effective_draw_support
+        and features.base < _DRAW_SUPPORT_BASE
+        and value_quality == 0
+    ):
+        # 先把覆盖率支撑加进被动分，再用跟注还活着的比例收口非价值加注。
+        supported = _facing_draw_support(features, rules)
+        if supported is not None:
+            support, coverage = supported
+            passive_score += support
+            opening = max(0, passive_score - call_threshold + _PASSIVE_SLACK)
+            survival = min(coverage, opening * 1000 // _PASSIVE_SLACK)
+            bluff_quality = bluff_quality * survival // 1000
+            fold_weight = max(0, call_threshold - passive_score + _PASSIVE_SLACK) * (
+                parameters.fold_percent
+            )
+            call_weight = max(0, passive_score - call_threshold + _PASSIVE_SLACK) * (
+                parameters.call_percent
+            )
+    if penalties_clear:
+        # 承诺没有把主动质量清掉时，才把上一街自己的进攻补进这一街的空气下注。
+        bluff_quality += _story_quality(features, rules)
+    if _trap_applies(features, rules, trap_roll):
+        if legal.can_check:
+            # 设伏命中且可以免费行动：这一街整段过牌，不保留半诈唬。
+            value_quality = 0
+            bluff_quality = 0
+        if features.actor_checks > 0 and features.actual_call > 0:
+            # 本街已经过牌再面对下注：强牌价值保留，只把一小段质量还到跟注。
+            passive_score += _TRAP_RELEASE
+            fold_weight = max(0, call_threshold - passive_score + _PASSIVE_SLACK) * (
+                parameters.fold_percent
+            )
+            call_weight = max(0, passive_score - call_threshold + _PASSIVE_SLACK) * (
+                parameters.call_percent
+            )
     aggression_scale = Fraction(
         parameters.aggression_percent
         * _MODE_AGGRESSION_PERCENT[mode]
@@ -669,6 +752,87 @@ def _large_commit_penalty(features: MixedFeatures, rules: MixedPolicyRules) -> i
     if not (committing or large_price):
         return 0
     return _LARGE_COMMIT_PENALTY
+
+
+def _facing_draw_support(
+    features: MixedFeatures, rules: MixedPolicyRules
+) -> tuple[int, int] | None:
+    """翻牌或转牌听牌面对下注时的支撑分与覆盖率。
+
+    街不对、没有待跟注或还原不出补牌时返回空，调用方不改被动分，也不收口加注。
+    """
+    if features.street is Street.FLOP:
+        outs_weight, unseen = _DRAW_FLOP_OUTS_WEIGHT, _DRAW_FLOP_UNSEEN
+    elif features.street is Street.TURN:
+        outs_weight, unseen = _DRAW_TURN_OUTS_WEIGHT, _DRAW_TURN_UNSEEN
+    else:
+        return None
+    if features.price <= 0 or features.actual_call <= 0 or features.draw <= 0:
+        return None
+    outs = features.draw // outs_weight
+    if outs <= 0:
+        return None
+    equity = 1000 * outs // unseen
+    required = 1000 * features.price // (features.price + 1000)
+    coverage = 1000 if required <= 0 else min(1000, 1000 * equity // required)
+    retention = max(
+        _DRAW_RETENTION_FLOOR,
+        1000 - _DRAW_CROWD_STEP * max(0, features.contenders - 2),
+    )
+    coverage = coverage * retention // 1000
+    support = rules.draw_support_span * coverage // 1000
+    return support, coverage
+
+
+def _story_quality(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """无人下注时，把上一街自己收尾的进攻补进没有听牌也没有 A/K 的空气。"""
+    if not rules.story_momentum:
+        return 0
+    if features.street not in (Street.TURN, Street.RIVER):
+        return 0
+    if not features.prior_street_aggressor or features.actual_call > 0:
+        return 0
+    if features.draw > 0 or features.base >= _CHECKED_VALUE_FLOOR:
+        return 0
+    if features.has_broadway_blocker or features.contenders > 1:
+        return 0
+    if features.recent_aggression > 1 or features.effective_stack <= 2 * features.pot:
+        return 0
+    raw = (
+        rules.story_quality_base
+        + _STORY_COUNT_STEP * min(features.prior_street_aggression, _STORY_COUNT_CAP)
+        - features.texture // _STORY_TEXTURE_DIVISOR
+    )
+    return max(0, raw)
+
+
+def _trap_budget(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """强成牌在翻牌或转牌可以慢打的百分预算。短码、河牌和中等成牌为 0。"""
+    if not rules.trap_allocation:
+        return 0
+    if features.street not in (Street.FLOP, Street.TURN):
+        return 0
+    if features.base < _THIN_VALUE_BASE or features.effective_stack <= features.pot:
+        return 0
+    raw = (
+        rules.trap_base_percent
+        - features.texture // _TRAP_TEXTURE_DIVISOR
+        - rules.trap_crowd_percent * max(0, features.contenders - 1)
+    )
+    return max(0, min(_TRAP_BUDGET_CAP, raw))
+
+
+def _trap_applies(
+    features: MixedFeatures,
+    rules: MixedPolicyRules,
+    trap_roll: int | None,
+) -> bool:
+    """开关关闭或未传入隐变量时恒不设伏。传入值必须落在百分区间。"""
+    if not rules.trap_allocation or trap_roll is None:
+        return False
+    if not 0 <= trap_roll < 100:
+        raise MixedPolicyError(f"设伏取值必须落在 [0,100)，收到 {trap_roll}")
+    return trap_roll < _trap_budget(features, rules)
 
 
 def _active_gate(

@@ -44,7 +44,8 @@ _BOARD_FLUSH_SUIT_FLOOR = 3
 # 任意两张底牌最多能补上的点数缺口。
 _HOLE_CARD_BUDGET = 2
 
-# 摘要中 bet / raise 的列索引：用于统计本街对手主动动作。
+# 摘要中 check / bet / raise 的列索引。过牌列只记行动者本街已过牌次数。
+_CHECK_INDEX = 1
 _BET_INDEX = 3
 _RAISE_INDEX = 4
 
@@ -85,6 +86,12 @@ class MixedFeatures:
     shared_board_locked: bool = False
     # 开局座位总数。旧的手工构造不填时为 0，因此不会被当成满员桌。
     seat_count: int = 0
+    # 行动者本街已经过牌的次数。手工构造不填时为 0，设伏释放不会误开。
+    actor_checks: int = 0
+    # 上一街最后一次主动投入是否来自行动者。翻前恒为假。
+    prior_street_aggressor: bool = False
+    # 上一街行动者的下注次数加加注次数。翻前恒为 0。
+    prior_street_aggression: int = 0
 
     @property
     def spr_denominator(self) -> int:
@@ -126,6 +133,15 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
     live = sum(1 for p in players if p.seat != actor.seat and not p.folded and p.stack > 0)
 
     counts = context.streets[street_index].counts_by_seat
+    actor_checks = counts[actor.seat][_CHECK_INDEX]
+    if street_index == 0:
+        prior_aggressor = False
+        prior_aggression = 0
+    else:
+        prior = context.streets[street_index - 1]
+        prior_counts = prior.counts_by_seat[actor.seat]
+        prior_aggressor = prior.last_aggressor == actor.seat
+        prior_aggression = prior_counts[_BET_INDEX] + prior_counts[_RAISE_INDEX]
     aggression = sum(
         counts[p.seat][_BET_INDEX] + counts[p.seat][_RAISE_INDEX]
         for p in players
@@ -182,6 +198,9 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         hole_ranks=(ranks[0], ranks[1]),
         seat_count=len(players),
         shared_board_locked=shared_locked,
+        actor_checks=actor_checks,
+        prior_street_aggressor=prior_aggressor,
+        prior_street_aggression=prior_aggression,
     )
 
 

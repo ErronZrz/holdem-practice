@@ -51,6 +51,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V11,
     MIXED_STRATEGY_IDENTIFIER_V12,
     MIXED_STRATEGY_IDENTIFIER_V13,
+    MIXED_STRATEGY_IDENTIFIER_V14,
     MIXED_STRATEGY_IDENTIFIERS,
     rules_for_identifier,
 )
@@ -196,6 +197,7 @@ def test_seventh_identity_is_registered_and_cumulative() -> None:
         MIXED_STRATEGY_IDENTIFIER_V11,
         MIXED_STRATEGY_IDENTIFIER_V12,
         MIXED_STRATEGY_IDENTIFIER_V13,
+        MIXED_STRATEGY_IDENTIFIER_V14,
     )
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V7).version == 7
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V7).name == "mixed-local"
@@ -221,6 +223,7 @@ def test_digest_fields_cover_exactly_the_registered_identities() -> None:
         MIXED_STRATEGY_IDENTIFIER_V11,
         MIXED_STRATEGY_IDENTIFIER_V12,
         MIXED_STRATEGY_IDENTIFIER_V13,
+        MIXED_STRATEGY_IDENTIFIER_V14,
     }
     assert DIGEST_RULE_FIELDS[MIXED_STRATEGY_IDENTIFIER_V7] == (
         "shared_board_chop_caliber",

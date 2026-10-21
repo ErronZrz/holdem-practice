@@ -156,8 +156,8 @@ def test_twelfth_version_only_adds_the_guard() -> None:
     )
 
 
-def test_twelfth_identity_stays_selectable_when_default_is_thirteenth() -> None:
-    """第十二版可构造；未指定策略时创建对局使用第十三版。"""
+def test_twelfth_identity_stays_selectable_when_default_is_fourteenth() -> None:
+    """第十二版可构造；未指定策略时创建对局使用第十四版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
     twelfth_at = ordered.index(MIXED_STRATEGY_IDENTIFIER_V12)
     assert ordered[twelfth_at - 1] == MIXED_STRATEGY_IDENTIFIER_V11
@@ -166,7 +166,7 @@ def test_twelfth_identity_stays_selectable_when_default_is_thirteenth() -> None:
         MIXED_STRATEGY_IDENTIFIER_V12
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V12) is MIXED_LOCAL_V12_RULES
-    assert CreateGameRequest().bot_strategy == "mixed-local@13"
+    assert CreateGameRequest().bot_strategy == "mixed-local@14"
     selected = CreateGameRequest(bot_strategy=MIXED_STRATEGY_IDENTIFIER_V12)
     assert selected.bot_strategy == MIXED_STRATEGY_IDENTIFIER_V12
 
@@ -328,7 +328,7 @@ def test_full_ring_medium_hand_still_folds_a_deep_call() -> None:
 
 
 def test_under_test_whitelist_accepts_the_twelfth_identity() -> None:
-    """被测白名单同时接受第九版到第十三版；既有第九版载荷仍写第九版。"""
+    """被测白名单同时接受第九版到第十四版；既有第九版载荷仍写第九版。"""
     assert UNDER_TEST_IDENTIFIER == "mixed-local@9"
     assert frozenset(
         {
@@ -337,6 +337,7 @@ def test_under_test_whitelist_accepts_the_twelfth_identity() -> None:
             "mixed-local@11",
             "mixed-local@12",
             "mixed-local@13",
+            "mixed-local@14",
         }
     ) == UNDER_TEST_IDENTIFIERS
     accepted = require_locked_under_test_mapping(

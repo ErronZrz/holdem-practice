@@ -150,8 +150,8 @@ def test_ninth_version_values_are_recorded() -> None:
     )
 
 
-def test_ninth_identity_stays_selectable_when_default_is_thirteenth() -> None:
-    """第九版可构造；未指定策略时创建对局使用第十三版。"""
+def test_ninth_identity_stays_selectable_when_default_is_fourteenth() -> None:
+    """第九版可构造；未指定策略时创建对局使用第十四版。"""
     ninth_at = MIXED_STRATEGY_IDENTIFIERS.index(MIXED_STRATEGY_IDENTIFIER_V9)
     assert MIXED_STRATEGY_IDENTIFIERS[ninth_at - 1] == MIXED_STRATEGY_IDENTIFIER_V8
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V9).version == 9
@@ -159,7 +159,7 @@ def test_ninth_identity_stays_selectable_when_default_is_thirteenth() -> None:
         MIXED_STRATEGY_IDENTIFIER_V9
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V9) is MIXED_LOCAL_V9_RULES
-    assert CreateGameRequest().bot_strategy == "mixed-local@13"
+    assert CreateGameRequest().bot_strategy == "mixed-local@14"
     selected = CreateGameRequest(bot_strategy=MIXED_STRATEGY_IDENTIFIER_V9)
     assert selected.bot_strategy == MIXED_STRATEGY_IDENTIFIER_V9
 

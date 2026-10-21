@@ -230,7 +230,7 @@ def test_new_hand_detail_is_versioned_and_seed_free() -> None:
     detail = client.get(f"/hands/{body['last_hand_id']}").json()
     assert "seed" not in _all_keys(detail)
     assert detail["history"]["schema_version"] == "hand-history.v1"
-    assert detail["history"]["bot_strategy"] == "mixed-local@13"
+    assert detail["history"]["bot_strategy"] == "mixed-local@14"
 
     review = client.get(f"/hands/{body['last_hand_id']}/review").json()
     assert "seed" not in _all_keys(review)

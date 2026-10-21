@@ -50,6 +50,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V11,
     MIXED_STRATEGY_IDENTIFIER_V12,
     MIXED_STRATEGY_IDENTIFIER_V13,
+    MIXED_STRATEGY_IDENTIFIER_V14,
     MIXED_STRATEGY_IDENTIFIERS,
     MixedStrategyError,
     rules_for_identifier,
@@ -207,6 +208,7 @@ def test_eighth_identity_is_registered_and_cumulative() -> None:
         MIXED_STRATEGY_IDENTIFIER_V11,
         MIXED_STRATEGY_IDENTIFIER_V12,
         MIXED_STRATEGY_IDENTIFIER_V13,
+        MIXED_STRATEGY_IDENTIFIER_V14,
     )
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V8).version == 8
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V8).name == "mixed-local"
@@ -231,6 +233,7 @@ def test_digest_fields_add_exactly_one_entry() -> None:
         MIXED_STRATEGY_IDENTIFIER_V11,
         MIXED_STRATEGY_IDENTIFIER_V12,
         MIXED_STRATEGY_IDENTIFIER_V13,
+        MIXED_STRATEGY_IDENTIFIER_V14,
     }
     assert DIGEST_RULE_FIELDS[MIXED_STRATEGY_IDENTIFIER_V8] == (
         "shared_board_chop_caliber",
@@ -469,4 +472,4 @@ def test_candidates_stay_inside_the_known_legal_set() -> None:
 def test_unregistered_identity_is_rejected() -> None:
     """未登记字段的身份必须显式失败，不得静默回退到别的口径。"""
     with pytest.raises(MixedStrategyError):
-        config_digest("mixed-local@14")
+        config_digest("mixed-local@15")

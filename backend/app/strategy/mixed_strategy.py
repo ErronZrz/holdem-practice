@@ -35,6 +35,7 @@ from .mixed_policy import (
     MIXED_LOCAL_V11_RULES,
     MIXED_LOCAL_V12_RULES,
     MIXED_LOCAL_V13_RULES,
+    MIXED_LOCAL_V14_RULES,
     MIXED_STYLE_ORDER,
     HandMode,
     MixedDistribution,
@@ -70,6 +71,8 @@ MIXED_STRATEGY_IDENTIFIER_V11 = "mixed-local@11"
 MIXED_STRATEGY_IDENTIFIER_V12 = "mixed-local@12"
 # 第十三版身份：在第十二版基础上把主动尺度对齐到小盲。
 MIXED_STRATEGY_IDENTIFIER_V13 = "mixed-local@13"
+# 第十四版身份：在第十三版基础上打开设伏、续枪与听牌覆盖率。
+MIXED_STRATEGY_IDENTIFIER_V14 = "mixed-local@14"
 MIXED_STRATEGY_IDENTIFIERS: tuple[str, ...] = (
     MIXED_STRATEGY_IDENTIFIER,
     MIXED_STRATEGY_IDENTIFIER_V2,
@@ -84,6 +87,7 @@ MIXED_STRATEGY_IDENTIFIERS: tuple[str, ...] = (
     MIXED_STRATEGY_IDENTIFIER_V11,
     MIXED_STRATEGY_IDENTIFIER_V12,
     MIXED_STRATEGY_IDENTIFIER_V13,
+    MIXED_STRATEGY_IDENTIFIER_V14,
 )
 # 身份到规则口径的映射；旧身份的含义与分布不随新身份改变。
 MIXED_STRATEGY_RULES: dict[str, MixedPolicyRules] = {
@@ -100,6 +104,7 @@ MIXED_STRATEGY_RULES: dict[str, MixedPolicyRules] = {
     MIXED_STRATEGY_IDENTIFIER_V11: MIXED_LOCAL_V11_RULES,
     MIXED_STRATEGY_IDENTIFIER_V12: MIXED_LOCAL_V12_RULES,
     MIXED_STRATEGY_IDENTIFIER_V13: MIXED_LOCAL_V13_RULES,
+    MIXED_STRATEGY_IDENTIFIER_V14: MIXED_LOCAL_V14_RULES,
 }
 # 手模式取值的均匀整数上界。
 _HAND_MODE_ROLL_RANGE = 100
@@ -193,7 +198,12 @@ class MixedSeatPolicy:
         """给出本次决策的分布；显式指定模式只供离线验证与测试使用。"""
         features = features_for(verified, legal)
         return build_distribution(
-            features, legal, self._style, mode or self.hand_mode(verified), self._rules
+            features,
+            legal,
+            self._style,
+            mode or self.hand_mode(verified),
+            self._rules,
+            trap_roll=self.trap_roll(verified),
         )
 
     def features_for(self, verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeatures:
@@ -204,7 +214,12 @@ class MixedSeatPolicy:
         """按本座位派生流采样一个动作；不读取其他座位或主键。"""
         mode = self.hand_mode(verified)
         distribution = build_distribution(
-            features_for(verified, legal), legal, self._style, mode, self._rules
+            features_for(verified, legal),
+            legal,
+            self._style,
+            mode,
+            self._rules,
+            trap_roll=self.trap_roll(verified),
         )
         return distribution.sample(self._action_rng(verified))
 
@@ -213,6 +228,11 @@ class MixedSeatPolicy:
         digest = _derive(self._seat_key, ("hand", verified.context.hand_number, "mode"))
         roll = random.Random(_derived_int(digest)).randrange(_HAND_MODE_ROLL_RANGE)
         return hand_mode_for(roll)
+
+    def trap_roll(self, verified: VerifiedMixedInput) -> int:
+        """本手设伏隐变量，与手模式和行动随机流分开，重复计算得到同一个数。"""
+        digest = _derive(self._seat_key, ("hand", verified.context.hand_number, "trap"))
+        return random.Random(_derived_int(digest)).randrange(_HAND_MODE_ROLL_RANGE)
 
     def _action_rng(self, verified: VerifiedMixedInput) -> random.Random:
         """本次动作专用随机源：按手号与事件数分离，可独立重放。"""
