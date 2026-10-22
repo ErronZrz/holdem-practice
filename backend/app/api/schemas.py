@@ -234,6 +234,14 @@ class HandReview(BaseModel):
     mistake_count: int
 
 
+class CoachMessage(BaseModel):
+    """决策点追问中的一轮发言。"""
+
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: str
+
+
 class DecisionExplanation(BaseModel):
     """一个真人决策点的教练解读，不替代复盘里的动作和数字。"""
 
@@ -246,6 +254,13 @@ class DecisionExplanation(BaseModel):
     cached: bool
     provider: str
     model: str
+    messages: list[CoachMessage] = Field(default_factory=list)
+
+
+class AskCoachRequest(BaseModel):
+    """针对一个决策点的追问原文。空白和长度在接口里校验。"""
+
+    question: str
 
 
 class HandExplanation(BaseModel):

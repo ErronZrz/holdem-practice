@@ -1,4 +1,4 @@
-"""Session / Hand 与教练解读缓存的持久化读写。
+"""Session / Hand、教练解读缓存与追问记录的持久化读写。
 
 函数均不自行 commit，由调用方控制事务边界。
 """
@@ -8,7 +8,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import CoachExplanationModel, HandModel, SessionModel
+from .models import CoachExplanationModel, CoachMessageModel, HandModel, SessionModel
 
 
 def _new_id() -> str:
@@ -119,6 +119,47 @@ def add_coach_explanation(
         explanation=explanation,
         recommended_action=recommended_action,
         reasoning_summary=reasoning_summary,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        reasoning_tokens=reasoning_tokens,
+        total_tokens=total_tokens,
+    )
+    db.add(row)
+    db.flush()
+    return row
+
+
+def list_coach_messages(db: Session, cache_key: str) -> list[CoachMessageModel]:
+    """按写入顺序读取一个决策点的追问。同一秒内用主键区分先后。"""
+    return list(
+        db.scalars(
+            select(CoachMessageModel)
+            .where(CoachMessageModel.cache_key == cache_key)
+            .order_by(CoachMessageModel.created_at, CoachMessageModel.id)
+        )
+    )
+
+
+def add_coach_message(
+    db: Session,
+    *,
+    cache_key: str,
+    hand_id: str,
+    action_index: int,
+    role: str,
+    content: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    reasoning_tokens: int,
+    total_tokens: int,
+) -> CoachMessageModel:
+    """写入一轮追问（flush，不 commit）。"""
+    row = CoachMessageModel(
+        cache_key=cache_key,
+        hand_id=hand_id,
+        action_index=action_index,
+        role=role,
+        content=content,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         reasoning_tokens=reasoning_tokens,

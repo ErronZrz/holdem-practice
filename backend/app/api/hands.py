@@ -7,9 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.analysis.hand_review import build_review
-from app.llm.coach import explain_decisions
+from app.llm.coach import ask_decision, cached_explanations, explain_decisions
 from app.llm.deepseek import DeepSeekProvider
-from app.llm.types import CoachUnavailableError
+from app.llm.types import (
+    CoachDecisionNotFoundError,
+    CoachNotReadyError,
+    CoachUnavailableError,
+)
 from app.storage import repository
 from app.storage.db import get_db
 from app.storage.hand_history import project_hand_history
@@ -114,6 +118,74 @@ def explain_hand(
     except CoachUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return schemas.HandExplanation(hand_id=hand.id, decisions=decisions)
+
+
+@router.get("/hands/{hand_id}/explain", response_model=schemas.HandExplanation)
+def get_hand_explanation(
+    hand_id: str,
+    db: Annotated[Session, Depends(get_db)],
+    provider: Annotated[Any, Depends(get_coach_provider)],
+) -> schemas.HandExplanation:
+    """只读返回当前提示词版本下已缓存的解读和追问，不调用上游。"""
+    hand, history, review = _reviewed_hand(db, hand_id)
+    return schemas.HandExplanation(
+        hand_id=hand.id,
+        decisions=cached_explanations(
+            db,
+            hand_id=hand.id,
+            history=history,
+            review=review,
+            provider=provider,
+        ),
+    )
+
+
+@router.post(
+    "/hands/{hand_id}/decisions/{action_index}/ask",
+    response_model=schemas.DecisionExplanation,
+)
+def ask_hand_decision(
+    hand_id: str,
+    action_index: int,
+    body: schemas.AskCoachRequest,
+    db: Annotated[Session, Depends(get_db)],
+    provider: Annotated[Any, Depends(get_coach_provider)],
+) -> schemas.DecisionExplanation:
+    """围绕一个已有解读的决策点追问，并把这一轮问答落库。"""
+    question = _clean_question(body.question)
+    hand, history, review = _reviewed_hand(db, hand_id)
+    try:
+        decision = ask_decision(
+            db,
+            hand_id=hand.id,
+            history=history,
+            review=review,
+            action_index=action_index,
+            question=question,
+            provider=provider,
+        )
+    except CoachDecisionNotFoundError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except CoachNotReadyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CoachUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return schemas.DecisionExplanation.model_validate(decision)
+
+
+def _reviewed_hand(db: Session, hand_id: str) -> tuple[HandModel, dict, dict]:
+    hand = repository.get_hand(db, hand_id)
+    if hand is None:
+        raise HTTPException(status_code=404, detail="手牌记录不存在")
+    history = json.loads(hand.history_json)
+    return hand, history, build_review(history)
+
+
+def _clean_question(question: str) -> str:
+    text = question.strip()
+    if not text or len(text) > 500:
+        raise HTTPException(status_code=422, detail="问题需为 1 到 500 个字符")
+    return text
 
 
 @router.get("/games/{game_id}/stats", response_model=schemas.SessionStats)

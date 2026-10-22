@@ -1,8 +1,8 @@
-"""SQLAlchemy 数据模型：Session、Hand，以及独立的教练解读缓存。
+"""SQLAlchemy 数据模型：Session、Hand，以及独立的教练解读与追问。
 
 Session 为顶层实体（单用户模式），Hand 挂在 Session 下；每手完整的 Hand History
 以 JSON 文本形式存入 ``Hand.history_json``，作为 source of truth。
-教练解读另表保存，不改动手牌历史。
+教练解读和追问另表保存，不改动手牌历史。
 """
 
 from datetime import UTC, datetime
@@ -78,6 +78,24 @@ class CoachExplanationModel(Base):
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     recommended_action: Mapped[str | None] = mapped_column(String(16), nullable=True)
     reasoning_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class CoachMessageModel(Base):
+    """决策点上的一轮追问。按缓存键挂在初始解读下面，按写入顺序回放。"""
+
+    __tablename__ = "coach_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cache_key: Mapped[str] = mapped_column(String(512), index=True, nullable=False)
+    hand_id: Mapped[str] = mapped_column(String(32), index=True, nullable=False)
+    action_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     completion_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     reasoning_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

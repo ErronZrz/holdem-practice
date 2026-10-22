@@ -51,19 +51,25 @@ class DeepSeekProvider:
         self._timeout = timeout
         self._opener = opener
 
-    def complete(self, messages: list[dict[str, str]]) -> Completion:
-        """发送一次非流式补全。思考模式固定开启，并要求上游返回 JSON 对象。"""
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = True,
+    ) -> Completion:
+        """发送一次非流式补全。思考模式固定开启；只有结构化解读才要求 JSON。"""
         api_key = self._current_key()
         if not api_key:
             raise CoachUnavailableError(_MISSING_KEY)
-        payload = {
+        payload: dict[str, object] = {
             "model": self.model_name,
             "messages": messages,
             "thinking": {"type": "enabled"},
             "reasoning_effort": "high",
             "stream": False,
-            "response_format": {"type": "json_object"},
         }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
         request = urllib.request.Request(
             f"{self._base_url}/chat/completions",
             data=json.dumps(payload).encode("utf-8"),

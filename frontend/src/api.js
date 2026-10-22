@@ -54,6 +54,15 @@ export const api = {
   explainHand(id) {
     return request(`/hands/${id}/explain`, { method: 'POST', body: '{}' })
   },
+  getExplanation(id) {
+    return request(`/hands/${id}/explain`)
+  },
+  askCoach(id, actionIndex, question) {
+    return request(`/hands/${id}/decisions/${actionIndex}/ask`, {
+      method: 'POST',
+      body: JSON.stringify({ question }),
+    })
+  },
   getStats(id) {
     return request(`/games/${id}/stats`)
   },

@@ -1,5 +1,6 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { api } from '../api.js'
 import { actionText, distributionText } from '../cards.js'
 import ActionChip from './ActionChip.vue'
 import PlayingCard from './PlayingCard.vue'
@@ -8,7 +9,51 @@ import StreetBadge from './StreetBadge.vue'
 const props = defineProps({
   decision: { type: Object, required: true },
   coach: { type: Object, default: null },
+  handId: { type: String, default: '' },
 })
+
+const emit = defineEmits(['asked'])
+
+const open = ref(false)
+const draft = ref('')
+const sending = ref(false)
+const askError = ref('')
+let alive = true
+
+const threadCount = computed(() => props.coach?.messages?.length ?? 0)
+const chatLabel = computed(() => (open.value ? '收起追问' : '追问教练'))
+
+watch(
+  threadCount,
+  (count, previous) => {
+    if (count > 0 && (previous == null || count > previous)) open.value = true
+  },
+  { immediate: true },
+)
+
+onUnmounted(() => {
+  alive = false
+})
+
+async function sendQuestion() {
+  const text = draft.value.trim()
+  const handId = props.handId
+  const actionIndex = props.coach?.action_index
+  if (!text || sending.value || !handId || actionIndex == null) return
+  sending.value = true
+  askError.value = ''
+  try {
+    const updated = await api.askCoach(handId, actionIndex, text)
+    if (!alive || props.handId !== handId) return
+    draft.value = ''
+    emit('asked', updated)
+  } catch (error) {
+    if (!alive || props.handId !== handId) return
+    askError.value = error.message || '追问暂时不可用'
+  } finally {
+    if (alive) sending.value = false
+  }
+}
 
 const sameType = computed(() => props.decision.action.action === props.decision.bot_action.action)
 const distribution = computed(() => props.decision.bot_distribution || [])
@@ -121,8 +166,64 @@ function segmentLabel(item) {
       {{ m.message }}
     </div>
     <div v-if="coach" class="coach-note">
-      <div>{{ coach.explanation }}</div>
+      <div class="coach-note-top">
+        <div class="coach-explanation">{{ coach.explanation }}</div>
+        <button
+          type="button"
+          class="coach-chat-toggle"
+          :title="chatLabel"
+          :aria-label="chatLabel"
+          :aria-expanded="open"
+          @click="open = !open"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M5 6.5A2.5 2.5 0 0 1 7.5 4h9A2.5 2.5 0 0 1 19 6.5v7a2.5 2.5 0 0 1-2.5 2.5H10l-4.2 3.2c-.4.3-.8 0-.8-.5V16h-.5A2.5 2.5 0 0 1 5 13.5v-7z"
+            />
+          </svg>
+          <span v-if="threadCount && !open" class="coach-chat-dot" aria-hidden="true"></span>
+        </button>
+      </div>
       <div class="coach-meta">{{ coach.model }} · {{ coach.cached ? '已缓存' : '新生成' }}</div>
+      <form v-if="open" class="coach-chat" @submit.prevent="sendQuestion">
+        <div v-if="threadCount" class="coach-thread">
+          <div
+            v-for="(msg, idx) in coach.messages"
+            :key="idx"
+            class="coach-msg"
+            :class="msg.role === 'user' ? 'is-user' : 'is-coach'"
+          >
+            <span class="coach-msg-role">{{ msg.role === 'user' ? '你' : '教练' }}</span>
+            <span class="coach-msg-body">{{ msg.content }}</span>
+          </div>
+        </div>
+        <p v-else class="coach-chat-empty">可以针对这个决策点继续追问。</p>
+        <div class="coach-ask">
+          <input
+            v-model="draft"
+            type="text"
+            maxlength="500"
+            autocomplete="off"
+            placeholder="针对这个决策点追问"
+            aria-label="追问内容"
+            :disabled="sending"
+          />
+          <button type="submit" :disabled="sending || !draft.trim()">
+            {{ sending ? '发送中…' : '发送' }}
+          </button>
+        </div>
+        <p v-if="askError" class="coach-ask-error">{{ askError }}</p>
+      </form>
     </div>
   </article>
 </template>
@@ -346,11 +447,115 @@ function segmentLabel(item) {
   font-size: 13px;
   color: #1e293b;
   line-height: 1.5;
+}
+
+.coach-note-top {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.coach-explanation {
+  flex: 1;
+  min-width: 0;
   white-space: pre-wrap;
+}
+
+.coach-chat-toggle {
+  position: relative;
+  flex: none;
+  padding: 2px;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  line-height: 0;
+}
+
+.coach-chat-toggle:hover:not(:disabled) {
+  background: transparent;
+  color: #1d4ed8;
+}
+
+.coach-chat-dot {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: #2563eb;
 }
 
 .coach-meta {
   color: var(--muted);
+}
+
+.coach-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid #e2e8f0;
+}
+
+.coach-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.coach-msg {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: 8px;
+}
+
+.coach-msg.is-user {
+  background: #eff6ff;
+}
+
+.coach-msg.is-coach {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+}
+
+.coach-msg-role {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.coach-msg-body {
+  white-space: pre-wrap;
+}
+
+.coach-chat-empty {
+  margin: 0;
+  color: var(--muted);
+}
+
+.coach-ask {
+  display: flex;
+  gap: 6px;
+}
+
+.coach-ask input {
+  flex: 1;
+  min-width: 0;
+}
+
+.coach-ask button {
+  flex: none;
+  padding: 8px 12px;
+}
+
+.coach-ask-error {
+  margin: 0;
+  color: #b91c1c;
+  font-size: 12px;
 }
 
 @media (max-width: 560px) {

@@ -8,6 +8,14 @@ class CoachUnavailableError(Exception):
     """密钥缺失或上游失败。调用方将其转成可展示的错误，不影响复盘数字。"""
 
 
+class CoachNotReadyError(Exception):
+    """该决策点还没有当前版本的初始解读，不能直接追问。"""
+
+
+class CoachDecisionNotFoundError(Exception):
+    """追问序号不在这手真人决策点里。"""
+
+
 @dataclass(frozen=True)
 class Completion:
     """一次补全的正文、思维链与用量。"""
@@ -26,5 +34,10 @@ class CoachProvider(Protocol):
     provider_name: str
     model_name: str
 
-    def complete(self, messages: list[dict[str, str]]) -> Completion:
-        """根据已构造好的对话返回一条解读。"""
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = True,
+    ) -> Completion:
+        """根据已构造好的对话返回一条回复。json_mode 为假时按自然语言读取正文。"""

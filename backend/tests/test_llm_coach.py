@@ -21,17 +21,23 @@ from app.llm.coach import (
     _one_card_outs,
     build_decision_payload,
     input_digest,
+    render_followup_messages,
     render_messages,
 )
 from app.llm.deepseek import DEFAULT_TIMEOUT_SECONDS, DeepSeekProvider, resolve_api_key
-from app.llm.types import Completion
+from app.llm.types import CoachUnavailableError, Completion
 from app.main import app
 from app.poker.actions import Action, ActionType
 from app.poker.engine import PokerEngine
 from app.storage import repository
 from app.storage.db import get_db, init_db
 from app.storage.hand_history import build_hand_history
-from app.storage.models import CoachExplanationModel, HandModel, SessionModel
+from app.storage.models import (
+    CoachExplanationModel,
+    CoachMessageModel,
+    HandModel,
+    SessionModel,
+)
 
 from .helpers import cards
 
@@ -80,11 +86,26 @@ class FakeProvider:
         self.content = content
         self.calls = 0
         self.messages: list[list[dict[str, str]]] = []
+        self.json_modes: list[bool] = []
+        self.plain_error: Exception | None = None
 
-    def complete(self, messages: list[dict[str, str]]) -> Completion:
+    def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        json_mode: bool = True,
+    ) -> Completion:
         self.calls += 1
         self.messages.append(messages)
-        content = self.content if self.content is not None else _batch_reply(messages)
+        self.json_modes.append(json_mode)
+        if not json_mode and self.plain_error is not None:
+            raise self.plain_error
+        if self.content is not None:
+            content = self.content
+        elif json_mode:
+            content = _batch_reply(messages)
+        else:
+            content = "结合公开行动线和已有解读，这里不必再追加投入。"
         return Completion(
             content=content,
             reasoning="先看牌力和要跟的筹码。",
@@ -162,6 +183,21 @@ def _coach_rows(hand_id: str) -> list[CoachExplanationModel]:
         return list(
             db.scalars(
                 select(CoachExplanationModel).where(CoachExplanationModel.hand_id == hand_id)
+            )
+        )
+    finally:
+        generator.close()
+
+
+def _message_rows(hand_id: str) -> list[CoachMessageModel]:
+    generator = get_db()
+    db = next(generator)
+    try:
+        return list(
+            db.scalars(
+                select(CoachMessageModel)
+                .where(CoachMessageModel.hand_id == hand_id)
+                .order_by(CoachMessageModel.id)
             )
         )
     finally:
@@ -367,6 +403,28 @@ def test_deepseek_request_keeps_thinking_enabled() -> None:
     assert seen["timeout"] >= 60
     assert seen["authorization"] == "Bearer test-key"
     assert completion.content == "翻前这手牌可以弃掉。"
+
+
+def test_followup_request_keeps_thinking_without_json_mode() -> None:
+    seen: dict = {}
+
+    def opener(request: urllib.request.Request, timeout: float) -> _Response:
+        seen["body"] = json.loads(request.data.decode())
+        return _Response(_completion_payload("这里不必再跟。"))
+
+    provider = DeepSeekProvider(api_key="test-key", opener=opener)
+    completion = provider.complete(
+        [{"role": "user", "content": "为什么弃牌？"}],
+        json_mode=False,
+    )
+
+    body = seen["body"]
+    assert body["model"] == "deepseek-flash"
+    assert body["thinking"] == {"type": "enabled"}
+    assert body["reasoning_effort"] == "high"
+    assert body["stream"] is False
+    assert "response_format" not in body
+    assert completion.content == "这里不必再跟。"
     assert completion.reasoning_tokens == 18
     assert completion.prompt_tokens == 12
     assert completion.total_tokens == 42
@@ -856,6 +914,12 @@ def test_old_coach_table_gains_recommended_action(tmp_path) -> None:
         ).fetchone()
     assert columns.count("recommended_action") == 1
     assert saved == (None, "旧解读")
+    with sqlite3.connect(legacy) as raw:
+        tables = {
+            row[0]
+            for row in raw.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+    assert "coach_messages" in tables
 
 
 def test_no_human_decision_skips_upstream_even_without_a_key(monkeypatch, tmp_path) -> None:
@@ -932,6 +996,20 @@ def test_existing_hand_and_session_columns_stay_put() -> None:
     assert {column.name for column in HandModel.__table__.columns} == _HAND_COLUMNS
     assert CoachExplanationModel.__tablename__ == "coach_explanations"
     assert "cache_key" in {column.name for column in CoachExplanationModel.__table__.primary_key}
+    assert CoachMessageModel.__tablename__ == "coach_messages"
+    message_columns = {column.name for column in CoachMessageModel.__table__.columns}
+    assert {
+        "cache_key",
+        "hand_id",
+        "action_index",
+        "role",
+        "content",
+        "prompt_tokens",
+        "completion_tokens",
+        "reasoning_tokens",
+        "total_tokens",
+        "created_at",
+    } <= message_columns
 
 
 def test_decision_modules_do_not_import_the_coach() -> None:
@@ -944,15 +1022,261 @@ def test_decision_modules_do_not_import_the_coach() -> None:
 def test_review_views_request_the_coach_only_from_a_button() -> None:
     api_source = (_REPO_ROOT / "frontend" / "src" / "api.js").read_text(encoding="utf-8")
     assert "explainHand" in api_source
+    assert "getExplanation" in api_source
+    assert "askCoach" in api_source
     assert "/explain" in api_source
     for name in ("GameTable.vue", "HistoryView.vue"):
         source = (_REPO_ROOT / "frontend" / "src" / "components" / name).read_text(
             encoding="utf-8"
         )
         assert "AI 教练解读" in source
-        assert "explainHand" in source
+        assert source.count("explainHand") == 1
         assert "loadCoach" in source
+        assert "loadCachedCoach" in source
+        assert "getExplanation" in source
         _assert_no_solver_labels(source)
+    card = (_REPO_ROOT / "frontend" / "src" / "components" / "ReviewDecisionCard.vue").read_text(
+        encoding="utf-8"
+    )
+    assert 'type="text"' in card
+    assert "contenteditable" not in card.lower()
+    assert "aria-label" in card
+    assert "追问教练" in card
+    assert "<svg" in card
+    table = (_REPO_ROOT / "frontend" / "src" / "components" / "GameTable.vue").read_text(
+        encoding="utf-8"
+    )
+    assert "tagName === 'INPUT'" in table
+    assert "tagName === 'TEXTAREA'" in table
+
+
+# ------------------------------------------------------------------ 追问
+
+
+def _followup_facts(messages: list[dict[str, str]]) -> dict:
+    return json.loads(messages[1]["content"].split("\n", 1)[1])
+
+
+def test_followup_context_keeps_public_facts_and_drops_reasoning() -> None:
+    history = _showdown_with_folded_opponent()
+    review = build_review(history)
+    payload = build_decision_payload(history, review, 0)
+    messages = render_followup_messages(
+        payload,
+        explanation="翻前面对加注，弃牌可以少投入。",
+        recommended_action="fold",
+        history=[
+            {
+                "role": "user",
+                "content": "为什么不是跟注？",
+                "reasoning_content": "这段思维链不能回传。",
+            },
+            {"role": "assistant", "content": "因为跟注期望为负。"},
+        ],
+        question="那转牌过牌呢？",
+    )
+    assert [item["role"] for item in messages] == [
+        "system",
+        "user",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert all(set(item) == {"role", "content"} for item in messages)
+    assert "reasoning_content" not in json.dumps(messages, ensure_ascii=False)
+    assert "这段思维链不能回传" not in json.dumps(messages, ensure_ascii=False)
+    text = messages[0]["content"] + messages[1]["content"]
+    _assert_no_solver_labels(text)
+    assert "不要改写" in messages[0]["content"]
+    assert "revealed_hands" in messages[0]["content"]
+    facts = _followup_facts(messages)
+    assert facts["decision"]["one_card_outs"] == payload["one_card_outs"]
+    assert facts["decision"]["equity"] == payload["equity"]
+    assert facts["decision"]["pot_odds"] == payload["pot_odds"]
+    assert facts["decision"]["call_ev"] == payload["call_ev"]
+    assert facts["decision"]["bot_action"] == payload["bot_action"]
+    assert facts["decision"]["mistakes"] == payload["mistakes"]
+    assert facts["hand"]["hero_hole_cards"] == payload["hero_hole_cards"]
+    assert facts["hand"]["revealed_hands"] == payload["revealed_hands"]
+    assert facts["coach"] == {
+        "explanation": "翻前面对加注，弃牌可以少投入。",
+        "recommended_action": "fold",
+    }
+    request_text = json.dumps(messages, ensure_ascii=False)
+    assert "Qh" not in request_text
+    assert "Jc" not in request_text
+    assert "As" in request_text
+    assert "9s" in request_text
+    assert messages[-1]["content"] == "那转牌过牌呢？"
+
+
+def test_cached_explain_read_does_not_call_upstream(fake_provider: FakeProvider) -> None:
+    history = _human_fold_history()
+    hand_id = _persist(history)
+    client = TestClient(app)
+    assert client.get(f"/hands/{hand_id}/explain").json()["decisions"] == []
+    assert fake_provider.calls == 0
+
+    created = client.post(f"/hands/{hand_id}/explain")
+    assert created.status_code == 200, created.text
+    assert fake_provider.calls == 1
+
+    cached = client.get(f"/hands/{hand_id}/explain")
+    assert cached.status_code == 200
+    body = cached.json()["decisions"][0]
+    assert body["cached"] is True
+    assert body["explanation"] == created.json()["decisions"][0]["explanation"]
+    assert body["messages"] == []
+    assert fake_provider.calls == 1
+
+    import app.llm.coach as coach_module
+
+    original = coach_module.PROMPT_SCHEMA_VERSION
+    coach_module.PROMPT_SCHEMA_VERSION = original + 1
+    try:
+        stale = client.get(f"/hands/{hand_id}/explain")
+    finally:
+        coach_module.PROMPT_SCHEMA_VERSION = original
+    assert stale.status_code == 200
+    assert stale.json()["decisions"] == []
+    assert fake_provider.calls == 1
+
+
+def test_ask_persists_turns_and_replays_history_without_reasoning(
+    fake_provider: FakeProvider,
+) -> None:
+    history = _showdown_with_folded_opponent()
+    hand_id = _persist(history)
+    client = TestClient(app)
+    created = client.post(f"/hands/{hand_id}/explain")
+    assert created.status_code == 200, created.text
+    assert fake_provider.calls == 1
+
+    first = client.post(
+        f"/hands/{hand_id}/decisions/0/ask",
+        json={"question": "  为什么不是跟注？  "},
+    )
+    assert first.status_code == 200, first.text
+    assert fake_provider.json_modes[-1] is False
+    payload = first.json()
+    assert [item["role"] for item in payload["messages"]] == ["user", "assistant"]
+    assert payload["messages"][0]["content"] == "为什么不是跟注？"
+    assert payload["messages"][1]["content"] == "结合公开行动线和已有解读，这里不必再追加投入。"
+    assert payload["explanation"] == created.json()["decisions"][0]["explanation"]
+    sent = fake_provider.messages[-1]
+    assert all("reasoning_content" not in item for item in sent)
+    assert "先看牌力和要跟的筹码" not in json.dumps(sent, ensure_ascii=False)
+    request_text = json.dumps(sent, ensure_ascii=False)
+    assert "Qh" not in request_text
+    assert "Jc" not in request_text
+    facts = _followup_facts(sent)
+    review = build_review(history)
+    expected = build_decision_payload(history, review, 0)
+    assert facts["decision"]["equity"] == expected["equity"]
+    assert facts["decision"]["pot_odds"] == expected["pot_odds"]
+    assert facts["decision"]["call_ev"] == expected["call_ev"]
+    assert facts["decision"]["one_card_outs"] == expected["one_card_outs"]
+    assert facts["decision"]["bot_action"] == expected["bot_action"]
+    assert facts["decision"]["mistakes"] == expected["mistakes"]
+    assert facts["coach"]["explanation"] == payload["explanation"]
+
+    second = client.post(
+        f"/hands/{hand_id}/decisions/0/ask",
+        json={"question": "那转牌过牌呢？"},
+    )
+    assert second.status_code == 200, second.text
+    roles = [item["role"] for item in second.json()["messages"]]
+    assert roles == ["user", "assistant", "user", "assistant"]
+    replay = [item["content"] for item in fake_provider.messages[-1]]
+    assert "为什么不是跟注？" in replay
+    assert "结合公开行动线和已有解读，这里不必再追加投入。" in replay
+    assert replay[-1] == "那转牌过牌呢？"
+    assert [item["role"] for item in fake_provider.messages[-1]] == [
+        "system",
+        "user",
+        "user",
+        "assistant",
+        "user",
+    ]
+
+    rows = _message_rows(hand_id)
+    assert [row.role for row in rows] == ["user", "assistant", "user", "assistant"]
+    assert rows[1].prompt_tokens == 11
+    assert rows[1].completion_tokens == 19
+    assert rows[0].total_tokens == 0
+    cached = client.get(f"/hands/{hand_id}/explain")
+    assert fake_provider.calls == 3
+    assert len(cached.json()["decisions"][0]["messages"]) == 4
+
+
+def test_ask_sanitizes_plain_and_json_replies(fake_provider: FakeProvider) -> None:
+    hand_id = _persist(_human_fold_history())
+    client = TestClient(app)
+    assert client.post(f"/hands/{hand_id}/explain").status_code == 200
+    fake_provider.content = (
+        '{"reply":"按 GTO 这是最优均衡，nashconv 与 exploitability 都不是依据。'
+        '参考仍是非均衡近似。"}'
+    )
+    response = client.post(
+        f"/hands/{hand_id}/decisions/0/ask",
+        json={"question": "这样弃牌合理吗？"},
+    )
+    assert response.status_code == 200, response.text
+    reply = response.json()["messages"][-1]["content"]
+    _assert_no_solver_labels(reply)
+    assert "非均衡" in reply
+    assert _message_rows(hand_id)[-1].content == reply
+
+
+def test_ask_rejects_missing_explanation_and_bad_questions(fake_provider: FakeProvider) -> None:
+    hand_id = _persist(_human_fold_history())
+    client = TestClient(app)
+    missing = client.post(f"/hands/{hand_id}/decisions/0/ask", json={"question": "为什么？"})
+    assert missing.status_code == 409
+    assert "教练解读" in missing.json()["detail"]
+    assert fake_provider.calls == 0
+    assert _message_rows(hand_id) == []
+
+    absent = client.post("/hands/missing-hand/decisions/0/ask", json={"question": "为什么？"})
+    assert absent.status_code == 404
+    blank = client.post(f"/hands/{hand_id}/decisions/0/ask", json={"question": "   "})
+    assert blank.status_code == 422
+    assert blank.json()["detail"] == "问题需为 1 到 500 个字符"
+    too_long = client.post(
+        f"/hands/{hand_id}/decisions/0/ask",
+        json={"question": "问" * 501},
+    )
+    assert too_long.status_code == 422
+    assert client.post(
+        f"/hands/{hand_id}/decisions/9/ask",
+        json={"question": "为什么？"},
+    ).status_code == 422
+    empty_hand = _persist(_no_human_decision_history())
+    assert (
+        client.post(
+            f"/hands/{empty_hand}/decisions/0/ask",
+            json={"question": "为什么？"},
+        ).status_code
+        == 422
+    )
+    assert fake_provider.calls == 0
+
+
+def test_ask_upstream_failure_does_not_store_the_question(fake_provider: FakeProvider) -> None:
+    hand_id = _persist(_human_fold_history())
+    client = TestClient(app)
+    before = client.get(f"/hands/{hand_id}/review").json()
+    assert client.post(f"/hands/{hand_id}/explain").status_code == 200
+    fake_provider.plain_error = CoachUnavailableError("教练解读暂时不可用，请稍后再试")
+    failed = client.post(f"/hands/{hand_id}/decisions/0/ask", json={"question": "为什么弃牌？"})
+    assert failed.status_code == 503
+    assert _message_rows(hand_id) == []
+    assert client.get(f"/hands/{hand_id}/review").json() == before
+    fake_provider.plain_error = None
+    fake_provider.content = "   "
+    blank = client.post(f"/hands/{hand_id}/decisions/0/ask", json={"question": "为什么弃牌？"})
+    assert blank.status_code == 503
+    assert _message_rows(hand_id) == []
 
 
 # ------------------------------------------------------------------ 真实上游冒烟

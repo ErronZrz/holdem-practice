@@ -221,7 +221,10 @@ function netOf(seat) {
   return game.value?.last_net?.[seat] ?? 0
 }
 
+let coachEpoch = 0
+
 function resetCoach() {
+  coachEpoch += 1
   coach.value = null
   coachLoading.value = false
   coachError.value = ''
@@ -592,23 +595,46 @@ async function loadReview() {
     // 仅在仍是同一手且手已结束时写入，避免「下一手」后旧请求回填脏数据。
     if (game.value?.last_hand_id === handId && game.value?.hand_over) {
       review.value = data
+      await loadCachedCoach(handId)
     }
   } catch {
     review.value = null
   }
 }
 
+async function loadCachedCoach(handId) {
+  const ticket = ++coachEpoch
+  try {
+    const data = await api.getExplanation(handId)
+    if (ticket !== coachEpoch || review.value?.hand_id !== handId) return
+    if (data.decisions?.length) coach.value = data
+  } catch {
+    // 只读缓存失败时仍可手动生成解读。
+  }
+}
+
+function applyCoachDecision(updated) {
+  coachEpoch += 1
+  if (!coach.value || coach.value.hand_id !== review.value?.hand_id) return
+  const items = coach.value.decisions.slice()
+  const index = items.findIndex((item) => item.action_index === updated.action_index)
+  if (index === -1) items.push(updated)
+  else items[index] = updated
+  coach.value = { ...coach.value, decisions: items }
+}
+
 async function loadCoach() {
   const handId = review.value?.hand_id
   if (!handId || coachLoading.value) return
+  const ticket = ++coachEpoch
   coachLoading.value = true
   coachError.value = ''
   try {
     const data = await api.explainHand(handId)
-    if (review.value?.hand_id !== handId) return
+    if (ticket !== coachEpoch || review.value?.hand_id !== handId) return
     coach.value = data
   } catch (e) {
-    if (review.value?.hand_id !== handId) return
+    if (ticket !== coachEpoch || review.value?.hand_id !== handId) return
     coachError.value = e.message || '教练解读暂时不可用'
   } finally {
     if (review.value?.hand_id === handId) coachLoading.value = false
@@ -971,9 +997,11 @@ onUnmounted(() => {
           <p v-if="coach && !coach.decisions.length" class="muted">本手没有可解读的决策点。</p>
           <ReviewDecisionCard
             v-for="(d, i) in review.decisions"
-            :key="i"
+            :key="`${review.hand_id}-${i}`"
             :decision="d"
             :coach="coachFor(i)"
+            :hand-id="review.hand_id"
+            @asked="applyCoachDecision"
           />
           <template #notes>
             <p>{{ referenceText(review) }}</p>
