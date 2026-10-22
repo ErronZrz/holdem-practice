@@ -133,8 +133,16 @@ def test_review_reports_reference_bot_action() -> None:
         distribution = d["bot_distribution"]
         assert distribution, "每个决策点都应给出参考动作分布"
         assert sum(item["probability"] for item in distribution) == pytest.approx(1.0)
-        top = max(distribution, key=lambda item: item["probability"])
-        assert d["bot_action"]["action"] == top["action"], "参考动作取分布中的众数"
+        totals: dict[str, float] = {}
+        order: list[str] = []
+        for item in distribution:
+            action_name = item["action"]
+            if action_name not in totals:
+                order.append(action_name)
+                totals[action_name] = 0.0
+            totals[action_name] += item["probability"]
+        leading = max(order, key=lambda name: totals[name])
+        assert d["bot_action"]["action"] == leading, "参考动作取动作类型汇总后的众数"
 
 
 def test_review_replays_per_player_stacks() -> None:
@@ -577,41 +585,57 @@ def _prob(distribution: list[tuple[Action, float]], action_type: ActionType) -> 
     return sum(weight for action, weight in distribution if action.type == action_type)
 
 
-def _guard_call(distribution, call_ev, *, to_call=40, equity=0.8, opponents=1):
+def _guard_call(
+    distribution,
+    call_ev,
+    *,
+    to_call=40,
+    equity=0.8,
+    opponents=1,
+    postflop=True,
+    big_blind=0,
+    contested=0,
+):
     return _guard_negative_call(
         distribution,
         call_ev,
         to_call=to_call,
         equity=equity,
         opponents=opponents,
+        postflop=postflop,
+        big_blind=big_blind,
+        contested=contested,
     )
 
 
-def test_negative_call_ev_moves_call_mass_onto_an_existing_fold() -> None:
-    # 份额不低于平均时只挪跟注。弃牌已经在分布里，就累加到那一条，不再另起一条。
+def test_negative_call_ev_moves_call_mass_onto_the_leading_raise() -> None:
+    # 份额不低于平均且已有加注时，跟注并入概率最高的加注，弃牌保持原样。
     baseline = [
         (Action(ActionType.FOLD), 0.1),
         (Action(ActionType.CALL), 0.6),
-        (Action(ActionType.RAISE, 40), 0.3),
+        (Action(ActionType.RAISE, 40), 0.2),
+        (Action(ActionType.RAISE, 80), 0.1),
     ]
     guarded = _guard_call(baseline, -1.0, equity=0.8)
-    folds = [item for item in guarded if item[0].type == ActionType.FOLD]
-    assert len(folds) == 1
-    assert folds[0][1] == pytest.approx(0.7)
+    raises = [item for item in guarded if item[0].type == ActionType.RAISE]
+    assert len(raises) == 2
+    assert raises[0][1] == pytest.approx(0.8)
+    assert raises[1][1] == pytest.approx(0.1)
+    assert _prob(guarded, ActionType.FOLD) == pytest.approx(0.1)
     assert _prob(guarded, ActionType.CALL) == 0.0
-    assert _prob(guarded, ActionType.RAISE) == pytest.approx(0.3)
-    assert _mode_action(guarded).type == ActionType.FOLD
+    assert _mode_action(guarded).type == ActionType.RAISE
+    assert _mode_action(guarded).amount == 40
 
 
-def test_negative_call_ev_adds_fold_when_the_distribution_has_none() -> None:
+def test_negative_call_ev_does_not_invent_a_fold_when_a_raise_exists() -> None:
     baseline = [
         (Action(ActionType.CALL), 0.7),
         (Action(ActionType.RAISE, 40), 0.3),
     ]
     guarded = _guard_call(baseline, -1.0, equity=0.8)
-    assert _prob(guarded, ActionType.FOLD) == pytest.approx(0.7)
+    assert _prob(guarded, ActionType.FOLD) == 0.0
     assert _prob(guarded, ActionType.CALL) == 0.0
-    assert _prob(guarded, ActionType.RAISE) == pytest.approx(0.3)
+    assert _prob(guarded, ActionType.RAISE) == pytest.approx(1.0)
 
 
 def test_non_negative_call_ev_keeps_the_call() -> None:
@@ -622,16 +646,16 @@ def test_non_negative_call_ev_keeps_the_call() -> None:
 
 
 def test_negative_raise_stays_when_equity_is_not_below_fair_share() -> None:
-    # 份额不低于平均时，负的跟注期望只清跟注，加注众数保留。
+    # 份额不低于平均时，负期望跟注并入已有加注，加注成为唯一质量。
     baseline = [
         (Action(ActionType.RAISE, 40), 0.6),
         (Action(ActionType.CALL), 0.4),
     ]
     fair = _fair_share(1)
     guarded = _guard_call(baseline, -5.0, equity=fair)
-    assert _prob(guarded, ActionType.RAISE) == pytest.approx(0.6)
+    assert _prob(guarded, ActionType.RAISE) == pytest.approx(1.0)
     assert _prob(guarded, ActionType.CALL) == 0.0
-    assert _prob(guarded, ActionType.FOLD) == pytest.approx(0.4)
+    assert _prob(guarded, ActionType.FOLD) == 0.0
     assert _mode_action(guarded).type == ActionType.RAISE
 
 
@@ -647,6 +671,51 @@ def test_negative_raise_moves_to_fold_when_equity_is_below_fair_share() -> None:
     assert guarded[0][0].type == ActionType.FOLD
     assert guarded[0][1] == pytest.approx(1.0)
     assert _mode_action(guarded).type == ActionType.FOLD
+
+
+def test_mode_action_groups_split_raise_sizes() -> None:
+    # 单个跟注桶高于任一加注尺度，但加注合计更高时，众数仍是加注里最大的那一档。
+    baseline = [
+        (Action(ActionType.CALL), 0.375),
+        (Action(ActionType.RAISE, 50), 0.312),
+        (Action(ActionType.RAISE, 60), 0.250),
+        (Action(ActionType.RAISE, 80), 0.063),
+    ]
+    chosen = _mode_action(baseline)
+    assert chosen.type == ActionType.RAISE
+    assert chosen.amount == 50
+
+
+def test_cheap_preflop_keeps_a_small_negative_call_without_aggression() -> None:
+    # 翻前只补盲、负期望还没到错误容差、又没有加注质量时，跟注留下来。
+    baseline = [
+        (Action(ActionType.FOLD), 0.4),
+        (Action(ActionType.CALL), 0.6),
+    ]
+    guarded = _guard_call(
+        baseline,
+        -1.0,
+        to_call=20,
+        equity=0.4,
+        opponents=5,
+        postflop=False,
+        big_blind=20,
+        contested=30,
+    )
+    assert guarded == baseline
+    # 负期望已经超过容差时，仍把跟注并入弃牌。
+    folded = _guard_call(
+        baseline,
+        -21.0,
+        to_call=20,
+        equity=0.4,
+        opponents=5,
+        postflop=False,
+        big_blind=20,
+        contested=30,
+    )
+    assert _prob(folded, ActionType.CALL) == 0.0
+    assert _prob(folded, ActionType.FOLD) == pytest.approx(1.0)
 
 
 def test_low_equity_lead_moves_aggression_onto_check() -> None:
@@ -881,3 +950,25 @@ def test_all_in_reraise_reference_does_not_spend_more_than_the_stack() -> None:
     for item in all_in["bot_distribution"]:
         if item["action"] in ("bet", "raise", "call"):
             assert item["amount"] <= stack_before
+
+
+def test_review_reference_is_unchanged_when_only_the_hand_number_changes() -> None:
+    # 同一局面只改手号时，参考动作和分布必须完全一样，不能随设伏抽签变动。
+    hole = {0: [card("Ah"), card("Kh")], 1: [card("2c"), card("3d")]}
+    board = [card(s) for s in ("As", "Kd", "7c", "2h", "9s")]
+    moves = [(ActionType.CALL, 0), *([(ActionType.CHECK, 0)] * 7)]
+    engine = PokerEngine(2, 5, 10, 1000)
+    engine.start_hand_with(button=1, hole_cards=hole, board=board)
+    for action_type, amount in moves:
+        _apply(engine, action_type, amount)
+    assert engine.hand_over
+    reviews = [
+        build_review(build_hand_history(engine, hand_number=number, human_seat=0))
+        for number in (1, 2, 7, 24, 88)
+    ]
+    first = reviews[0]["decisions"]
+    for review in reviews[1:]:
+        assert review["hand_number"] != reviews[0]["hand_number"]
+        for left, right in zip(first, review["decisions"], strict=True):
+            assert left["bot_action"] == right["bot_action"]
+            assert left["bot_distribution"] == right["bot_distribution"]

@@ -19,6 +19,7 @@ alwaysApply: true
 ## 2. 技术决策授权与反公文化（免打扰原则）
 
 - **全权委托内部技术决策**：凡属验证器内部口径、数据结构绑定、判据读法、测试断言、模块划分、本地运行 `uv run ruff check .` / `uv run pytest -q` / `npm run build` 等技术细节，只要不违反 `AGENTS.md` 与 `docs/59-current-outcome-diagnosis-and-work-boundaries.md`，均由 Executor **直接选定最简自洽方案并落地**，不得向用户罗列甲/乙/丙选择题。
+- **耗时命令前台等待纪律**：调用 `Shell` 工具运行全库诊断扫描（`diagnose_review.py --scan`）、配对标定（`ninth_identity_calibration.py --run`）或全量测试（`uv run pytest -q`）等可能超过 30 秒的命令时，**必须显式传入 `block_until_ms: 180000`**（或更高），确保命令在前台一次跑完，避免因默认 30 秒超时转入后台而触发异步通知栏干扰会话。
 - **禁止公文拆分膨胀**：取消「提案稿（不选定）→ 裁定记录 → 锁定送审稿 → 实现方案 → 实现记录」的多文档拆分。同一里程碑的规格选定、代码实现、测试验证与审查结论应合并落盘，审查不通过时直接就地修订。
 - **提问格式**：确需向用户提问时，**一律使用普通 Markdown 列表**，严禁调用 `AskQuestion` 工具。
 - **人工介入边界（仅限以下情形暂停并请示用户）**：

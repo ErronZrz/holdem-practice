@@ -5,11 +5,14 @@ import sqlite3
 import pytest
 
 import tools.diagnose_review as diagnose
+from app.analysis.reference_identity import REFERENCE_VERSION
 from app.llm.coach import PROMPT_SCHEMA_VERSION
 from app.poker.actions import Action, ActionType
 from app.poker.cards import card_from_str as card
 from app.poker.engine import PokerEngine
 from app.storage.hand_history import build_hand_history
+
+_CURRENT_CACHE_KEY = f"v1|h|0|0|d|ref={REFERENCE_VERSION}|eval=2|prompt=1|local|none"
 
 
 def _point(**overrides) -> dict:
@@ -169,6 +172,7 @@ def test_flush_draw_claim_needs_a_one_card_draw() -> None:
         published_amounts={20},
         raw_amounts={20},
         schema=PROMPT_SCHEMA_VERSION,
+        cache_key=_CURRENT_CACHE_KEY,
     )
     codes = diagnose.classify_point(_point(draw=0, mode="bet", coach=reading))
     assert "e_coach_false_draw" in codes
@@ -208,6 +212,7 @@ def test_coach_fold_preference_opposes_a_raise_reference() -> None:
         published_amounts={200},
         raw_amounts={360},
         schema=PROMPT_SCHEMA_VERSION,
+        cache_key=_CURRENT_CACHE_KEY,
     )
     assert reading["preference"] == "fold"
     assert reading["reference_actions"] == ["raise"]
@@ -397,6 +402,7 @@ def test_stored_action_overrides_keyword_inference() -> None:
         raw_amounts=set(),
         schema=PROMPT_SCHEMA_VERSION,
         recommended_action="call",
+        cache_key=_CURRENT_CACHE_KEY,
     )
     assert reading["preference"] == "call"
     assert reading["opposes"] is True
@@ -421,6 +427,33 @@ def test_empty_stored_action_falls_back_to_keywords() -> None:
     assert reading["recommended_action"] is None
 
 
+def test_old_reference_cache_key_is_stale() -> None:
+    # 缓存键里的参考版本对不上当前口径时，只记过期，不再拿旧建议和现参考唱反调。
+    reading = diagnose.coach_reading(
+        "这里应该弃牌。",
+        mode="raise",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=PROMPT_SCHEMA_VERSION,
+        recommended_action="fold",
+        cache_key="v1|h|0|0|d|ref=3|eval=2|prompt=1|local|none",
+    )
+    assert reading["stale"] is True
+    codes = diagnose.classify_point(_point(mode="raise", coach=reading))
+    assert "e_coach_stale_schema" in codes
+    assert "e_coach_opposes" not in codes
+    current = diagnose.coach_reading(
+        "这里应该弃牌。",
+        mode="raise",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=PROMPT_SCHEMA_VERSION,
+        recommended_action="fold",
+        cache_key=_CURRENT_CACHE_KEY,
+    )
+    assert current["stale"] is False
+
+
 def test_load_coach_index_reads_the_action_column(tmp_path) -> None:
     path = tmp_path / "coach.db"
     connection = sqlite3.connect(path)
@@ -428,15 +461,16 @@ def test_load_coach_index_reads_the_action_column(tmp_path) -> None:
         "CREATE TABLE coach_explanations ("
         "hand_id TEXT, action_index INTEGER, explanation TEXT, "
         "prompt_schema_version INTEGER, model TEXT, created_at TEXT, "
-        "recommended_action TEXT)"
+        "recommended_action TEXT, cache_key TEXT)"
     )
     connection.execute(
-        "INSERT INTO coach_explanations VALUES (?, 0, ?, ?, 'm', 't', 'call')",
-        ("h", "应该弃牌。", PROMPT_SCHEMA_VERSION),
+        "INSERT INTO coach_explanations VALUES (?, 0, ?, ?, 'm', 't', 'call', ?)",
+        ("h", "应该弃牌。", PROMPT_SCHEMA_VERSION, _CURRENT_CACHE_KEY),
     )
     index = diagnose.load_coach_index(connection)
     connection.close()
     assert index["h"][0]["recommended_action"] == "call"
+    assert index["h"][0]["cache_key"] == _CURRENT_CACHE_KEY
 
 
 def test_load_coach_index_without_the_action_column(tmp_path) -> None:
@@ -454,6 +488,7 @@ def test_load_coach_index_without_the_action_column(tmp_path) -> None:
     index = diagnose.load_coach_index(connection)
     connection.close()
     assert index["h"][0]["recommended_action"] is None
+    assert index["h"][0]["cache_key"] is None
     reading = diagnose.coach_reading(
         index["h"][0]["explanation"],
         mode="raise",

@@ -203,17 +203,17 @@ def test_fourteenth_version_only_turns_on_three_switches() -> None:
     )
 
 
-def test_fourteenth_identity_is_the_create_default() -> None:
-    """第十四版可构造，且未指定策略时创建对局使用第十四版。"""
+def test_fourteenth_identity_stays_registered_when_default_moves_on() -> None:
+    """第十四版仍可构造；未指定策略时创建对局改用下一版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
-    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V14
-    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V13
+    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V14
+    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V13
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V14).version == 14
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V14, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V14
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V14) is MIXED_LOCAL_V14_RULES
-    assert CreateGameRequest().bot_strategy == "mixed-local@14"
+    assert CreateGameRequest().bot_strategy == "mixed-local@15"
     assert BASELINE_IDENTIFIER == "heuristic@1"
     assert "mixed-local@14" in UNDER_TEST_IDENTIFIERS
     assert capability_declaration(MIXED_STRATEGY_IDENTIFIER_V14) == supported_declaration()
@@ -248,7 +248,9 @@ def test_new_feature_fields_do_not_move_older_rules() -> None:
         prior_street_aggressor=True,
         prior_street_aggression=3,
     )
-    for rules in list(MIXED_STRATEGY_RULES.values())[:-1]:
+    for rules in MIXED_STRATEGY_RULES.values():
+        if rules.trap_allocation:
+            continue
         assert _rows(rules, plain, legal) == _rows(rules, touched, legal)
     assert _rows(MIXED_LOCAL_V1_RULES, plain, legal) == _rows(
         MIXED_LOCAL_V1_RULES, touched, legal

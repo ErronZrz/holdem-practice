@@ -194,6 +194,18 @@ class MixedPolicyRules:
     effective_draw_support: bool = False
     # 覆盖率满额时加进被动分的跨度。
     draw_support_span: int = 360
+    # 翻前非对子高张是否改用有效基础分。默认关闭，旧身份仍读原来的基础分。
+    broadway_preflop_caliber: bool = False
+    # 只修正这一高张。低于它的连张不加分，避免带动未开池节点里的国王后。
+    broadway_high_rank: int = 14
+    # 踢脚至少到这一档才修正，覆盖 AK、AQ、AJ，不把更弱的高张一并抬上去。
+    broadway_min_kicker: int = 11
+    # 紧邻连张补上的分。同花与非同花加同一笔，原有同花差留在基础分里。
+    broadway_connector_bonus: int = 0
+    # 隔一张时补上的分。
+    broadway_one_gap_bonus: int = 0
+    # 隔两张时补上的分。
+    broadway_two_gap_bonus: int = 0
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -269,6 +281,15 @@ MIXED_LOCAL_V14_RULES = replace(
     trap_allocation=True,
     story_momentum=True,
     effective_draw_support=True,
+)
+# 第十五版口径：只抬翻前 A 高张的有效基础分，修连张漏分，并让 AK、AQ 在前位开得动。
+# 国王后及更低的非对子不加分，翻后基础分也不改。
+MIXED_LOCAL_V15_RULES = replace(
+    MIXED_LOCAL_V14_RULES,
+    broadway_preflop_caliber=True,
+    broadway_connector_bonus=220,
+    broadway_one_gap_bonus=150,
+    broadway_two_gap_bonus=120,
 )
 
 
@@ -408,6 +429,7 @@ def build_distribution(
 
     ``trap_roll`` 缺省时设伏保持关闭，避免没有座位键的查询路径自行抽数。
     """
+    features = _with_broadway_base(features, rules)
     _require_coherent_legal(legal)
     parameters = STYLE_PARAMETERS[style]
     score = _score(features, parameters, mode, rules)
@@ -535,6 +557,36 @@ def build_distribution(
 
 
 # ------------------------------------------------------------------ 规则评分
+
+
+def _broadway_bonus(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """翻前 A 高张相对旧基础分的加分。关闭、翻后、对子或踢脚不够时为 0。
+
+    同花与否已经含在旧基础分里：同花恰好多 45，非同花不多不少。这里只按点差补一笔，
+    同花和非同花因此保持原来的差距。
+    """
+    if not rules.broadway_preflop_caliber or features.street is not Street.PREFLOP:
+        return 0
+    high = max(features.hole_ranks)
+    low = min(features.hole_ranks)
+    if high <= low or high != rules.broadway_high_rank or low < rules.broadway_min_kicker:
+        return 0
+    gap = high - low - 1
+    if gap == 0:
+        return rules.broadway_connector_bonus
+    if gap == 1:
+        return rules.broadway_one_gap_bonus
+    if gap == 2:
+        return rules.broadway_two_gap_bonus
+    return 0
+
+
+def _with_broadway_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:
+    """需要修正时换上有效翻前基础分；否则原样返回，避免改动旧身份的特征对象。"""
+    bonus = _broadway_bonus(features, rules)
+    if bonus == 0:
+        return features
+    return replace(features, base=clip(features.base + bonus, 0, 1000))
 
 
 def _score(

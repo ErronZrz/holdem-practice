@@ -61,7 +61,7 @@ def _key(**overrides) -> str:
 def test_reference_identity_is_declared() -> None:
     assert reference_identity() == {
         "reference_strategy": "mixed-tight-normal",
-        "reference_version": 3,
+        "reference_version": 4,
         "evaluation_version": 2,
         "reference_coverage": "action-line-weighted",
     }

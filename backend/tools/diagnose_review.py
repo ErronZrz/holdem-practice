@@ -37,6 +37,7 @@ from app.analysis.hand_review import (  # noqa: E402
     _publish_reference,
     _replay_action,
 )
+from app.analysis.reference_identity import REFERENCE_VERSION  # noqa: E402
 from app.llm.coach import PROMPT_SCHEMA_VERSION  # noqa: E402
 from app.poker.actions import Action  # noqa: E402
 from app.poker.cards import card_from_str  # noqa: E402
@@ -59,9 +60,10 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _preflop_call_bonus,
     _score,
     _strong_preflop_continuation,
+    _with_broadway_base,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
-    MIXED_STRATEGY_IDENTIFIER_V13,
+    MIXED_STRATEGY_IDENTIFIER_V15,
     MixedLocalStrategy,
     rules_for_identifier,
 )
@@ -403,6 +405,13 @@ def _mentioned_chips(fragment: str) -> list[int]:
     return chips
 
 
+def _cache_matches_reference(cache_key: str | None) -> bool:
+    """缓存键含当前参考版本才算仍有效，与线上决策缓存的失效方式一致。"""
+    if not cache_key:
+        return False
+    return f"|ref={REFERENCE_VERSION}|" in cache_key
+
+
 def coach_reading(
     text: str,
     *,
@@ -412,10 +421,12 @@ def coach_reading(
     ignore_amounts: set[int] | None = None,
     schema: int | None = None,
     recommended_action: str | None = None,
+    cache_key: str | None = None,
 ) -> dict:
     """从一段教练正文里抽出动作倾向，并和参考众数、金额对照。
 
     库里已经记下建议动作时直接用它比较；空着才退回关键词，并标明是推断。
+    提示词版本或缓存键里的参考版本对不上当前口径时，记为过期缓存。
     """
     spans = _reference_spans(text)
     attributed: set[str] = set()
@@ -481,7 +492,9 @@ def coach_reading(
         "legacy_amounts": legacy,
         "unknown_amounts": unknown,
         "schema": schema,
-        "stale": schema is not None and schema != PROMPT_SCHEMA_VERSION,
+        "cache_key": cache_key,
+        "stale": (schema is not None and schema != PROMPT_SCHEMA_VERSION)
+        or not _cache_matches_reference(cache_key),
         "recommended_action": stored,
         "action_source": source,
         "text": text,
@@ -508,6 +521,7 @@ def _rows_from_pairs(pairs: list[tuple[Action, float]]) -> list[dict]:
 
 def _score_features(features, style, rules) -> dict:
     """用和参考分布相同的紧手标准模式公式，拆开评分与两条门槛。"""
+    features = _with_broadway_base(features, rules)
     parameters = STYLE_PARAMETERS[style]
     score = _score(features, parameters, HandMode.NORMAL, rules)
     if features.spr_at_most(1):
@@ -575,7 +589,9 @@ def _inspect_decision(
     projected = mixed_state(project_for_actor(snapshot), context)
     features = features_for(require_mixed_input(projected), legal)
     style = reference_bot.style_for(human_seat)
-    selected = reference_bot.distribution_for(projected, legal, mode=HandMode.NORMAL)
+    selected = reference_bot.distribution_for(
+        projected, legal, mode=HandMode.NORMAL, trap_roll=None
+    )
     raw_pairs = _distribution_rows(selected)
     max_line = max((level for _seat, level in live), default=0)
     bad_fold = _folding_gives_up_value(
@@ -601,6 +617,8 @@ def _inspect_decision(
         postflop=len(snapshot.board) > 0,
         max_line=max_line,
         bad_fold=bad_fold,
+        big_blind=engine.big_blind,
+        contested=valued.contested,
     )
     mode_action = _mode_action(guarded_pairs)
     published_action, published_rows = _publish_reference(
@@ -669,6 +687,7 @@ def _inspect_decision(
                 if coach_row.get("recommended_action")
                 else None
             ),
+            cache_key=None if coach_row.get("cache_key") is None else str(coach_row["cache_key"]),
         )
         point["coach"]["model"] = coach_row.get("model")
     else:
@@ -716,11 +735,11 @@ def _replay(history: dict, *, hand_id: str, coach_rows: dict[int, dict]) -> dict
     for seat, stack in starting.items():
         engine.players[seat].stack = stack
     engine.start_hand_with(history["button"], hole_cards, board)
-    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V13)
+    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V15)
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V13,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V15,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(
@@ -786,18 +805,33 @@ def load_coach_index(connection: sqlite3.Connection) -> dict[str, dict[int, dict
         for row in connection.execute("PRAGMA table_info(coach_explanations)").fetchall()
     }
     has_action = "recommended_action" in columns
-    action_column = ", recommended_action" if has_action else ""
+    has_cache_key = "cache_key" in columns
+    selected = [
+        "hand_id",
+        "action_index",
+        "explanation",
+        "prompt_schema_version",
+        "model",
+        "created_at",
+    ]
+    if has_action:
+        selected.append("recommended_action")
+    if has_cache_key:
+        selected.append("cache_key")
     rows = connection.execute(
-        "SELECT hand_id, action_index, explanation, prompt_schema_version, model, created_at"
-        f"{action_column} FROM coach_explanations"
+        f"SELECT {', '.join(selected)} FROM coach_explanations"
     ).fetchall()
     index: dict[str, dict[int, dict]] = {}
     for row in rows:
+        hand_id, action_index, explanation, schema, model, created_at = row[:6]
+        cursor = 6
+        recommended = None
+        cache_key = None
         if has_action:
-            hand_id, action_index, explanation, schema, model, created_at, recommended = row
-        else:
-            hand_id, action_index, explanation, schema, model, created_at = row
-            recommended = None
+            recommended = row[cursor]
+            cursor += 1
+        if has_cache_key:
+            cache_key = row[cursor]
         bucket = index.setdefault(str(hand_id), {})
         incoming = {
             "explanation": explanation,
@@ -805,6 +839,7 @@ def load_coach_index(connection: sqlite3.Connection) -> dict[str, dict[int, dict
             "model": model,
             "created_at": str(created_at or ""),
             "recommended_action": recommended,
+            "cache_key": None if cache_key is None else str(cache_key),
         }
         current = bucket.get(int(action_index))
         if current is None or _prefer_coach(incoming, current):
@@ -996,7 +1031,7 @@ def _format_point(point: dict) -> list[str]:
         preference = coach.get("preference") or "-"
         referenced = "、".join(coach.get("reference_actions") or []) or "-"
         how = "记录" if coach.get("action_source") == "stored" else "推断"
-        stale = " 提示词版本较旧" if coach.get("stale") else ""
+        stale = " 缓存版本较旧" if coach.get("stale") else ""
         lines.append(
             f"    教练倾向 {preference}（{how}）  文中参考动作 {referenced}{stale}"
         )

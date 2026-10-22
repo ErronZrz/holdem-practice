@@ -36,6 +36,7 @@ from .mixed_policy import (
     MIXED_LOCAL_V12_RULES,
     MIXED_LOCAL_V13_RULES,
     MIXED_LOCAL_V14_RULES,
+    MIXED_LOCAL_V15_RULES,
     MIXED_STYLE_ORDER,
     HandMode,
     MixedDistribution,
@@ -73,6 +74,8 @@ MIXED_STRATEGY_IDENTIFIER_V12 = "mixed-local@12"
 MIXED_STRATEGY_IDENTIFIER_V13 = "mixed-local@13"
 # 第十四版身份：在第十三版基础上打开设伏、续枪与听牌覆盖率。
 MIXED_STRATEGY_IDENTIFIER_V14 = "mixed-local@14"
+# 第十五版身份：在第十四版基础上修正翻前 A 高张的有效基础分。
+MIXED_STRATEGY_IDENTIFIER_V15 = "mixed-local@15"
 MIXED_STRATEGY_IDENTIFIERS: tuple[str, ...] = (
     MIXED_STRATEGY_IDENTIFIER,
     MIXED_STRATEGY_IDENTIFIER_V2,
@@ -88,6 +91,7 @@ MIXED_STRATEGY_IDENTIFIERS: tuple[str, ...] = (
     MIXED_STRATEGY_IDENTIFIER_V12,
     MIXED_STRATEGY_IDENTIFIER_V13,
     MIXED_STRATEGY_IDENTIFIER_V14,
+    MIXED_STRATEGY_IDENTIFIER_V15,
 )
 # 身份到规则口径的映射；旧身份的含义与分布不随新身份改变。
 MIXED_STRATEGY_RULES: dict[str, MixedPolicyRules] = {
@@ -105,7 +109,10 @@ MIXED_STRATEGY_RULES: dict[str, MixedPolicyRules] = {
     MIXED_STRATEGY_IDENTIFIER_V12: MIXED_LOCAL_V12_RULES,
     MIXED_STRATEGY_IDENTIFIER_V13: MIXED_LOCAL_V13_RULES,
     MIXED_STRATEGY_IDENTIFIER_V14: MIXED_LOCAL_V14_RULES,
+    MIXED_STRATEGY_IDENTIFIER_V15: MIXED_LOCAL_V15_RULES,
 }
+# 查询分布时未显式传入设伏取值，与显式传入「关闭」要能区分开。
+_TRAP_ROLL_OMITTED = object()
 # 手模式取值的均匀整数上界。
 _HAND_MODE_ROLL_RANGE = 100
 
@@ -194,8 +201,14 @@ class MixedSeatPolicy:
         verified: VerifiedMixedInput,
         legal: LegalActions,
         mode: HandMode | None = None,
+        *,
+        trap_roll: int | None | object = _TRAP_ROLL_OMITTED,
     ) -> MixedDistribution:
-        """给出本次决策的分布；显式指定模式只供离线验证与测试使用。"""
+        """给出本次决策的分布；显式指定模式只供离线验证与测试使用。
+
+        不传设伏取值时仍按本手隐变量抽取。显式传入 ``None`` 则关闭设伏，
+        供不随手号波动的查询使用。
+        """
         features = features_for(verified, legal)
         return build_distribution(
             features,
@@ -203,7 +216,7 @@ class MixedSeatPolicy:
             self._style,
             mode or self.hand_mode(verified),
             self._rules,
-            trap_roll=self.trap_roll(verified),
+            trap_roll=self._resolve_trap_roll(verified, trap_roll),
         )
 
     def features_for(self, verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeatures:
@@ -228,6 +241,16 @@ class MixedSeatPolicy:
         digest = _derive(self._seat_key, ("hand", verified.context.hand_number, "mode"))
         roll = random.Random(_derived_int(digest)).randrange(_HAND_MODE_ROLL_RANGE)
         return hand_mode_for(roll)
+
+    def _resolve_trap_roll(
+        self, verified: VerifiedMixedInput, trap_roll: int | None | object
+    ) -> int | None:
+        """缺省沿用本手隐变量；显式 ``None`` 表示这次查询不设伏。"""
+        if trap_roll is _TRAP_ROLL_OMITTED:
+            return self.trap_roll(verified)
+        if trap_roll is None or isinstance(trap_roll, int):
+            return trap_roll
+        raise MixedStrategyError("设伏取值必须是整数或空")
 
     def trap_roll(self, verified: VerifiedMixedInput) -> int:
         """本手设伏隐变量，与手模式和行动随机流分开，重复计算得到同一个数。"""
@@ -295,14 +318,19 @@ class MixedLocalStrategy:
         state: GameState,
         legal: LegalActions,
         mode: HandMode | None = None,
+        *,
+        trap_roll: int | None | object = _TRAP_ROLL_OMITTED,
     ) -> MixedDistribution:
-        """离线查询当前行动者的分布；不消耗行动随机流。"""
+        """离线查询当前行动者的分布；不消耗行动随机流。
+
+        不传设伏取值时仍按本手隐变量抽取。显式传入 ``None`` 则关闭设伏。
+        """
         verified = require_mixed_input(state)
         self._bind(verified.context.bot_seats)
         policy = self._policies.get(verified.actor_seat)
         if policy is None:
             raise MixedStrategyError(f"座位 {verified.actor_seat} 不在 Bot 座位集合内")
-        return policy.distribution_for(verified, legal, mode)
+        return policy.distribution_for(verified, legal, mode, trap_roll=trap_roll)
 
     # ------------------------------------------------------------------ 内部
 

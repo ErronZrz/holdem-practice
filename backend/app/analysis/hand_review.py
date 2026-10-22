@@ -1,11 +1,13 @@
 """复盘分析：从一手牌历史确定性重放，对真人每个决策点做份额估计与错误检测。
 
 复盘只在牌局结束后进行，重放整手动作以重建每个决策点。份额与跟注期望只使用英雄底牌、
-公共牌和截至该决策点的公开行动，不读取对手真实底牌。参考动作来自紧手标准模式，
-发布前会收回和这些指标打架的质量：面对下注且跟注期望为负时，跟注质量挪到弃牌，
-份额低于平均时下注和加注也挪到弃牌；翻后无人下注且份额过低或行动线已经偏高时，
-主动质量挪到过牌；弃牌会被标成放弃正期望时，弃牌质量挪到跟注。跟注的对外金额
-是当时实际要投入的筹码。错误来自份额、跟注期望和牌力门槛；与参考众数不同本身不是错误，
+公共牌和截至该决策点的公开行动，不读取对手真实底牌。参考动作来自紧手标准模式，且不随手号抽取设伏。
+发布前会收回和这些指标打架的质量：面对下注且跟注期望为负时，份额低于平均则把
+跟注、下注和加注都挪到弃牌；份额不低于平均且已有加注或下注时，跟注并入其中概率最高的一条；
+翻前廉价未加注且负期望很小时保留跟注，其余情况把跟注挪到弃牌。翻后无人下注且份额过低或
+行动线已经偏高时，主动质量挪到过牌；弃牌会被标成放弃正期望时，弃牌质量挪到跟注。
+众数先按动作类型汇总，再取该类型里概率最高的尺度。跟注的对外金额是当时实际要投入的筹码。
+错误来自份额、跟注期望和牌力门槛；与参考众数不同本身不是错误，
 参考动作只用来否决与参考自己方向相反的标记。
 
 本模块只读引擎公开状态，不修改引擎。
@@ -24,7 +26,7 @@ from app.poker.hand import HandCategory
 from app.strategy.heuristic import draw_outs
 from app.strategy.mixed_context import MixedSummaryTracker, mixed_state
 from app.strategy.mixed_policy import MIXED_DISTRIBUTION_UNITS, HandMode, MixedDistribution
-from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V13, MixedLocalStrategy
+from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V15, MixedLocalStrategy
 from app.strategy.projection import project_for_actor
 
 # 复盘采样数与固定种子：牌局结束后可以多采样，结果必须可复现。
@@ -147,8 +149,30 @@ def _weak_kicker_top_pair(hole_cards: Sequence[Card], board: Sequence[Card]) -> 
 
 
 def _mode_action(distribution: list[tuple[Action, float]]) -> Action:
-    """取分布中概率最高的动作（并列时取列表靠前者）。"""
-    return max(distribution, key=lambda item: item[1])[0]
+    """先按动作类型汇总概率，再取该类型里概率最高的尺度。
+
+    加注和下注会拆成多个尺度。类型并列时保留先出现的类型，
+    同一类型里尺度并列时保留先出现的候选。
+    """
+    totals: dict[ActionType, float] = {}
+    order: list[ActionType] = []
+    for action, weight in distribution:
+        if action.type not in totals:
+            order.append(action.type)
+            totals[action.type] = 0.0
+        totals[action.type] += weight
+    leading = max(order, key=lambda kind: totals[kind])
+    chosen: Action | None = None
+    chosen_weight = -1.0
+    for action, weight in distribution:
+        if action.type != leading:
+            continue
+        if weight > chosen_weight:
+            chosen = action
+            chosen_weight = weight
+    if chosen is None:
+        raise ValueError("参考分布为空")
+    return chosen
 
 
 def _move_mass(
@@ -168,6 +192,41 @@ def _move_mass(
     return [*kept, (Action(target), moved)]
 
 
+def _leading_aggression(
+    distribution: list[tuple[Action, float]],
+) -> Action | None:
+    """分布里概率最高、且权重大于 0 的加注或下注。并列时保留先出现者。"""
+    chosen: Action | None = None
+    chosen_weight = 0.0
+    for action, weight in distribution:
+        if action.type not in (ActionType.BET, ActionType.RAISE):
+            continue
+        if weight > chosen_weight:
+            chosen = action
+            chosen_weight = weight
+    return chosen
+
+
+def _absorb_call_into(
+    distribution: list[tuple[Action, float]], target: Action
+) -> list[tuple[Action, float]]:
+    """把跟注质量并进指定的加注或下注，不再另起一条弃牌。"""
+    moved = sum(weight for action, weight in distribution if action.type == ActionType.CALL)
+    if moved <= 0.0:
+        return distribution
+    absorbed = False
+    kept: list[tuple[Action, float]] = []
+    for action, weight in distribution:
+        if action.type == ActionType.CALL:
+            continue
+        if not absorbed and action.type == target.type and action.amount == target.amount:
+            kept.append((action, weight + moved))
+            absorbed = True
+            continue
+        kept.append((action, weight))
+    return kept
+
+
 def _guard_negative_call(
     distribution: list[tuple[Action, float]],
     call_ev: float | None,
@@ -175,18 +234,37 @@ def _guard_negative_call(
     to_call: int,
     equity: float,
     opponents: int,
+    postflop: bool = True,
+    big_blind: int = 0,
+    contested: int = 0,
 ) -> list[tuple[Action, float]]:
-    """面对下注且跟注期望为负时，把继续质量收成弃牌。
+    """面对下注且跟注期望为负时，按份额决定跟注质量的去向。
 
-    跟注一律挪走。份额低于当前人数的平均份额时，下注和加注也一并挪走；
-    份额并不低时加注保留，因为跟注期望不含加注后的弃牌权益。
+    份额低于当前人数的平均份额时，跟注、下注和加注都并入弃牌。
+    份额不低于平均、且已经有加注或下注时，跟注并入其中概率最高的一条，
+    让高份额手牌继续用主动投入争取弃牌权益，而不是留下弃牌加跟注的断层。
+    没有主动质量时，翻前未加注且跟注额不超过大盲、负期望又小到不会被标成赔率不足的，
+    保留跟注；其余情况仍把跟注并入弃牌。
     """
     if to_call <= 0 or call_ev is None or call_ev >= 0.0:
         return distribution
-    sources = {ActionType.CALL}
     if equity < _fair_share(opponents):
-        sources.update((ActionType.BET, ActionType.RAISE))
-    return _move_mass(distribution, frozenset(sources), ActionType.FOLD)
+        return _move_mass(
+            distribution,
+            frozenset({ActionType.CALL, ActionType.BET, ActionType.RAISE}),
+            ActionType.FOLD,
+        )
+    leader = _leading_aggression(distribution)
+    if leader is not None:
+        return _absorb_call_into(distribution, leader)
+    cheap_preflop = (
+        not postflop
+        and to_call <= big_blind
+        and call_ev >= -_bad_call_tolerance(contested, big_blind)
+    )
+    if cheap_preflop:
+        return distribution
+    return _move_mass(distribution, frozenset({ActionType.CALL}), ActionType.FOLD)
 
 
 def _guard_low_equity_lead(
@@ -272,6 +350,8 @@ def _guard_reference_distribution(
     postflop: bool,
     max_line: int,
     bad_fold: bool,
+    big_blind: int = 0,
+    contested: int = 0,
 ) -> list[tuple[Action, float]]:
     """发布前收回和份额、跟注期望打架的质量。调用方在全部归并之后再取众数。"""
     guarded = _guard_negative_call(
@@ -280,6 +360,9 @@ def _guard_reference_distribution(
         to_call=to_call,
         equity=equity,
         opponents=opponents,
+        postflop=postflop,
+        big_blind=big_blind,
+        contested=contested,
     )
     guarded = _guard_low_equity_lead(
         guarded,
@@ -555,7 +638,9 @@ def _analyze_decision(
         rng=rng,
     )
     projected = mixed_state(project_for_actor(snapshot), context)
-    selected = reference_bot.distribution_for(projected, legal, mode=HandMode.NORMAL)
+    selected = reference_bot.distribution_for(
+        projected, legal, mode=HandMode.NORMAL, trap_roll=None
+    )
     baseline = _distribution_rows(selected)
     to_call = legal.call_amount
     opponents = len(live)
@@ -583,6 +668,8 @@ def _analyze_decision(
         postflop=len(snapshot.board) > 0,
         max_line=max_line,
         bad_fold=bad_fold,
+        big_blind=engine.big_blind,
+        contested=valued.contested,
     )
     bot_action = _mode_action(distribution)
     paid = 0
@@ -666,7 +753,7 @@ def build_review(history: dict) -> dict:
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V13,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V15,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(

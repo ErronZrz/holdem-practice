@@ -7,7 +7,7 @@
 用法（在 backend 目录下）：
     uv run python tools/ninth_identity_calibration.py --run
     uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@13
-    uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@14
+    uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@15
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ from app.strategy.mixed_strategy import (  # noqa: E402
     MIXED_STRATEGY_IDENTIFIER_V12,
     MIXED_STRATEGY_IDENTIFIER_V13,
     MIXED_STRATEGY_IDENTIFIER_V14,
+    MIXED_STRATEGY_IDENTIFIER_V15,
     rules_for_identifier,
 )
 from app.strategy.registry import (  # noqa: E402
@@ -81,6 +82,7 @@ def _previous_identifier(identifier: str) -> str:
         MIXED_STRATEGY_IDENTIFIER_V12,
         MIXED_STRATEGY_IDENTIFIER_V13,
         MIXED_STRATEGY_IDENTIFIER_V14,
+        MIXED_STRATEGY_IDENTIFIER_V15,
     )
     if identifier not in order[1:]:
         raise ValueError(f"标定身份必须是已登记分布观测的新身份，收到 {identifier}")
