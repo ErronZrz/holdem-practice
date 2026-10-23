@@ -1,0 +1,255 @@
+{
+  "schema_version": "hand-history.v1",
+  "bot_strategy": "mixed-local@15",
+  "hand_number": 40,
+  "num_players": 6,
+  "small_blind": 10,
+  "big_blind": 20,
+  "button": 3,
+  "board": [
+    "4c",
+    "5s",
+    "Js",
+    "3c",
+    "Qc"
+  ],
+  "players": [
+    {
+      "seat": 0,
+      "name": "玩家0",
+      "is_human": true,
+      "hole_cards": [
+        "Ts",
+        "As"
+      ],
+      "starting_stack": 2000
+    },
+    {
+      "seat": 1,
+      "name": "玩家1",
+      "is_human": false,
+      "hole_cards": [
+        "8h",
+        "4s"
+      ],
+      "starting_stack": 11040
+    },
+    {
+      "seat": 2,
+      "name": "玩家2",
+      "is_human": false,
+      "hole_cards": [
+        "Kh",
+        "8s"
+      ],
+      "starting_stack": 1030
+    },
+    {
+      "seat": 3,
+      "name": "玩家3",
+      "is_human": false,
+      "hole_cards": [
+        "Ks",
+        "8c"
+      ],
+      "starting_stack": 1710
+    },
+    {
+      "seat": 4,
+      "name": "玩家4",
+      "is_human": false,
+      "hole_cards": [
+        "6s",
+        "9h"
+      ],
+      "starting_stack": 1990
+    },
+    {
+      "seat": 5,
+      "name": "玩家5",
+      "is_human": false,
+      "hole_cards": [
+        "4h",
+        "5d"
+      ],
+      "starting_stack": 4230
+    }
+  ],
+  "actions": [
+    {
+      "street": "preflop",
+      "seat": 4,
+      "action": "small_blind",
+      "amount": 10
+    },
+    {
+      "street": "preflop",
+      "seat": 5,
+      "action": "big_blind",
+      "amount": 20
+    },
+    {
+      "street": "preflop",
+      "seat": 0,
+      "action": "call",
+      "amount": 20
+    },
+    {
+      "street": "preflop",
+      "seat": 1,
+      "action": "fold",
+      "amount": 0
+    },
+    {
+      "street": "preflop",
+      "seat": 2,
+      "action": "call",
+      "amount": 20
+    },
+    {
+      "street": "preflop",
+      "seat": 3,
+      "action": "call",
+      "amount": 20
+    },
+    {
+      "street": "preflop",
+      "seat": 4,
+      "action": "fold",
+      "amount": 0
+    },
+    {
+      "street": "preflop",
+      "seat": 5,
+      "action": "check",
+      "amount": 0
+    },
+    {
+      "street": "flop",
+      "seat": 5,
+      "action": "bet",
+      "amount": 110
+    },
+    {
+      "street": "flop",
+      "seat": 0,
+      "action": "call",
+      "amount": 110
+    },
+    {
+      "street": "flop",
+      "seat": 2,
+      "action": "raise",
+      "amount": 640
+    },
+    {
+      "street": "flop",
+      "seat": 3,
+      "action": "fold",
+      "amount": 0
+    },
+    {
+      "street": "flop",
+      "seat": 5,
+      "action": "raise",
+      "amount": 1060
+    },
+    {
+      "street": "flop",
+      "seat": 0,
+      "action": "call",
+      "amount": 1060
+    },
+    {
+      "street": "flop",
+      "seat": 2,
+      "action": "fold",
+      "amount": 0
+    },
+    {
+      "street": "turn",
+      "seat": 5,
+      "action": "bet",
+      "amount": 810
+    },
+    {
+      "street": "turn",
+      "seat": 0,
+      "action": "call",
+      "amount": 810
+    }
+  ],
+  "street": "showdown",
+  "showdown": true,
+  "winners": [
+    5
+  ],
+  "net": {
+    "0": -2000,
+    "1": 0,
+    "2": -660,
+    "3": -20,
+    "4": -10,
+    "5": 2690
+  },
+  "showdown_hands": {
+    "0": {
+      "cards": [
+        "As",
+        "Qc",
+        "Js",
+        "Ts",
+        "5s"
+      ],
+      "category": "HIGH_CARD"
+    },
+    "5": {
+      "cards": [
+        "5d",
+        "5s",
+        "4h",
+        "4c",
+        "Qc"
+      ],
+      "category": "TWO_PAIR"
+    }
+  },
+  "pot_results": [
+    {
+      "amount": 50,
+      "winners": [
+        5
+      ],
+      "shares": {
+        "5": 50
+      }
+    },
+    {
+      "amount": 40,
+      "winners": [
+        5
+      ],
+      "shares": {
+        "5": 40
+      }
+    },
+    {
+      "amount": 1920,
+      "winners": [
+        5
+      ],
+      "shares": {
+        "5": 1920
+      }
+    },
+    {
+      "amount": 2680,
+      "winners": [
+        5
+      ],
+      "shares": {
+        "5": 2680
+      }
+    }
+  ]
+}

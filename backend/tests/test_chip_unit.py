@@ -21,6 +21,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V13,
     MIXED_STRATEGY_IDENTIFIER_V14,
     MIXED_STRATEGY_IDENTIFIER_V15,
+    MIXED_STRATEGY_IDENTIFIER_V16,
     MIXED_STRATEGY_IDENTIFIERS,
     rules_for_identifier,
 )
@@ -251,18 +252,18 @@ def test_thirteenth_identity_aligns_candidates_without_moving_the_twelfth() -> N
     assert all(amount % 5 == 0 for amount in current)
 
 
-def test_thirteenth_identity_stays_constructable_when_default_is_fifteenth() -> None:
+def test_thirteenth_identity_stays_constructable_when_default_is_sixteenth() -> None:
     ordered = MIXED_STRATEGY_IDENTIFIERS
-    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V15
-    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V14
-    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V13
-    assert ordered[-4] == MIXED_STRATEGY_IDENTIFIER_V12
+    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V16
+    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V15
+    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V14
+    assert ordered[-4] == MIXED_STRATEGY_IDENTIFIER_V13
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V13).version == 13
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V13, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V13
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V13) is MIXED_LOCAL_V13_RULES
-    assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V15
+    assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V16
     assert observation_entry(MIXED_STRATEGY_IDENTIFIER_V13).rules is MIXED_LOCAL_V13_RULES
     assert DIGEST_RULE_FIELDS[MIXED_STRATEGY_IDENTIFIER_V13][-1] == "align_bet_to_small_blind"
     assert config_digest(MIXED_STRATEGY_IDENTIFIER_V13) == _THIRTEENTH_CONFIG_DIGEST

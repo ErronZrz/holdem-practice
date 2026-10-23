@@ -1,0 +1,176 @@
+{
+  "schema_version": "hand-history.v1",
+  "bot_strategy": "mixed-local@15",
+  "hand_number": 32,
+  "num_players": 6,
+  "small_blind": 10,
+  "big_blind": 20,
+  "button": 1,
+  "board": [
+    "Jh",
+    "2h",
+    "5d",
+    "4s"
+  ],
+  "players": [
+    {
+      "seat": 0,
+      "name": "玩家0",
+      "is_human": true,
+      "hole_cards": [
+        "Kc",
+        "Qc"
+      ],
+      "starting_stack": 1990
+    },
+    {
+      "seat": 1,
+      "name": "玩家1",
+      "is_human": false,
+      "hole_cards": [
+        "Jd",
+        "3c"
+      ],
+      "starting_stack": 8300
+    },
+    {
+      "seat": 2,
+      "name": "玩家2",
+      "is_human": false,
+      "hole_cards": [
+        "Qs",
+        "6s"
+      ],
+      "starting_stack": 1900
+    },
+    {
+      "seat": 3,
+      "name": "玩家3",
+      "is_human": false,
+      "hole_cards": [
+        "9d",
+        "2c"
+      ],
+      "starting_stack": 1570
+    },
+    {
+      "seat": 4,
+      "name": "玩家4",
+      "is_human": false,
+      "hole_cards": [
+        "Ah",
+        "8c"
+      ],
+      "starting_stack": 2000
+    },
+    {
+      "seat": 5,
+      "name": "玩家5",
+      "is_human": false,
+      "hole_cards": [
+        "Qd",
+        "9s"
+      ],
+      "starting_stack": 4240
+    }
+  ],
+  "actions": [
+    {
+      "street": "preflop",
+      "seat": 2,
+      "action": "small_blind",
+      "amount": 10
+    },
+    {
+      "street": "preflop",
+      "seat": 3,
+      "action": "big_blind",
+      "amount": 20
+    },
+    {
+      "street": "preflop",
+      "seat": 4,
+      "action": "fold",
+      "amount": 0
+    },
+    {
+      "street": "preflop",
+      "seat": 5,
+      "action": "fold",
+      "amount": 0
+    },
+    {
+      "street": "preflop",
+      "seat": 0,
+      "action": "raise",
+      "amount": 50
+    },
+    {
+      "street": "preflop",
+      "seat": 1,
+      "action": "fold",
+      "amount": 0
+    },
+    {
+      "street": "preflop",
+      "seat": 2,
+      "action": "call",
+      "amount": 40
+    },
+    {
+      "street": "preflop",
+      "seat": 3,
+      "action": "call",
+      "amount": 30
+    },
+    {
+      "street": "flop",
+      "seat": 2,
+      "action": "check",
+      "amount": 0
+    },
+    {
+      "street": "flop",
+      "seat": 3,
+      "action": "check",
+      "amount": 0
+    },
+    {
+      "street": "flop",
+      "seat": 0,
+      "action": "check",
+      "amount": 0
+    },
+    {
+      "street": "turn",
+      "seat": 2,
+      "action": "bet",
+      "amount": 50
+    },
+    {
+      "street": "turn",
+      "seat": 3,
+      "action": "fold",
+      "amount": 0
+    },
+    {
+      "street": "turn",
+      "seat": 0,
+      "action": "fold",
+      "amount": 0
+    }
+  ],
+  "street": "turn",
+  "showdown": false,
+  "winners": [
+    2
+  ],
+  "net": {
+    "0": -50,
+    "1": 0,
+    "2": 100,
+    "3": -50,
+    "4": 0,
+    "5": 0
+  }
+}

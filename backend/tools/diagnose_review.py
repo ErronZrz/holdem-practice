@@ -50,20 +50,27 @@ from app.strategy.mixed_context import (  # noqa: E402
 from app.strategy.mixed_features import features_for  # noqa: E402
 from app.strategy.mixed_policy import (  # noqa: E402
     _CHECKED_VALUE_FLOOR,
+    _DRAW_SUPPORT_BASE,
     _POSTFLOP_PRICE_WEIGHT,
+    _STRONG_VALUE_BONUS,
+    _VALUE_GATE_TOLERANCE,
     _VALUE_THRESHOLDS,
     STYLE_PARAMETERS,
     HandMode,
+    _active_gate,
+    _checked_value_floor,
+    _facing_draw_support,
     _full_ring_call_penalty,
     _large_commit_penalty,
     _postflop_call_bonus,
     _preflop_call_bonus,
     _score,
     _strong_preflop_continuation,
+    _strong_value_hand,
     _with_broadway_base,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
-    MIXED_STRATEGY_IDENTIFIER_V15,
+    MIXED_STRATEGY_IDENTIFIER_V16,
     MixedLocalStrategy,
     rules_for_identifier,
 )
@@ -519,6 +526,16 @@ def _rows_from_pairs(pairs: list[tuple[Action, float]]) -> list[dict]:
     ]
 
 
+def _value_line_quality(features, style, rules, score: int, value_threshold: int) -> int:
+    """主动质量。听牌支撑只在这条线仍为 0 时进入展示用的被动分。"""
+    gate = _active_gate(features, style, rules)
+    threshold_quality = max(0, score - value_threshold + _VALUE_GATE_TOLERANCE + gate)
+    quality = max(threshold_quality, _checked_value_floor(features, rules))
+    if _strong_value_hand(features, rules):
+        quality += _STRONG_VALUE_BONUS
+    return quality
+
+
 def _score_features(features, style, rules) -> dict:
     """用和参考分布相同的紧手标准模式公式，拆开评分与两条门槛。"""
     features = _with_broadway_base(features, rules)
@@ -542,8 +559,21 @@ def _score_features(features, style, rules) -> dict:
     bonus = (
         _preflop_call_bonus(rules, style) if is_preflop else _postflop_call_bonus(rules, style)
     )
+    commit_penalty = _large_commit_penalty(features, rules)
+    ring_penalty = _full_ring_call_penalty(features, rules)
     passive = score + bonus + _strong_preflop_continuation(features, rules)
-    passive -= _large_commit_penalty(features, rules) + _full_ring_call_penalty(features, rules)
+    passive -= commit_penalty + ring_penalty
+    # 没有承诺惩罚、也没越过主动价值线时，听牌支撑会进实际被动分，展示跟着加。
+    if (
+        commit_penalty == 0
+        and ring_penalty == 0
+        and rules.effective_draw_support
+        and features.base < _DRAW_SUPPORT_BASE
+        and _value_line_quality(features, style, rules, score, value_threshold) == 0
+    ):
+        supported = _facing_draw_support(features, rules)
+        if supported is not None:
+            passive += supported[0]
     return {
         "base": features.base,
         "draw": features.draw,
@@ -619,6 +649,9 @@ def _inspect_decision(
         bad_fold=bad_fold,
         big_blind=engine.big_blind,
         contested=valued.contested,
+        hole_cards=hero.hole_cards,
+        board=snapshot.board,
+        pot=snapshot.pot,
     )
     mode_action = _mode_action(guarded_pairs)
     published_action, published_rows = _publish_reference(
@@ -735,11 +768,11 @@ def _replay(history: dict, *, hand_id: str, coach_rows: dict[int, dict]) -> dict
     for seat, stack in starting.items():
         engine.players[seat].stack = stack
     engine.start_hand_with(history["button"], hole_cards, board)
-    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V15)
+    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V16)
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V15,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V16,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(

@@ -44,6 +44,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V13,
     MIXED_STRATEGY_IDENTIFIER_V14,
     MIXED_STRATEGY_IDENTIFIER_V15,
+    MIXED_STRATEGY_IDENTIFIER_V16,
     MIXED_STRATEGY_IDENTIFIERS,
     rules_for_identifier,
 )
@@ -364,6 +365,7 @@ def test_sixth_identity_is_registered_and_cumulative() -> None:
         MIXED_STRATEGY_IDENTIFIER_V13,
         MIXED_STRATEGY_IDENTIFIER_V14,
         MIXED_STRATEGY_IDENTIFIER_V15,
+        MIXED_STRATEGY_IDENTIFIER_V16,
     )
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V6).version == 6
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V6).name == "mixed-local"

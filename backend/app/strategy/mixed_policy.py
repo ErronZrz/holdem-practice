@@ -90,6 +90,18 @@ _STORY_TEXTURE_DIVISOR = 8
 _DRAW_SUPPORT_BASE = 400
 _DRAW_RETENTION_FLOOR = 400
 _DRAW_CROWD_STEP = 150
+# 翻前国王后补上旧基础分漏掉的连张分。同花与非同花加同一笔，原有同花差留在基础分里。
+_KQ_CONNECTOR_BONUS = 50
+# 未开池且前位已有弃牌时，按弃牌人数把位置从最前档往回拉。
+_UNOPENED_POSITION_SPAN = 80
+# 修正后达到这一档的翻前牌才吃未开池后位加分，弱杂牌不加。
+_UNOPENED_PLAYABLE_BASE = 470
+_UNOPENED_BASE_STEP = 65
+_UNOPENED_BASE_CAP = 160
+# 翻牌至少八张补牌时改按两街成牌率给支撑，并从第四名对手起才打折。
+_STRONG_FLOP_DRAW_OUTS = 8
+_STRONG_FLOP_DRAW_SPAN = 420
+_STRONG_FLOP_DRAW_FREE_OPPONENTS = 3
 # 听牌分整除还原补牌数时使用的权重与未见牌张数，翻牌与转牌分开。
 _DRAW_FLOP_OUTS_WEIGHT = 12
 _DRAW_TURN_OUTS_WEIGHT = 8
@@ -206,6 +218,8 @@ class MixedPolicyRules:
     broadway_one_gap_bonus: int = 0
     # 隔两张时补上的分。
     broadway_two_gap_bonus: int = 0
+    # 翻前未开池后位与翻牌强听牌是否改用修正口径。默认关闭，旧身份的分布逐位不变。
+    late_unopened_draw_caliber: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -290,6 +304,12 @@ MIXED_LOCAL_V15_RULES = replace(
     broadway_connector_bonus=220,
     broadway_one_gap_bonus=150,
     broadway_two_gap_bonus=120,
+)
+# 第十六版口径：补上国王后的连张分，未开池且前位已有弃牌时恢复后位，
+# 翻牌八张及以上补牌按两街成牌率给支撑。其余字段与第十五版逐字一致。
+MIXED_LOCAL_V16_RULES = replace(
+    MIXED_LOCAL_V15_RULES,
+    late_unopened_draw_caliber=True,
 )
 
 
@@ -584,9 +604,47 @@ def _broadway_bonus(features: MixedFeatures, rules: MixedPolicyRules) -> int:
 def _with_broadway_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:
     """需要修正时换上有效翻前基础分；否则原样返回，避免改动旧身份的特征对象。"""
     bonus = _broadway_bonus(features, rules)
-    if bonus == 0:
+    adjusted = (
+        features
+        if bonus == 0
+        else replace(features, base=clip(features.base + bonus, 0, 1000))
+    )
+    return _with_unopened_late_caliber(adjusted, rules)
+
+
+def _with_unopened_late_caliber(
+    features: MixedFeatures, rules: MixedPolicyRules
+) -> MixedFeatures:
+    """翻前补国王后连张分，并在未开池、前位已有弃牌时恢复后位。
+
+    开关关闭或不是翻前时原样返回。一旦已有人加注，未开池加成为 0。
+    低于强牌下沿的牌加上后位分后停在强牌通道之外。
+    """
+    if not rules.late_unopened_draw_caliber or features.street is not Street.PREFLOP:
         return features
-    return replace(features, base=clip(features.base + bonus, 0, 1000))
+    base = features.base
+    high = max(features.hole_ranks)
+    low = min(features.hole_ranks)
+    if high == 13 and low == 12:
+        base = clip(base + _KQ_CONNECTOR_BONUS, 0, 1000)
+    position = features.position
+    folded = max(0, features.seat_count - 1 - features.contenders)
+    if features.preflop_unraised and features.limpers == 0 and folded > 0:
+        position = clip(
+            features.position
+            + (_UNOPENED_POSITION_SPAN * folded) // max(1, features.seat_count - 1),
+            -40,
+            40,
+        )
+        if base >= _UNOPENED_PLAYABLE_BASE:
+            added = min(_UNOPENED_BASE_CAP, _UNOPENED_BASE_STEP * folded)
+            if base < _STRONG_PREFLOP_BASE:
+                base = min(base + added, _STRONG_PREFLOP_BASE - 1)
+            else:
+                base = clip(base + added, 0, 1000)
+    if base == features.base and position == features.position:
+        return features
+    return replace(features, base=base, position=position)
 
 
 def _score(
@@ -824,15 +882,33 @@ def _facing_draw_support(
     outs = features.draw // outs_weight
     if outs <= 0:
         return None
-    equity = 1000 * outs // unseen
+    # 翻牌强听牌按两街都没中的补集计成牌率，并推迟多人折扣。不足八张补牌或转牌仍按单街。
+    strong_flop_draw = (
+        rules.late_unopened_draw_caliber
+        and features.street is Street.FLOP
+        and outs >= _STRONG_FLOP_DRAW_OUTS
+    )
+    if strong_flop_draw:
+        equity = 1000 - (
+            1000
+            * (unseen - outs)
+            * (unseen - 1 - outs)
+            // (unseen * (unseen - 1))
+        )
+        span = _STRONG_FLOP_DRAW_SPAN
+        crowd_start = _STRONG_FLOP_DRAW_FREE_OPPONENTS
+    else:
+        equity = 1000 * outs // unseen
+        span = rules.draw_support_span
+        crowd_start = 2
     required = 1000 * features.price // (features.price + 1000)
     coverage = 1000 if required <= 0 else min(1000, 1000 * equity // required)
     retention = max(
         _DRAW_RETENTION_FLOOR,
-        1000 - _DRAW_CROWD_STEP * max(0, features.contenders - 2),
+        1000 - _DRAW_CROWD_STEP * max(0, features.contenders - crowd_start),
     )
     coverage = coverage * retention // 1000
-    support = rules.draw_support_span * coverage // 1000
+    support = span * coverage // 1000
     return support, coverage
 
 

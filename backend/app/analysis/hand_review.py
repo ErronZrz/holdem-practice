@@ -6,6 +6,7 @@
 跟注、下注和加注都挪到弃牌；份额不低于平均且已有加注或下注时，跟注并入其中概率最高的一条；
 翻前廉价未加注且负期望很小时保留跟注，其余情况把跟注挪到弃牌。翻后无人下注且份额过低或
 行动线已经偏高时，主动质量挪到过牌；弃牌会被标成放弃正期望时，弃牌质量挪到跟注。
+翻后面对下注、跟注期望为正且底牌具备可继续牌力时，弃牌质量也挪到跟注。
 众数先按动作类型汇总，再取该类型里概率最高的尺度。跟注的对外金额是当时实际要投入的筹码。
 错误来自份额、跟注期望和牌力门槛；与参考众数不同本身不是错误，
 参考动作只用来否决与参考自己方向相反的标记。
@@ -26,7 +27,7 @@ from app.poker.hand import HandCategory
 from app.strategy.heuristic import draw_outs
 from app.strategy.mixed_context import MixedSummaryTracker, mixed_state
 from app.strategy.mixed_policy import MIXED_DISTRIBUTION_UNITS, HandMode, MixedDistribution
-from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V15, MixedLocalStrategy
+from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V16, MixedLocalStrategy
 from app.strategy.projection import project_for_actor
 
 # 复盘采样数与固定种子：牌局结束后可以多采样，结果必须可复现。
@@ -296,9 +297,27 @@ def _guard_bad_fold(
     *,
     to_call: int,
     bad_fold: bool,
+    postflop: bool = False,
+    call_ev: float | None = None,
+    hole_cards: Sequence[Card] = (),
+    board: Sequence[Card] = (),
+    pot: int = 0,
 ) -> list[tuple[Action, float]]:
-    """弃牌会被标成放弃正期望时，把弃牌质量挪到跟注。"""
-    if to_call <= 0 or not bad_fold:
+    """面对下注时，把不该留下的弃牌质量挪到跟注。
+
+    探针已经判成放弃正期望时照旧挪走。翻后跟注期望为正、且底牌具备可继续牌力时，
+    即使还没跨过那条探针线，也把弃牌并入跟注。
+    """
+    # 探针已成立时不必再看牌力。没有两张底牌时也不把空序列送进成牌判断。
+    playable_continue = False
+    if (
+        not bad_fold
+        and postflop
+        and (call_ev or 0.0) > 0.0
+        and len(hole_cards) >= 2
+    ):
+        playable_continue = _has_playable_strength(hole_cards, board, to_call, pot)
+    if to_call <= 0 or not (bad_fold or playable_continue):
         return distribution
     return _move_mass(distribution, frozenset({ActionType.FOLD}), ActionType.CALL)
 
@@ -352,6 +371,9 @@ def _guard_reference_distribution(
     bad_fold: bool,
     big_blind: int = 0,
     contested: int = 0,
+    hole_cards: Sequence[Card] = (),
+    board: Sequence[Card] = (),
+    pot: int = 0,
 ) -> list[tuple[Action, float]]:
     """发布前收回和份额、跟注期望打架的质量。调用方在全部归并之后再取众数。"""
     guarded = _guard_negative_call(
@@ -372,7 +394,16 @@ def _guard_reference_distribution(
         opponents=opponents,
         max_line=max_line,
     )
-    return _guard_bad_fold(guarded, to_call=to_call, bad_fold=bad_fold)
+    return _guard_bad_fold(
+        guarded,
+        to_call=to_call,
+        bad_fold=bad_fold,
+        postflop=postflop,
+        call_ev=call_ev,
+        hole_cards=hole_cards,
+        board=board,
+        pot=pot,
+    )
 
 
 def _distribution_rows(selected: MixedDistribution) -> list[tuple[Action, float]]:
@@ -670,6 +701,9 @@ def _analyze_decision(
         bad_fold=bad_fold,
         big_blind=engine.big_blind,
         contested=valued.contested,
+        hole_cards=hero_state.hole_cards,
+        board=snapshot.board,
+        pot=snapshot.pot,
     )
     bot_action = _mode_action(distribution)
     paid = 0
@@ -753,7 +787,7 @@ def build_review(history: dict) -> dict:
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V15,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V16,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(

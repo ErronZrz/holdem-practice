@@ -226,9 +226,11 @@ def test_review_thresholds_are_frozen() -> None:
 
 
 def test_reference_versions_track_the_action_line_upgrade() -> None:
-    assert REFERENCE_VERSION == 4
+    assert REFERENCE_VERSION == 5
     assert EVALUATION_VERSION == 2
     assert CACHE_KEY_VERSION == 1
     identity = reference_identity()
     assert identity["reference_strategy"] == "mixed-tight-normal"
     assert identity["reference_coverage"] == "action-line-weighted"
+    scope = reference_declaration()["reference_scope"]
+    assert "翻后面对下注、跟注期望为正且底牌具备可继续牌力时，弃牌质量挪到跟注。" in scope
