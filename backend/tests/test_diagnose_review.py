@@ -5,14 +5,16 @@ import sqlite3
 import pytest
 
 import tools.diagnose_review as diagnose
-from app.analysis.reference_identity import REFERENCE_VERSION
+from app.analysis.reference_identity import EVALUATION_VERSION, REFERENCE_VERSION
 from app.llm.coach import PROMPT_SCHEMA_VERSION
 from app.poker.actions import Action, ActionType
 from app.poker.cards import card_from_str as card
 from app.poker.engine import PokerEngine
 from app.storage.hand_history import build_hand_history
 
-_CURRENT_CACHE_KEY = f"v1|h|0|0|d|ref={REFERENCE_VERSION}|eval=2|prompt=1|local|none"
+_CURRENT_CACHE_KEY = (
+    f"v1|h|0|0|d|ref={REFERENCE_VERSION}|eval={EVALUATION_VERSION}|prompt=1|local|none"
+)
 
 
 def _point(**overrides) -> dict:
@@ -442,6 +444,16 @@ def test_old_reference_cache_key_is_stale() -> None:
     codes = diagnose.classify_point(_point(mode="raise", coach=reading))
     assert "e_coach_stale_schema" in codes
     assert "e_coach_opposes" not in codes
+    previous_eval = diagnose.coach_reading(
+        "这里应该弃牌。",
+        mode="raise",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=PROMPT_SCHEMA_VERSION,
+        recommended_action="fold",
+        cache_key=f"v1|h|0|0|d|ref={REFERENCE_VERSION}|eval=2|prompt=5|local|none",
+    )
+    assert previous_eval["stale"] is True
     current = diagnose.coach_reading(
         "这里应该弃牌。",
         mode="raise",

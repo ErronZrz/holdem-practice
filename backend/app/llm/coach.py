@@ -21,7 +21,7 @@ from app.storage import repository
 from app.storage.models import CoachExplanationModel, CoachMessageModel
 
 # 提示词结构变化时递增，已缓存的解读随之失效。
-PROMPT_SCHEMA_VERSION = 4
+PROMPT_SCHEMA_VERSION = 5
 _REASONING_SUMMARY_LIMIT = 500
 _EMPTY = "教练解读暂时不可用，请稍后再试"
 
@@ -69,7 +69,9 @@ _SYSTEM_PROMPT = """\
 - one_card_outs 是翻牌或转牌上再发一张就能成顺或成花的补牌数。翻前、河牌，以及已经成顺或成花时为 0。
   这个数为 0 时，不要把这手写成听牌。
 - 参考动作来自紧手标准模式（mixed-tight-normal）。
-  待跟注大于 0 且 call_ev < 0 时，跟注质量已经挪到弃牌；份额低于平均时，下注和加注质量也挪到弃牌。
+  待跟注大于 0 且 call_ev < 0 时：份额低于平均，跟注、下注和加注质量都挪到弃牌；
+  份额不低于平均且已有加注或下注时，跟注并入其中概率最高的主动动作；
+  翻前未加注、跟注额不超过一个大盲且负期望很小则保留跟注；其余情况跟注挪到弃牌。
   翻后无人下注，且份额低于空气线，或行动线档位已经偏高且份额低于平均时，下注和加注质量已经挪到过牌。
   弃牌会被标成放弃正期望时，弃牌质量已经挪到跟注。
   参考只供对照，与参考不同本身不构成错误。

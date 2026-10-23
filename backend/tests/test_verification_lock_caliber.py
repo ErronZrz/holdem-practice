@@ -215,7 +215,8 @@ def test_closed_categories_contain_forty_five_entries() -> None:
     assert "mixed-local@14" in KNOWN_PLAIN_TEXTS
     assert "mixed-local@15" in KNOWN_PLAIN_TEXTS
     assert "mixed-local@16" in KNOWN_PLAIN_TEXTS
-    assert len(KNOWN_PLAIN_TEXTS) == 17
+    assert "mixed-local@17" in KNOWN_PLAIN_TEXTS
+    assert len(KNOWN_PLAIN_TEXTS) == 18
 
 
 def test_bluff_freq_encoding_rejects_other_numeric_forms() -> None:

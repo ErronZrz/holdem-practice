@@ -50,11 +50,14 @@ from app.strategy.mixed_policy import (  # noqa: E402
     MixedStyle,
     _active_candidates,
     _active_gate,
+    _checked_defense_bonus,
     _checked_value_floor,
+    _delayed_probe_quality,
     _facing_draw_support,
     _full_ring_call_penalty,
     _large_commit_penalty,
     _non_value_quality,
+    _protection_applies,
     _score,
     _size_preferences,
     _story_quality,
@@ -64,6 +67,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     build_distribution,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
+    MIXED_STRATEGY_IDENTIFIER_V17,
     MIXED_STRATEGY_RULES,
     MIXED_STYLE_ORDER,
     rules_for_identifier,
@@ -214,10 +218,12 @@ def _explain(
     mode: HandMode,
     rules: MixedPolicyRules,
     trap_roll: int | None = None,
+    protect_roll: int | None = None,
 ) -> dict:
     """按同一次分布计算拆开评分、门槛、尺度和过滤后的候选。
 
-    未传入设伏隐变量时设伏保持关闭，与没有座位键的分布观测同一口径。
+    未传入设伏或过牌保护隐变量时，这两条通道保持关闭，与没有座位键的分布观测同一口径。
+    过牌后的跟注和延迟探测只看规则开关，不另抽隐变量。
     """
     style_value = MixedStyle(style)
     parameters = STYLE_PARAMETERS[style_value]
@@ -281,6 +287,11 @@ def _explain(
             call_weight = max(0, passive - call_threshold + 160) * parameters.call_percent
     story_quality = _story_quality(features, rules) if penalties_clear else 0
     bluff_quality += story_quality
+    if _protection_applies(features, rules, protect_roll) and (
+        legal.can_check or (features.actor_checks > 0 and features.actual_call > 0)
+    ):
+        value_quality = 0
+        bluff_quality = 0
     trap_budget = _trap_budget(features, rules)
     trap_hit = trap_roll is not None and 0 <= trap_roll < trap_budget
     if trap_hit and legal.can_check:
@@ -290,12 +301,25 @@ def _explain(
         passive += _TRAP_RELEASE
         fold_weight = max(0, call_threshold - passive + 160) * parameters.fold_percent
         call_weight = max(0, passive - call_threshold + 160) * parameters.call_percent
+    if penalties_clear:
+        bluff_quality += _delayed_probe_quality(features, rules)
+        defense = _checked_defense_bonus(features, rules)
+        if defense:
+            passive += defense
+            fold_weight = max(0, call_threshold - passive + 160) * parameters.fold_percent
+            call_weight = max(0, passive - call_threshold + 160) * parameters.call_percent
     preferences = _size_preferences(features, parameters, rules)
     active = _active_candidates(
         features, legal, score, value_quality, bluff_quality, preferences, rules
     )
     distribution = build_distribution(
-        features, legal, style_value, mode, rules, trap_roll=trap_roll
+        features,
+        legal,
+        style_value,
+        mode,
+        rules,
+        trap_roll=trap_roll,
+        protect_roll=protect_roll,
     )
     rows = [
         {
@@ -738,7 +762,10 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="preflop、flop、turn、river，或翻牌前、翻牌、转牌、河牌",
     )
-    parser.add_argument("--identity", help="覆盖历史中的策略身份，例如 mixed-local@12")
+    parser.add_argument(
+        "--identity",
+        help=f"覆盖历史中的策略身份，例如 {MIXED_STRATEGY_IDENTIFIER_V17}",
+    )
     parser.add_argument("--json", type=Path, help="把完整结果另存为 JSON")
     parser.add_argument("--recent", type=int, default=20, help="无 ID 时列出的手牌条数")
     args = parser.parse_args(argv)

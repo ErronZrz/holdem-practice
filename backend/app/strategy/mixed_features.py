@@ -92,6 +92,8 @@ class MixedFeatures:
     prior_street_aggressor: bool = False
     # 上一街行动者的下注次数加加注次数。翻前恒为 0。
     prior_street_aggression: int = 0
+    # 上一条街没有人主动投入。翻前恒为假；手工构造不填时，探测不会把上一条街当成全员过牌。
+    prior_street_checked_through: bool = False
 
     @property
     def spr_denominator(self) -> int:
@@ -137,11 +139,13 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
     if street_index == 0:
         prior_aggressor = False
         prior_aggression = 0
+        prior_checked_through = False
     else:
         prior = context.streets[street_index - 1]
         prior_counts = prior.counts_by_seat[actor.seat]
         prior_aggressor = prior.last_aggressor == actor.seat
         prior_aggression = prior_counts[_BET_INDEX] + prior_counts[_RAISE_INDEX]
+        prior_checked_through = prior.last_aggressor is None
     aggression = sum(
         counts[p.seat][_BET_INDEX] + counts[p.seat][_RAISE_INDEX]
         for p in players
@@ -201,6 +205,7 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         actor_checks=actor_checks,
         prior_street_aggressor=prior_aggressor,
         prior_street_aggression=prior_aggression,
+        prior_street_checked_through=prior_checked_through,
     )
 
 

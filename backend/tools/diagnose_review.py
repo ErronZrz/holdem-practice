@@ -37,7 +37,10 @@ from app.analysis.hand_review import (  # noqa: E402
     _publish_reference,
     _replay_action,
 )
-from app.analysis.reference_identity import REFERENCE_VERSION  # noqa: E402
+from app.analysis.reference_identity import (  # noqa: E402
+    EVALUATION_VERSION,
+    REFERENCE_VERSION,
+)
 from app.llm.coach import PROMPT_SCHEMA_VERSION  # noqa: E402
 from app.poker.actions import Action  # noqa: E402
 from app.poker.cards import card_from_str  # noqa: E402
@@ -58,6 +61,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     STYLE_PARAMETERS,
     HandMode,
     _active_gate,
+    _checked_defense_bonus,
     _checked_value_floor,
     _facing_draw_support,
     _full_ring_call_penalty,
@@ -70,7 +74,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _with_broadway_base,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
-    MIXED_STRATEGY_IDENTIFIER_V16,
+    MIXED_STRATEGY_IDENTIFIER_V17,
     MixedLocalStrategy,
     rules_for_identifier,
 )
@@ -413,10 +417,13 @@ def _mentioned_chips(fragment: str) -> list[int]:
 
 
 def _cache_matches_reference(cache_key: str | None) -> bool:
-    """缓存键含当前参考版本才算仍有效，与线上决策缓存的失效方式一致。"""
+    """缓存键同时含当前参考版本和评估版本才算仍有效。"""
     if not cache_key:
         return False
-    return f"|ref={REFERENCE_VERSION}|" in cache_key
+    return (
+        f"|ref={REFERENCE_VERSION}|" in cache_key
+        and f"|eval={EVALUATION_VERSION}|" in cache_key
+    )
 
 
 def coach_reading(
@@ -433,7 +440,7 @@ def coach_reading(
     """从一段教练正文里抽出动作倾向，并和参考众数、金额对照。
 
     库里已经记下建议动作时直接用它比较；空着才退回关键词，并标明是推断。
-    提示词版本或缓存键里的参考版本对不上当前口径时，记为过期缓存。
+    提示词版本，或缓存键里的参考版本、评估版本对不上当前口径时，记为过期缓存。
     """
     spans = _reference_spans(text)
     attributed: set[str] = set()
@@ -574,6 +581,9 @@ def _score_features(features, style, rules) -> dict:
         supported = _facing_draw_support(features, rules)
         if supported is not None:
             passive += supported[0]
+    if commit_penalty == 0 and ring_penalty == 0:
+        # 过牌后的成牌补分进实际被动分，展示跟着加。
+        passive += _checked_defense_bonus(features, rules)
     return {
         "base": features.base,
         "draw": features.draw,
@@ -620,7 +630,7 @@ def _inspect_decision(
     features = features_for(require_mixed_input(projected), legal)
     style = reference_bot.style_for(human_seat)
     selected = reference_bot.distribution_for(
-        projected, legal, mode=HandMode.NORMAL, trap_roll=None
+        projected, legal, mode=HandMode.NORMAL, trap_roll=None, protect_roll=None
     )
     raw_pairs = _distribution_rows(selected)
     max_line = max((level for _seat, level in live), default=0)
@@ -768,11 +778,11 @@ def _replay(history: dict, *, hand_id: str, coach_rows: dict[int, dict]) -> dict
     for seat, stack in starting.items():
         engine.players[seat].stack = stack
     engine.start_hand_with(history["button"], hole_cards, board)
-    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V16)
+    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V17)
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V16,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V17,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(

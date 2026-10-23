@@ -29,9 +29,25 @@ _LEVEL_PRIOR: dict[int, tuple[int, int]] = {
 }
 _PRIOR_GAP_MIN = -14.0
 _PRIOR_GAP_MAX = 8.0
-_BOARD_LIFT_BASE = 0.40
-_BOARD_LIFT_SPAN = 1.20
+# 高于门槛的合格牌最多再加一倍；跨度用完就停在 2。
+_PRIOR_SPAN = 400.0
+# 翻后连接度按行动线分档。门槛越高，没打中牌面的牌越难进入紧的行动线。
+_CONNECTION_PRIOR: dict[int, tuple[int, int]] = {
+    0: (100, 200),
+    1: (300, 160),
+    2: (420, 130),
+    3: (580, 95),
+    4: (660, 75),
+    5: (720, 60),
+}
+_CONNECTION_GAP_MIN = -3.0
+_CONNECTION_SPAN = 400.0
 _CONNECTION_CAP = 1000.0
+# 抽样表相对旧翻前基础分补上的高张与国王后。只用于这张表。
+_BROADWAY_ADJACENT = 220
+_BROADWAY_ONE_GAP = 150
+_BROADWAY_TWO_GAP = 120
+_KING_QUEEN_BONUS = 50
 _DRAW_BONUS_CAP = 180
 # 翻前一次投入超过这么多个大盲时，再收紧一档，最高停在大额加注档。
 _PREFLOP_COMMIT_BLINDS = 8
@@ -43,7 +59,27 @@ _DECK: tuple[Card, ...] = tuple(Card(rank, suit) for suit in Suit for rank in Ra
 _COMBOS: tuple[tuple[Card, Card], ...] = tuple(
     (_DECK[i], _DECK[j]) for i in range(len(_DECK)) for j in range(i + 1, len(_DECK))
 )
-_PRE_SCORE: tuple[int, ...] = tuple(_preflop_base(combo) for combo in _COMBOS)
+
+
+def _effective_preflop_score(holes: tuple[Card, Card]) -> int:
+    """抽样用的翻前分。旧基础分原样保留，只在这张表上补高张和国王后。"""
+    base = _preflop_base(holes)
+    high = max(card.rank.value for card in holes)
+    low = min(card.rank.value for card in holes)
+    if high == low:
+        return base
+    gap = high - low - 1
+    bonus = 0
+    if high == Rank.ACE.value and low >= Rank.JACK.value:
+        bonus = {0: _BROADWAY_ADJACENT, 1: _BROADWAY_ONE_GAP, 2: _BROADWAY_TWO_GAP}.get(gap, 0)
+    elif high == Rank.KING.value and low == Rank.QUEEN.value:
+        bonus = _KING_QUEEN_BONUS
+    if bonus == 0:
+        return base
+    return min(1000, base + bonus)
+
+
+_PRE_SCORE: tuple[int, ...] = tuple(_effective_preflop_score(combo) for combo in _COMBOS)
 
 
 @dataclass(frozen=True)
@@ -184,14 +220,26 @@ def estimate_decision(
 
 
 def prior_weight(preflop_score: float, connection: float, level: int, has_board: bool) -> float:
-    """翻前行动线决定先验，公共牌只按成牌连接度放大。"""
+    """翻前行动线决定先验。过线的牌落在一到两倍，公共牌再按连接度分档放大。
+
+    没过翻前门槛的牌，公共牌放大不超过 1，满连接度不能把它抬过自己的翻前权重。
+    """
     floor, temperature = _LEVEL_PRIOR[level]
-    gap = (preflop_score - floor) / temperature
-    prior = math.exp(max(_PRIOR_GAP_MIN, min(_PRIOR_GAP_MAX, gap)))
+    if preflop_score < floor:
+        gap = (preflop_score - floor) / temperature
+        prior = math.exp(max(_PRIOR_GAP_MIN, min(_PRIOR_GAP_MAX, gap)))
+    else:
+        prior = 1.0 + min(preflop_score - floor, _PRIOR_SPAN) / _PRIOR_SPAN
     if not has_board:
         return prior
-    capped = min(connection, _CONNECTION_CAP) / _CONNECTION_CAP
-    lift = _BOARD_LIFT_BASE + _BOARD_LIFT_SPAN * capped
+    connection_floor, connection_temperature = _CONNECTION_PRIOR[level]
+    if connection < connection_floor:
+        connection_gap = (connection - connection_floor) / connection_temperature
+        lift = math.exp(max(_CONNECTION_GAP_MIN, connection_gap))
+    else:
+        lift = 1.0 + min(connection - connection_floor, _CONNECTION_SPAN) / _CONNECTION_SPAN
+    if preflop_score < floor:
+        lift = min(1.0, lift)
     return prior * lift
 
 

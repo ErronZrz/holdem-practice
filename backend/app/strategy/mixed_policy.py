@@ -109,6 +109,28 @@ _DRAW_FLOP_UNSEEN = 47
 _DRAW_TURN_UNSEEN = 46
 # 跟注开口与弃牌、跟注权重里的缓冲是同一跨度。
 _PASSIVE_SLACK = 160
+# 顶对带过牌保护：只覆盖这一基础分区间，两对高档及以上仍走原来的设伏。
+_PROTECTION_BASE_FLOOR = 600
+_PROTECTION_BASE_CEILING = 760
+_PROTECTION_WEAK_KICKER = 660
+_PROTECTION_WEAK_KICKER_PERCENT = 10
+_PROTECTION_TEXTURE_LINE = 40
+_PROTECTION_TEXTURE_PERCENT = 8
+_PROTECTION_CROWD_PERCENT = 6
+_PROTECTION_BUDGET_CAP = 40
+# 本街已经过牌、面对单次常规下注时，只给有摊牌价值的成牌补跟注。
+_DEFENSE_BASE_FLOOR = 360
+_DEFENSE_BASE_CEILING = 760
+_DEFENSE_CROWD_SPAN = 80
+_DEFENSE_PRICE_HALVE = 400
+_DEFENSE_PRICE_CAP = 500
+_DEFENSE_CONTENDER_CAP = 3
+# 单挑过牌示弱时，给没有摊牌价值的空气补一小段下注质量。
+_PROBE_BASE_CEILING = 200
+_PROBE_CHECKED_BONUS = 2
+_PROBE_RIVER_BONUS = 2
+_PROBE_QUALITY_CAP = 8
+_PROBE_TEXTURE_DIVISOR = 40
 # 翻前强牌的继续偏移：大约抵消一次弃牌缓冲，避免强牌在有价格时直接弃掉。
 _STRONG_PREFLOP_CONTINUATION = 180
 # 强成牌的尺度偏好：小注只留一点，中注与大注占多数，不把整叠当作默认尺度。
@@ -220,6 +242,18 @@ class MixedPolicyRules:
     broadway_two_gap_bonus: int = 0
     # 翻前未开池后位与翻牌强听牌是否改用修正口径。默认关闭，旧身份的分布逐位不变。
     late_unopened_draw_caliber: bool = False
+    # 翻牌与转牌的顶对带是否按另一条手牌级隐变量整段过牌。默认关闭。
+    check_range_protection: bool = False
+    # 单挑、牌面风险为 0、基础分不低于弱踢脚下沿时的过牌预算百分数。
+    check_base_percent: int = 16
+    # 本街已经过牌、面对单次常规下注时，是否给有摊牌价值的成牌补跟注。默认关闭。
+    checked_continue: bool = False
+    # 单挑、价格还没到折半线时补进被动分的跨度。
+    checked_defense_span: int = 160
+    # 单挑过牌示弱时，是否给没有摊牌价值的空气补一点下注质量。默认关闭。
+    delayed_probe: bool = False
+    # 探测质量的起点，再按上一条街过牌、河牌上调，按牌面风险下调。
+    delayed_probe_quality: int = 4
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -310,6 +344,14 @@ MIXED_LOCAL_V15_RULES = replace(
 MIXED_LOCAL_V16_RULES = replace(
     MIXED_LOCAL_V15_RULES,
     late_unopened_draw_caliber=True,
+)
+# 第十七版口径：顶对带可整段过牌且转牌不再设伏，过牌后的成牌补跟注，
+# 单挑过牌线上给空气补一小段探测。其余字段与第十六版逐字一致。
+MIXED_LOCAL_V17_RULES = replace(
+    MIXED_LOCAL_V16_RULES,
+    check_range_protection=True,
+    checked_continue=True,
+    delayed_probe=True,
 )
 
 
@@ -444,10 +486,12 @@ def build_distribution(
     mode: HandMode,
     rules: MixedPolicyRules = MIXED_LOCAL_V1_RULES,
     trap_roll: int | None = None,
+    protect_roll: int | None = None,
 ) -> MixedDistribution:
     """按固定规则计算当前局面的联合动作/尺度分布。
 
-    ``trap_roll`` 缺省时设伏保持关闭，避免没有座位键的查询路径自行抽数。
+    ``trap_roll`` 与 ``protect_roll`` 缺省时对应通道保持关闭，
+    避免没有座位键的查询路径自行抽数。
     """
     features = _with_broadway_base(features, rules)
     _require_coherent_legal(legal)
@@ -521,6 +565,12 @@ def build_distribution(
     if penalties_clear:
         # 承诺没有把主动质量清掉时，才把上一街自己的进攻补进这一街的空气下注。
         bluff_quality += _story_quality(features, rules)
+    if _protection_applies(features, rules, protect_roll) and (
+        legal.can_check or (features.actor_checks > 0 and features.actual_call > 0)
+    ):
+        # 命中过牌保护：可以免费过牌，或本街已经过牌再面对下注时，不再主动投入。
+        value_quality = 0
+        bluff_quality = 0
     if _trap_applies(features, rules, trap_roll):
         if legal.can_check:
             # 设伏命中且可以免费行动：这一街整段过牌，不保留半诈唬。
@@ -529,6 +579,18 @@ def build_distribution(
         if features.actor_checks > 0 and features.actual_call > 0:
             # 本街已经过牌再面对下注：强牌价值保留，只把一小段质量还到跟注。
             passive_score += _TRAP_RELEASE
+            fold_weight = max(0, call_threshold - passive_score + _PASSIVE_SLACK) * (
+                parameters.fold_percent
+            )
+            call_weight = max(0, passive_score - call_threshold + _PASSIVE_SLACK) * (
+                parameters.call_percent
+            )
+    if penalties_clear:
+        # 承诺没有清掉主动质量时，才补探测和过牌后的跟注。跟注不加主动质量。
+        bluff_quality += _delayed_probe_quality(features, rules)
+        defense = _checked_defense_bonus(features, rules)
+        if defense:
+            passive_score += defense
             fold_weight = max(0, call_threshold - passive_score + _PASSIVE_SLACK) * (
                 parameters.fold_percent
             )
@@ -934,11 +996,89 @@ def _story_quality(features: MixedFeatures, rules: MixedPolicyRules) -> int:
     return max(0, raw)
 
 
+def _protection_budget(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """顶对带在翻牌或转牌可以整段过牌的百分预算。河牌和这条区间以外为 0。"""
+    if not rules.check_range_protection:
+        return 0
+    if features.street not in (Street.FLOP, Street.TURN):
+        return 0
+    if not _PROTECTION_BASE_FLOOR <= features.base < _PROTECTION_BASE_CEILING:
+        return 0
+    budget = rules.check_base_percent
+    if features.base < _PROTECTION_WEAK_KICKER:
+        budget += _PROTECTION_WEAK_KICKER_PERCENT
+    if features.texture >= _PROTECTION_TEXTURE_LINE:
+        budget += _PROTECTION_TEXTURE_PERCENT
+    if features.contenders > 1:
+        budget += _PROTECTION_CROWD_PERCENT * (features.contenders - 1)
+    if features.street is Street.TURN:
+        budget //= 2
+    return min(_PROTECTION_BUDGET_CAP, budget)
+
+
+def _protection_applies(
+    features: MixedFeatures,
+    rules: MixedPolicyRules,
+    protect_roll: int | None,
+) -> bool:
+    """开关关闭或未传入隐变量时恒不保护。传入值必须落在百分区间。"""
+    if not rules.check_range_protection or protect_roll is None:
+        return False
+    if not 0 <= protect_roll < 100:
+        raise MixedPolicyError(f"过牌保护取值必须落在 [0,100)，收到 {protect_roll}")
+    return protect_roll < _protection_budget(features, rules)
+
+
+def _checked_defense_bonus(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """本街已过牌、面对单次常规下注时，给有摊牌价值的成牌补的被动分。"""
+    if not rules.checked_continue:
+        return 0
+    if features.actor_checks <= 0 or features.actual_call <= 0:
+        return 0
+    if features.recent_aggression > 1 or features.contenders >= _DEFENSE_CONTENDER_CAP:
+        return 0
+    if features.price >= _DEFENSE_PRICE_CAP:
+        return 0
+    if not _DEFENSE_BASE_FLOOR <= features.base < _DEFENSE_BASE_CEILING:
+        return 0
+    bonus = (
+        _DEFENSE_CROWD_SPAN if features.contenders >= 2 else rules.checked_defense_span
+    )
+    if features.price >= _DEFENSE_PRICE_HALVE:
+        bonus //= 2
+    return bonus
+
+
+def _delayed_probe_quality(features: MixedFeatures, rules: MixedPolicyRules) -> int:
+    """单挑、无人下注、没有摊牌价值时补进非价值质量的一小段探测。"""
+    if not rules.delayed_probe or features.street is Street.PREFLOP:
+        return 0
+    if features.actual_call > 0 or features.draw > 0 or features.has_broadway_blocker:
+        return 0
+    if features.base >= _PROBE_BASE_CEILING or features.contenders > 1:
+        return 0
+    if features.recent_aggression > 0 or features.prior_street_aggressor:
+        return 0
+    if features.effective_stack <= features.pot:
+        return 0
+    if features.position < 0 and not features.prior_street_checked_through:
+        return 0
+    quality = rules.delayed_probe_quality
+    if features.prior_street_checked_through:
+        quality += _PROBE_CHECKED_BONUS
+    if features.street is Street.RIVER:
+        quality += _PROBE_RIVER_BONUS
+    quality -= features.texture // _PROBE_TEXTURE_DIVISOR
+    return min(_PROBE_QUALITY_CAP, max(0, quality))
+
+
 def _trap_budget(features: MixedFeatures, rules: MixedPolicyRules) -> int:
     """强成牌在翻牌或转牌可以慢打的百分预算。短码、河牌和中等成牌为 0。"""
     if not rules.trap_allocation:
         return 0
     if features.street not in (Street.FLOP, Street.TURN):
+        return 0
+    if features.street is Street.TURN and rules.check_range_protection:
         return 0
     if features.base < _THIN_VALUE_BASE or features.effective_stack <= features.pot:
         return 0

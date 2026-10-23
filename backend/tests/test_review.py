@@ -21,6 +21,7 @@ from app.poker.actions import Action, ActionType
 from app.poker.cards import card_from_str as card
 from app.poker.engine import PokerEngine
 from app.storage.hand_history import build_hand_history
+from tools.diagnose_review import connect_readonly, diagnose_history, load_history
 
 
 def _apply(engine: PokerEngine, action_type: ActionType, amount: int = 0) -> None:
@@ -63,7 +64,7 @@ def _play_and_capture(
 
 
 def test_review_flags_value_missed() -> None:
-    # 真人 AA 翻牌后无人下注却过牌，应命中「价值丢失」。
+    # 真人 AA 无人下注却过牌。翻牌份额刚好低于单挑价值线，转牌和河牌越过这条线后记价值丢失。
     hole = {0: [card("As"), card("Ad")], 1: [card("7c"), card("2d")]}
     board = [card(s) for s in ("2c", "7d", "9h", "3s", "Kd")]
     moves = [
@@ -78,10 +79,14 @@ def test_review_flags_value_missed() -> None:
     ]
     review = _review_for(hole, board, moves)
 
-    flop = [d for d in review["decisions"] if d["street"] == "flop"]
-    assert flop, "翻牌后真人应有决策点"
-    codes = {m["code"] for d in flop for m in d["mistakes"]}
-    assert "value_missed" in codes
+    by_street = {d["street"]: d for d in review["decisions"]}
+    flop_codes = {m["code"] for m in by_street["flop"]["mistakes"]}
+    assert by_street["flop"]["equity"] < 0.8
+    assert "value_missed" not in flop_codes
+    for street in ("turn", "river"):
+        codes = {m["code"] for m in by_street[street]["mistakes"]}
+        assert by_street[street]["equity"] >= 0.8
+        assert "value_missed" in codes
 
 
 def test_review_flags_bad_call() -> None:
@@ -972,3 +977,59 @@ def test_review_reference_is_unchanged_when_only_the_hand_number_changes() -> No
         for left, right in zip(first, review["decisions"], strict=True):
             assert left["bot_action"] == right["bot_action"]
             assert left["bot_distribution"] == right["bot_distribution"]
+
+
+# 新先验下六手标杆的份额与参考众数。翻前与有效分对齐；翻后高行动线不再被未击中的口袋对抬高。
+_CASE_READINGS = {
+    "555285f9dc2242649a2cf90134435823": (
+        (0, "preflop", "raise", 0.6300, None),
+        (1, "flop", "check", 0.4875, None),
+        (2, "turn", "check", 0.3435, None),
+        (3, "river", "check", 0.2700, None),
+    ),
+    "9b32cc7c8f804678a9e00de183a3b231": (
+        (0, "preflop", "raise", 0.4007, 8.05),
+        (1, "preflop", "raise", 0.3231, 58.31),
+    ),
+    "76a53e0e04dd4325b26db042c7eb2666": (
+        (0, "preflop", "fold", 0.4712, 3.56),
+        (1, "flop", "bet", 0.6460, None),
+        (2, "flop", "fold", 0.2365, -34.66),
+    ),
+    "08985a8d951045fd8224beb2e61cc6b2": (
+        (0, "preflop", "raise", 0.5232, 6.16),
+        (2, "turn", "fold", 0.1245, -18.88),
+    ),
+    "1cdb17a81ae84222841ddd8aa0979d8f": (
+        (0, "preflop", "call", 0.5182, 5.91),
+    ),
+    "af81bfa4db0d44589f5e42ab3dcc7feb": (
+        (0, "preflop", "raise", 0.5331, 6.66),
+    ),
+}
+
+
+def test_case_hands_keep_the_calibrated_action_line_shares() -> None:
+    """六手标杆的份额与参考众数落在新先验上，翻后面对下注不再被误抬成加注或跟注。"""
+    connection = connect_readonly()
+    try:
+        for hand_id, expected in _CASE_READINGS.items():
+            history = load_history(connection, hand_id)
+            assert history is not None
+            report = diagnose_history(history, hand_id=hand_id)
+            assert report.get("error") is None
+            points = {point["action_index"]: point for point in report["decisions"]}
+            for index, street, mode, equity, call_ev in expected:
+                point = points[index]
+                assert point["street"] == street
+                assert point["mode"] == mode
+                assert round(point["equity"], 4) == equity
+                if call_ev is None:
+                    assert point["call_ev"] is None
+                else:
+                    assert point["call_ev"] == pytest.approx(call_ev, abs=0.01)
+            codes = {code for point in report["decisions"] for code in point["contradictions"]}
+            assert "c_preflop_free_raise" not in codes
+            assert "b_postflop" not in codes
+    finally:
+        connection.close()

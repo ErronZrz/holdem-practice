@@ -576,7 +576,7 @@ def test_prompt_forbids_solver_wording_without_hiding_the_reference() -> None:
     assert "不要把这手写成听牌" in system
     assert "recommended_action" in system
     assert "本身不构成错误" in system
-    assert PROMPT_SCHEMA_VERSION == 4
+    assert PROMPT_SCHEMA_VERSION == 5
     body = _request_body(messages)
     assert "As" in body["hand"]["hero_hole_cards"]
     assert body["hand"]["revealed_hands"] == []

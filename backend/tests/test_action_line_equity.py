@@ -6,6 +6,7 @@ import pytest
 
 from app.analysis.action_line_equity import (
     ActionLineTracker,
+    _effective_preflop_score,
     estimate_decision,
     prior_weight,
 )
@@ -36,23 +37,50 @@ def _layer(kind: PotLayerKind, amount: int, eligible: tuple[int, ...]) -> Projec
 
 
 def test_prior_separates_premiums_from_trash_without_a_board() -> None:
-    # 没有公共牌时，各档对 AA 与 72o 的权重比随行动线收紧而拉开。
+    # 没有公共牌时，过线的牌只比刚过线的牌重一到两倍，比值仍随行动线收紧。
     aa = _preflop_base([Card(Rank.ACE, Suit.SPADES), Card(Rank.ACE, Suit.HEARTS)])
     trash = _preflop_base([Card(Rank.SEVEN, Suit.CLUBS), Card(Rank.TWO, Suit.DIAMONDS)])
-    expected = {0: 95, 1: 385, 2: 3454, 3: 30333, 4: 400_312, 5: 10_062_000}
+    expected = {0: 1.79, 1: 3.03, 2: 12.49, 3: 115.18, 4: 1386.44, 5: 34017.00}
+    ratios = []
     for level, ratio in expected.items():
         left = prior_weight(aa, 0.0, level, False)
         right = prior_weight(trash, 0.0, level, False)
-        assert left / right == pytest.approx(ratio, rel=0.02)
+        found = left / right
+        ratios.append(found)
+        assert found == pytest.approx(ratio, rel=0.02)
+    assert ratios[0] < 2
+    assert ratios == sorted(ratios)
+    assert ratios[3] > 100
 
 
 def test_board_connection_cannot_rescue_trash_into_a_tight_line() -> None:
-    # 公共牌只放大已经可能的组合：满连接度的 72o 仍远轻于没有连接度的 AA。
+    # 档位 3 上，满连接度的 72o 仍轻于没有连接度的 AA，但不再是数千倍。
     aa = _preflop_base([Card(Rank.ACE, Suit.SPADES), Card(Rank.ACE, Suit.HEARTS)])
     trash = _preflop_base([Card(Rank.SEVEN, Suit.CLUBS), Card(Rank.TWO, Suit.DIAMONDS)])
     premium = prior_weight(aa, 0.0, 3, True)
     rescued = prior_weight(trash, 1000.0, 3, True)
-    assert premium / rescued > 1000
+    assert premium / rescued == pytest.approx(5.73, rel=0.02)
+    assert premium / rescued > 5
+
+
+def test_sampling_table_uses_effective_broadway_scores() -> None:
+    # 抽样表补上高张和国王后，旧基础分函数的返回值保持原样。
+    samples = {
+        ("As", "Kh"): (542, 762),
+        ("As", "Ks"): (587, 807),
+        ("Ad", "Qh"): (567, 717),
+        ("Ac", "Qc"): (612, 762),
+        ("Ah", "Jd"): (542, 662),
+        ("Ah", "Jh"): (587, 707),
+        ("Kd", "Qh"): (429, 479),
+        ("Kd", "Qd"): (474, 524),
+        ("7c", "2d"): (146, 146),
+        ("Ac", "Ad"): (920, 920),
+    }
+    for (left, right), (raw, effective) in samples.items():
+        holes = (card_from_str(left), card_from_str(right))
+        assert _preflop_base(holes) == raw
+        assert _effective_preflop_score(holes) == effective
 
 
 def test_action_line_keeps_the_tightest_public_action() -> None:

@@ -1,7 +1,7 @@
 """复盘分析：从一手牌历史确定性重放，对真人每个决策点做份额估计与错误检测。
 
 复盘只在牌局结束后进行，重放整手动作以重建每个决策点。份额与跟注期望只使用英雄底牌、
-公共牌和截至该决策点的公开行动，不读取对手真实底牌。参考动作来自紧手标准模式，且不随手号抽取设伏。
+公共牌和截至该决策点的公开行动，不读取对手真实底牌。参考动作来自紧手标准模式，且不随手号抽取设伏与过牌保护。
 发布前会收回和这些指标打架的质量：面对下注且跟注期望为负时，份额低于平均则把
 跟注、下注和加注都挪到弃牌；份额不低于平均且已有加注或下注时，跟注并入其中概率最高的一条；
 翻前廉价未加注且负期望很小时保留跟注，其余情况把跟注挪到弃牌。翻后无人下注且份额过低或
@@ -27,7 +27,7 @@ from app.poker.hand import HandCategory
 from app.strategy.heuristic import draw_outs
 from app.strategy.mixed_context import MixedSummaryTracker, mixed_state
 from app.strategy.mixed_policy import MIXED_DISTRIBUTION_UNITS, HandMode, MixedDistribution
-from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V16, MixedLocalStrategy
+from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V17, MixedLocalStrategy
 from app.strategy.projection import project_for_actor
 
 # 复盘采样数与固定种子：牌局结束后可以多采样，结果必须可复现。
@@ -670,7 +670,7 @@ def _analyze_decision(
     )
     projected = mixed_state(project_for_actor(snapshot), context)
     selected = reference_bot.distribution_for(
-        projected, legal, mode=HandMode.NORMAL, trap_roll=None
+        projected, legal, mode=HandMode.NORMAL, trap_roll=None, protect_roll=None
     )
     baseline = _distribution_rows(selected)
     to_call = legal.call_amount
@@ -787,7 +787,7 @@ def build_review(history: dict) -> dict:
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V16,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V17,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(
