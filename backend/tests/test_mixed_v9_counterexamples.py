@@ -159,7 +159,7 @@ def test_ninth_identity_stays_selectable_when_default_is_fourteenth() -> None:
         MIXED_STRATEGY_IDENTIFIER_V9
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V9) is MIXED_LOCAL_V9_RULES
-    assert CreateGameRequest().bot_strategy == "mixed-local@17"
+    assert CreateGameRequest().bot_strategy == "mixed-local@18"
     selected = CreateGameRequest(bot_strategy=MIXED_STRATEGY_IDENTIFIER_V9)
     assert selected.bot_strategy == MIXED_STRATEGY_IDENTIFIER_V9
 

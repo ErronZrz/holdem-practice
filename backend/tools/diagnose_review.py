@@ -64,6 +64,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _checked_defense_bonus,
     _checked_value_floor,
     _facing_draw_support,
+    _facing_pair_raise_applies,
     _full_ring_call_penalty,
     _large_commit_penalty,
     _postflop_call_bonus,
@@ -71,10 +72,10 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _score,
     _strong_preflop_continuation,
     _strong_value_hand,
-    _with_broadway_base,
+    _with_effective_base,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
-    MIXED_STRATEGY_IDENTIFIER_V17,
+    MIXED_STRATEGY_IDENTIFIER_V18,
     MixedLocalStrategy,
     rules_for_identifier,
 )
@@ -545,7 +546,7 @@ def _value_line_quality(features, style, rules, score: int, value_threshold: int
 
 def _score_features(features, style, rules) -> dict:
     """用和参考分布相同的紧手标准模式公式，拆开评分与两条门槛。"""
-    features = _with_broadway_base(features, rules)
+    features = _with_effective_base(features, rules)
     parameters = STYLE_PARAMETERS[style]
     score = _score(features, parameters, HandMode.NORMAL, rules)
     if features.spr_at_most(1):
@@ -595,6 +596,8 @@ def _score_features(features, style, rules) -> dict:
         "price": features.price,
         "depth": depth,
         "aggression_penalty": aggression_penalty,
+        "capped_board_two_pair": features.capped_board_two_pair,
+        "pair_raise_applies": _facing_pair_raise_applies(features, rules, style),
     }
 
 
@@ -778,11 +781,11 @@ def _replay(history: dict, *, hand_id: str, coach_rows: dict[int, dict]) -> dict
     for seat, stack in starting.items():
         engine.players[seat].stack = stack
     engine.start_hand_with(history["button"], hole_cards, board)
-    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V17)
+    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V18)
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V17,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V18,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(
@@ -1059,7 +1062,9 @@ def _format_point(point: dict) -> list[str]:
         (
             f"    特征 base={point['base']} draw={point['draw']} score={point['score']} "
             f"value_threshold={point['value_threshold']} call_threshold={point['call_threshold']} "
-            f"被动={point['passive_score']} 价格={point['price']}"
+            f"被动={point['passive_score']} 价格={point['price']} "
+            f"盖住口袋对={'是' if point.get('capped_board_two_pair') else '否'} "
+            f"单对加注收口={'是' if point.get('pair_raise_applies') else '否'}"
         ),
         f"    原始分布 {_format_rows(point['raw_distribution'])}",
         f"    保护后 {_format_rows(point['distribution'])}",

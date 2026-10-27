@@ -65,6 +65,8 @@ _CHECKED_VALUE_FLOOR = 600
 _CHECKED_VALUE_SPAN = 160
 # 多人底池里，低于两张底牌都配对的这一档时，不再用成牌下限去打薄价值。
 _THIN_VALUE_BASE = 760
+# 被公共牌两对盖住的口袋对：低于成牌托底，高于完全没参与公共牌对子的记分。
+_CAPPED_BOARD_PAIR_BASE = 400
 # 待跟注不少于可争夺底池时，跟注价格达到这条线，视为大尺度。
 _LARGE_PRICE = 500
 # 大额承诺从被动分扣掉的量：两倍跟注缓冲，再抵消跟注型翻后已经加上的偏移。
@@ -254,6 +256,9 @@ class MixedPolicyRules:
     delayed_probe: bool = False
     # 探测质量的起点，再按上一条街过牌、河牌上调，按牌面风险下调。
     delayed_probe_quality: int = 4
+    # 激进型翻后面对下注时，收掉低于两对高档的单对加注；
+    # 公共牌已是两对且口袋对更低时，把基础分记到成牌托底之下。默认关闭。
+    postflop_pair_caliber: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -352,6 +357,11 @@ MIXED_LOCAL_V17_RULES = replace(
     check_range_protection=True,
     checked_continue=True,
     delayed_probe=True,
+)
+# 第十八版口径：只打开翻后对子收口。其余字段与第十七版逐字一致。
+MIXED_LOCAL_V18_RULES = replace(
+    MIXED_LOCAL_V17_RULES,
+    postflop_pair_caliber=True,
 )
 
 
@@ -493,7 +503,7 @@ def build_distribution(
     ``trap_roll`` 与 ``protect_roll`` 缺省时对应通道保持关闭，
     避免没有座位键的查询路径自行抽数。
     """
-    features = _with_broadway_base(features, rules)
+    features = _with_effective_base(features, rules)
     _require_coherent_legal(legal)
     parameters = STYLE_PARAMETERS[style]
     score = _score(features, parameters, mode, rules)
@@ -597,6 +607,10 @@ def build_distribution(
             call_weight = max(0, passive_score - call_threshold + _PASSIVE_SLACK) * (
                 parameters.call_percent
             )
+    # 故事分、探测分和过牌保护都已结算后再收口，避免把后来补上的非价值质量提前清掉。
+    value_quality, bluff_quality = _close_facing_pair_raise(
+        features, rules, style, value_quality, bluff_quality
+    )
     aggression_scale = Fraction(
         parameters.aggression_percent
         * _MODE_AGGRESSION_PERCENT[mode]
@@ -661,6 +675,52 @@ def _broadway_bonus(features: MixedFeatures, rules: MixedPolicyRules) -> int:
     if gap == 2:
         return rules.broadway_two_gap_bonus
     return 0
+
+
+def _with_effective_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:
+    """先做既有翻前修正，再按第十八版口径折被公共牌两对盖住的口袋对。"""
+    return _with_capped_board_base(_with_broadway_base(features, rules), rules)
+
+
+def _with_capped_board_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:
+    """开关关闭或局面未标记时原样返回，避免改动旧身份的特征对象。"""
+    if not rules.postflop_pair_caliber or not features.capped_board_two_pair:
+        return features
+    if features.base == _CAPPED_BOARD_PAIR_BASE:
+        return features
+    return replace(features, base=_CAPPED_BOARD_PAIR_BASE)
+
+
+def _facing_pair_raise_applies(
+    features: MixedFeatures, rules: MixedPolicyRules, style: MixedStyle
+) -> bool:
+    """激进型翻后面对下注，且有效基础分还没到两对高档。"""
+    return bool(
+        rules.postflop_pair_caliber
+        and style is MixedStyle.AGGRESSIVE
+        and features.street is not Street.PREFLOP
+        and features.actual_call > 0
+        and features.base < _THIN_VALUE_BASE
+    )
+
+
+def _close_facing_pair_raise(
+    features: MixedFeatures,
+    rules: MixedPolicyRules,
+    style: MixedStyle,
+    value_quality: int,
+    bluff_quality: int,
+) -> tuple[int, int]:
+    """收掉单对价值加注；没有听牌且基础分达到成牌下沿时，非价值加注也收掉。
+
+    半诈唬、无人下注和两对高档及以上保持原质量。开关关闭时原样返回。
+    """
+    if not _facing_pair_raise_applies(features, rules, style):
+        return value_quality, bluff_quality
+    value_quality = 0
+    if features.draw == 0 and features.base >= _CHECKED_VALUE_FLOOR:
+        bluff_quality = 0
+    return value_quality, bluff_quality
 
 
 def _with_broadway_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:

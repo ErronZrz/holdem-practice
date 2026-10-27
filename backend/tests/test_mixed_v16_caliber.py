@@ -30,6 +30,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V15,
     MIXED_STRATEGY_IDENTIFIER_V16,
     MIXED_STRATEGY_IDENTIFIER_V17,
+    MIXED_STRATEGY_IDENTIFIER_V18,
     MIXED_STRATEGY_IDENTIFIERS,
     rules_for_identifier,
 )
@@ -125,22 +126,24 @@ def test_sixteenth_version_only_adds_its_switch() -> None:
         enabled = identifier in (
             MIXED_STRATEGY_IDENTIFIER_V16,
             MIXED_STRATEGY_IDENTIFIER_V17,
+            MIXED_STRATEGY_IDENTIFIER_V18,
         )
         assert rules_for_identifier(identifier).late_unopened_draw_caliber is enabled
 
 
 def test_sixteenth_identity_stays_registered_when_default_moves_on() -> None:
-    """第十六版仍可构造；未指定策略时创建对局改用第十七版。"""
+    """第十六版仍可构造；未指定策略时创建对局改用第十八版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
-    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V17
-    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V16
-    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V15
+    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V18
+    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V17
+    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V16
+    assert ordered[-4] == MIXED_STRATEGY_IDENTIFIER_V15
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V16).version == 16
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V16, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V16
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V16) is MIXED_LOCAL_V16_RULES
-    assert CreateGameRequest().bot_strategy == "mixed-local@17"
+    assert CreateGameRequest().bot_strategy == "mixed-local@18"
     assert BASELINE_IDENTIFIER == "heuristic@1"
     assert "mixed-local@16" in UNDER_TEST_IDENTIFIERS
     assert capability_declaration(MIXED_STRATEGY_IDENTIFIER_V16) == supported_declaration()

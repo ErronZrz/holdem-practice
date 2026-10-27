@@ -226,7 +226,7 @@ def test_review_thresholds_are_frozen() -> None:
 
 
 def test_reference_versions_track_the_action_line_upgrade() -> None:
-    assert REFERENCE_VERSION == 6
+    assert REFERENCE_VERSION == 7
     assert EVALUATION_VERSION == 3
     assert CACHE_KEY_VERSION == 1
     identity = reference_identity()

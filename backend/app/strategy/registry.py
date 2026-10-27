@@ -39,6 +39,7 @@ from .mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V15,
     MIXED_STRATEGY_IDENTIFIER_V16,
     MIXED_STRATEGY_IDENTIFIER_V17,
+    MIXED_STRATEGY_IDENTIFIER_V18,
     MIXED_STRATEGY_RULES,
     MixedLocalStrategy,
 )
@@ -359,6 +360,18 @@ register_strategy(
         description="本地规则型混合对手第十七版：顶对过牌、过牌后跟注、单挑探测，累积第十六版口径",
     ),
 )
+# 第十八版为累积版：激进型面对下注不再加注单对，被公共牌两对盖住的口袋对记低。
+register_strategy(
+    StrategySpec(
+        identifier="mixed-local@18",
+        name="mixed-local",
+        version=18,
+        factory=lambda seed: MixedLocalStrategy(
+            seed=seed, identifier=MIXED_STRATEGY_IDENTIFIER_V18
+        ),
+        description="本地规则型混合对手第十八版：单对面对下注不再加注，被公共牌两对盖住的口袋对记低，累积第十七版口径",
+    ),
+)
 # 分布观测按身份显式登记。第八版与第九版保持原声明；第十版使用自己的规则。
 register_observation_entry(
     MIXED_STRATEGY_IDENTIFIER_V8,
@@ -409,4 +422,9 @@ register_observation_entry(
     MIXED_STRATEGY_IDENTIFIER_V17,
     supported_declaration(),
     MIXED_STRATEGY_RULES[MIXED_STRATEGY_IDENTIFIER_V17],
+)
+register_observation_entry(
+    MIXED_STRATEGY_IDENTIFIER_V18,
+    supported_declaration(),
+    MIXED_STRATEGY_RULES[MIXED_STRATEGY_IDENTIFIER_V18],
 )

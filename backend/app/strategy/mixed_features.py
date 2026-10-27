@@ -94,6 +94,9 @@ class MixedFeatures:
     prior_street_aggression: int = 0
     # 上一条街没有人主动投入。翻前恒为假；手工构造不填时，探测不会把上一条街当成全员过牌。
     prior_street_checked_through: bool = False
+    # 公共牌自己已有至少两对，且手中口袋对比其中最高的一对更低。
+    # 手工构造不填时为假，因此不会被当成需要折价的牌。
+    capped_board_two_pair: bool = False
 
     @property
     def spr_denominator(self) -> int:
@@ -160,9 +163,11 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         draw = 0
         texture = 0
         shared_locked = False
+        capped_board_two_pair = False
     else:
         hero_rank = evaluate_fast([*holes, *board])
         base = _postflop_base(hero_rank, holes, board)
+        capped_board_two_pair = _capped_board_two_pair(hero_rank, holes, board)
         board_rank = evaluate_fast(board) if len(board) == 5 else None
         if board_rank is not None and hero_rank == board_rank:
             # 与公共五张完全同型：保守封顶，不据此判定可弃或该跟。
@@ -206,6 +211,7 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         prior_street_aggressor=prior_aggressor,
         prior_street_aggression=prior_aggression,
         prior_street_checked_through=prior_checked_through,
+        capped_board_two_pair=capped_board_two_pair,
     )
 
 
@@ -294,6 +300,30 @@ def _postflop_base(rank: HandRank, holes: Sequence[Card], board: Sequence[Card])
     if top == Rank.KING.value:
         return 130
     return 60
+
+
+def _capped_board_two_pair(
+    rank: HandRank, holes: Sequence[Card], board: Sequence[Card]
+) -> bool:
+    """最佳两对里有一对来自口袋对，且该对低于公共牌上已经成对的最高点数。
+
+    公共牌只有一对、口袋对不低于最高公对、或两对都在公共牌上时为假。
+    只标记局面，不改基础分。
+    """
+    if rank.category is not HandCategory.TWO_PAIR:
+        return False
+    hole_counts = Counter(card.rank.value for card in holes)
+    board_counts = Counter(card.rank.value for card in board)
+    high, low = rank.tiebreak[0], rank.tiebreak[1]
+    if all(board_counts.get(value, 0) >= 2 for value in (high, low)):
+        return False
+    pocket = next((value for value in (high, low) if hole_counts.get(value, 0) == 2), None)
+    if pocket is None:
+        return False
+    board_pairs = [value for value, count in board_counts.items() if count >= 2]
+    if len(board_pairs) < 2:
+        return False
+    return pocket < max(board_pairs)
 
 
 def _kicker_increment(

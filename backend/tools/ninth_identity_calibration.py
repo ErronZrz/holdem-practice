@@ -1,13 +1,13 @@
 """本地混合身份的开发标定入口。
 
 只在命令行显式带上运行开关时才查询分布或推进对局。默认导入不做任何实测。
-默认被测身份是第十七版；传入更早的已登记身份时沿用同一节点集与同一配对排期。
+默认被测身份是第十八版；传入更早的已登记身份时沿用同一节点集与同一配对排期。
 读数供开发对照，不代替独立验证，也不改默认策略。
 
 用法（在 backend 目录下）：
     uv run python tools/ninth_identity_calibration.py --run
     uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@13
-    uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@17
+    uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@18
 """
 
 from __future__ import annotations
@@ -40,6 +40,7 @@ from app.strategy.mixed_strategy import (  # noqa: E402
     MIXED_STRATEGY_IDENTIFIER_V15,
     MIXED_STRATEGY_IDENTIFIER_V16,
     MIXED_STRATEGY_IDENTIFIER_V17,
+    MIXED_STRATEGY_IDENTIFIER_V18,
     rules_for_identifier,
 )
 from app.strategy.registry import (  # noqa: E402
@@ -87,6 +88,7 @@ def _previous_identifier(identifier: str) -> str:
         MIXED_STRATEGY_IDENTIFIER_V15,
         MIXED_STRATEGY_IDENTIFIER_V16,
         MIXED_STRATEGY_IDENTIFIER_V17,
+        MIXED_STRATEGY_IDENTIFIER_V18,
     )
     if identifier not in order[1:]:
         raise ValueError(f"标定身份必须是已登记分布观测的新身份，收到 {identifier}")
@@ -315,7 +317,7 @@ def _replay_sample(identifier: str) -> dict[str, object]:
     return {"hands": len(sample), "mismatches": mismatches}
 
 
-def run(identifier: str = MIXED_STRATEGY_IDENTIFIER_V17) -> dict[str, object]:
+def run(identifier: str = MIXED_STRATEGY_IDENTIFIER_V18) -> dict[str, object]:
     started = time.perf_counter()
     observation = _observe_frozen_nodes(identifier)
     gaps = _style_gaps(identifier)
@@ -339,8 +341,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run", action="store_true", help="显式允许查询分布并推进对照对局")
     parser.add_argument(
         "--identity",
-        default=MIXED_STRATEGY_IDENTIFIER_V17,
-        help="被测身份，默认第十七版；更早的已登记身份沿用同一排期",
+        default=MIXED_STRATEGY_IDENTIFIER_V18,
+        help="被测身份，默认第十八版；更早的已登记身份沿用同一排期",
     )
     args = parser.parse_args(argv)
     if not args.run:

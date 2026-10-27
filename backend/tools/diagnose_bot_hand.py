@@ -52,8 +52,10 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _active_gate,
     _checked_defense_bonus,
     _checked_value_floor,
+    _close_facing_pair_raise,
     _delayed_probe_quality,
     _facing_draw_support,
+    _facing_pair_raise_applies,
     _full_ring_call_penalty,
     _large_commit_penalty,
     _non_value_quality,
@@ -64,10 +66,11 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _strong_preflop_continuation,
     _strong_value_hand,
     _trap_budget,
+    _with_effective_base,
     build_distribution,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
-    MIXED_STRATEGY_IDENTIFIER_V17,
+    MIXED_STRATEGY_IDENTIFIER_V18,
     MIXED_STRATEGY_RULES,
     MIXED_STYLE_ORDER,
     rules_for_identifier,
@@ -224,7 +227,9 @@ def _explain(
 
     未传入设伏或过牌保护隐变量时，这两条通道保持关闭，与没有座位键的分布观测同一口径。
     过牌后的跟注和延迟探测只看规则开关，不另抽隐变量。
+    展示用的基础分与这次分布使用的有效基础分相同。
     """
+    features = _with_effective_base(features, rules)
     style_value = MixedStyle(style)
     parameters = STYLE_PARAMETERS[style_value]
     score = _score(features, parameters, mode, rules)
@@ -308,6 +313,10 @@ def _explain(
             passive += defense
             fold_weight = max(0, call_threshold - passive + 160) * parameters.fold_percent
             call_weight = max(0, passive - call_threshold + 160) * parameters.call_percent
+    pair_raise_applies = _facing_pair_raise_applies(features, rules, style_value)
+    value_quality, bluff_quality = _close_facing_pair_raise(
+        features, rules, style_value, value_quality, bluff_quality
+    )
     preferences = _size_preferences(features, parameters, rules)
     active = _active_candidates(
         features, legal, score, value_quality, bluff_quality, preferences, rules
@@ -360,6 +369,7 @@ def _explain(
         "draw_coverage": draw_coverage,
         "draw_survival": draw_survival,
         "story_quality": story_quality,
+        "pair_raise_applies": pair_raise_applies,
         "trap_budget": trap_budget,
         "trap_hit": trap_hit,
         "aggression_zeroed_by_penalty": aggression_zeroed,
@@ -550,7 +560,7 @@ def _capture(
     """在动作提交前记下这一决策的特征与三档分布。"""
     legal = engine.legal_actions()
     state = mixed_state(project_for_actor(engine.snapshot()), tracker.context())
-    features = features_for(require_mixed_input(state), legal)
+    features = _with_effective_base(features_for(require_mixed_input(state), legal), rules)
     holes = list(actor.hole_cards)
     board_now = list(engine.board)
     category = _CATEGORY_ZH[evaluate_fast([*holes, *board_now]).category] if board_now else None
@@ -607,6 +617,7 @@ def _capture(
             "actor_checks": features.actor_checks,
             "prior_street_aggressor": features.prior_street_aggressor,
             "prior_street_aggression": features.prior_street_aggression,
+            "capped_board_two_pair": features.capped_board_two_pair,
             "trap_budget": trap_budget,
             "made_tier": _tier(features.base, street),
         },
@@ -714,6 +725,7 @@ def _print_decision(decision: dict) -> None:
         f"上街进攻={'是' if features['prior_street_aggressor'] else '否'}"
         f"/{features['prior_street_aggression']}  "
         f"设伏预算={features['trap_budget']}  "
+        f"盖住口袋对={'是' if features['capped_board_two_pair'] else '否'}  "
         f"档位={features['made_tier']}"
     )
     for mode in decision["modes"]:
@@ -721,12 +733,18 @@ def _print_decision(decision: dict) -> None:
             f"{item['action']}{item['amount']}:{item['pct']}%" for item in mode["distribution"]
         )
         extra = ""
-        if mode["draw_support"] or mode["story_quality"] or mode["trap_hit"]:
+        if (
+            mode["draw_support"]
+            or mode["story_quality"]
+            or mode["trap_hit"]
+            or mode["pair_raise_applies"]
+        ):
             extra = (
                 f"  听牌支撑={mode['draw_support']}/{mode['draw_coverage']}"
                 f"  存活={mode['draw_survival']}"
                 f"  续枪={mode['story_quality']}"
                 f"  设伏={'中' if mode['trap_hit'] else '未中'}"
+                f"  单对加注收口={'是' if mode['pair_raise_applies'] else '否'}"
             )
         print(
             f"    {mode['mode']:9} 评分={mode['score']}  被动={mode['passive_score']}"
@@ -764,7 +782,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--identity",
-        help=f"覆盖历史中的策略身份，例如 {MIXED_STRATEGY_IDENTIFIER_V17}",
+        help=f"覆盖历史中的策略身份，例如 {MIXED_STRATEGY_IDENTIFIER_V18}",
     )
     parser.add_argument("--json", type=Path, help="把完整结果另存为 JSON")
     parser.add_argument("--recent", type=int, default=20, help="无 ID 时列出的手牌条数")
