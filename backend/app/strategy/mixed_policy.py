@@ -259,6 +259,12 @@ class MixedPolicyRules:
     # 激进型翻后面对下注时，收掉低于两对高档的单对加注；
     # 公共牌已是两对且口袋对更低时，把基础分记到成牌托底之下。默认关闭。
     postflop_pair_caliber: bool = False
+    # 对手尚未全下、但剩余不足一个完整最小加注增量时，主动价值是否仍保留合法最小加注。
+    # 默认关闭。纯诈唬，或对手在跟注额内已经全下时，即使打开也不加注。
+    short_stack_min_raise: bool = False
+    # 底牌配成牌面最高点数、另一对是更低公对时，有效基础分是否至少按同一张底牌的顶对计。
+    # 默认关闭。低对或中对配上更高公对不抬。
+    top_pair_board_pair_caliber: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -362,6 +368,13 @@ MIXED_LOCAL_V17_RULES = replace(
 MIXED_LOCAL_V18_RULES = replace(
     MIXED_LOCAL_V17_RULES,
     postflop_pair_caliber=True,
+)
+# 第十九版口径：短码对手盖不住完整增量时保留合法最小加注，
+# 顶对加更低公对的有效基础分不低于同一张牌的顶对分。其余字段与第十八版逐字一致。
+MIXED_LOCAL_V19_RULES = replace(
+    MIXED_LOCAL_V18_RULES,
+    short_stack_min_raise=True,
+    top_pair_board_pair_caliber=True,
 )
 
 
@@ -678,8 +691,21 @@ def _broadway_bonus(features: MixedFeatures, rules: MixedPolicyRules) -> int:
 
 
 def _with_effective_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:
-    """先做既有翻前修正，再按第十八版口径折被公共牌两对盖住的口袋对。"""
-    return _with_capped_board_base(_with_broadway_base(features, rules), rules)
+    """先做既有修正，再按第十九版口径抬顶对加更低公对。"""
+    adjusted = _with_capped_board_base(_with_broadway_base(features, rules), rules)
+    return _with_top_pair_board_base(adjusted, rules)
+
+
+def _with_top_pair_board_base(
+    features: MixedFeatures, rules: MixedPolicyRules
+) -> MixedFeatures:
+    """开关关闭或没有可抬的顶对分时原样返回，避免改动旧身份的特征对象。"""
+    if not rules.top_pair_board_pair_caliber or features.top_pair_board_pair_base <= 0:
+        return features
+    lifted = max(features.base, features.top_pair_board_pair_base)
+    if lifted == features.base:
+        return features
+    return replace(features, base=lifted)
 
 
 def _with_capped_board_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:
@@ -1205,6 +1231,28 @@ def _require_coherent_legal(legal: LegalActions) -> None:
             raise MixedPolicyError("主动动作的合法区间不合法")
 
 
+def _retains_short_stack_min_raise(
+    features: MixedFeatures,
+    legal: LegalActions,
+    value_quality: int,
+    rules: MixedPolicyRules,
+) -> bool:
+    """主动价值面对短码对手时，是否把上限抬到合法最小加注。
+
+    对手在跟注额内已经全下，或主动质量不是价值时，返回假。
+    """
+    if not rules.short_stack_min_raise or not legal.can_raise:
+        return False
+    if features.live_opponents <= 0 or value_quality <= 0:
+        return False
+    if features.effective_stack <= legal.call_amount:
+        return False
+    legal_min = legal.min_raise_to
+    legal_max = legal.max_raise_to
+    covered = features.street_bet + features.effective_stack
+    return covered < legal_min <= legal_max
+
+
 def _active_candidates(
     features: MixedFeatures,
     legal: LegalActions,
@@ -1226,7 +1274,11 @@ def _active_candidates(
 
     stack = features.stack
     street_bet = features.street_bet
-    upper = min(legal_max, street_bet + features.effective_stack)
+    covered = street_bet + features.effective_stack
+    upper = min(legal_max, covered)
+    if _retains_short_stack_min_raise(features, legal, value_quality, rules):
+        # 合法最小加注已经高于对手全下总额；保留这一档，迫使对手全下。
+        upper = min(legal_max, max(legal_min, covered))
     if upper < legal_min or features.live_opponents == 0:
         return []
 

@@ -27,7 +27,7 @@ from app.poker.hand import HandCategory
 from app.strategy.heuristic import draw_outs
 from app.strategy.mixed_context import MixedSummaryTracker, mixed_state
 from app.strategy.mixed_policy import MIXED_DISTRIBUTION_UNITS, HandMode, MixedDistribution
-from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V18, MixedLocalStrategy
+from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V19, MixedLocalStrategy
 from app.strategy.projection import project_for_actor
 
 # 复盘采样数与固定种子：牌局结束后可以多采样，结果必须可复现。
@@ -787,7 +787,7 @@ def build_review(history: dict) -> dict:
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V18,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V19,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(

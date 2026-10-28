@@ -97,6 +97,9 @@ class MixedFeatures:
     # 公共牌自己已有至少两对，且手中口袋对比其中最高的一对更低。
     # 手工构造不填时为假，因此不会被当成需要折价的牌。
     capped_board_two_pair: bool = False
+    # 底牌配成牌面最高点数、另一对是更低公对时，按同一张底牌的顶对规则折算的基础分。
+    # 手工构造不填时为 0，有效基础分不会因此被抬高。
+    top_pair_board_pair_base: int = 0
 
     @property
     def spr_denominator(self) -> int:
@@ -164,10 +167,12 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         texture = 0
         shared_locked = False
         capped_board_two_pair = False
+        top_pair_board_pair_base = 0
     else:
         hero_rank = evaluate_fast([*holes, *board])
         base = _postflop_base(hero_rank, holes, board)
         capped_board_two_pair = _capped_board_two_pair(hero_rank, holes, board)
+        top_pair_board_pair_base = _top_pair_board_pair_base(hero_rank, holes, board)
         board_rank = evaluate_fast(board) if len(board) == 5 else None
         if board_rank is not None and hero_rank == board_rank:
             # 与公共五张完全同型：保守封顶，不据此判定可弃或该跟。
@@ -212,6 +217,7 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         prior_street_aggression=prior_aggression,
         prior_street_checked_through=prior_checked_through,
         capped_board_two_pair=capped_board_two_pair,
+        top_pair_board_pair_base=top_pair_board_pair_base,
     )
 
 
@@ -345,6 +351,50 @@ def _kicker_increment(
             return 0
         return -40
     return 0
+
+
+def _top_pair_board_pair_base(
+    rank: HandRank, holes: Sequence[Card], board: Sequence[Card]
+) -> int:
+    """一公对加一张底牌配成牌面最高点数时，按单顶对规则折算的基础分。
+
+    只覆盖共用基础分里记成 520 的那一支：公共牌自带两对、口袋对参与、
+    或两张底牌各自配对时返回 0。低对或中对配上更高的公对也返回 0。
+    这里不改共用基础分本身。
+    """
+    if rank.category is not HandCategory.TWO_PAIR or not board:
+        return 0
+    hole_counts = Counter(card.rank.value for card in holes)
+    board_counts = Counter(card.rank.value for card in board)
+    board_ranks = set(board_counts)
+    high, low = rank.tiebreak[0], rank.tiebreak[1]
+    used = (high, low)
+    if all(board_counts.get(rank_value, 0) >= 2 for rank_value in used):
+        return 0
+    if any(hole_counts.get(rank_value, 0) == 2 for rank_value in used):
+        return 0
+    if all(
+        hole_counts.get(rank_value, 0) == 1 and board_counts.get(rank_value, 0) == 1
+        for rank_value in used
+    ):
+        return 0
+    hole_pair = next(
+        (
+            rank_value
+            for rank_value in used
+            if hole_counts.get(rank_value, 0) == 1 and board_counts.get(rank_value, 0) == 1
+        ),
+        None,
+    )
+    board_pair = next(
+        (rank_value for rank_value in used if board_counts.get(rank_value, 0) >= 2),
+        None,
+    )
+    if hole_pair is None or board_pair is None or board_pair >= hole_pair:
+        return 0
+    if hole_pair != max(board_ranks):
+        return 0
+    return 650 + _kicker_increment(rank.tiebreak[2:], holes, board_ranks)
 
 
 # ------------------------------------------------------------------ 共享牌面锁定

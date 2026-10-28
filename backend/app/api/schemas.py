@@ -24,7 +24,7 @@ class CreateGameRequest(BaseModel):
     small_blind: int | None = Field(default=None, ge=1)
     target_hands: int | None = Field(default=None, ge=1, le=10000)
     # 未指定时使用当前产品默认身份，并让校验器同样作用于默认值，避免绕过受控注册表。
-    bot_strategy: str = Field(default="mixed-local@18", validate_default=True)
+    bot_strategy: str = Field(default="mixed-local@19", validate_default=True)
 
     @field_validator("bot_strategy")
     @classmethod

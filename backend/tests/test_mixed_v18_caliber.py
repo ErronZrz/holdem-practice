@@ -46,6 +46,7 @@ from app.strategy.mixed_policy import (
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V17,
     MIXED_STRATEGY_IDENTIFIER_V18,
+    MIXED_STRATEGY_IDENTIFIER_V19,
     MIXED_STRATEGY_IDENTIFIERS,
     rules_for_identifier,
 )
@@ -185,27 +186,34 @@ def test_eighteenth_version_only_opens_its_switch() -> None:
     assert MIXED_LOCAL_V18_RULES.postflop_pair_caliber is True
     assert replace(MIXED_LOCAL_V18_RULES, postflop_pair_caliber=False) == MIXED_LOCAL_V17_RULES
     for identifier in MIXED_STRATEGY_IDENTIFIERS:
-        enabled = identifier == MIXED_STRATEGY_IDENTIFIER_V18
+        enabled = identifier in (
+            MIXED_STRATEGY_IDENTIFIER_V18,
+            MIXED_STRATEGY_IDENTIFIER_V19,
+        )
         assert rules_for_identifier(identifier).postflop_pair_caliber is enabled
         fields = DIGEST_RULE_FIELDS.get(identifier)
-        if identifier != MIXED_STRATEGY_IDENTIFIER_V18:
+        if identifier not in (
+            MIXED_STRATEGY_IDENTIFIER_V18,
+            MIXED_STRATEGY_IDENTIFIER_V19,
+        ):
             assert fields is None or "postflop_pair_caliber" not in fields
 
 
-def test_eighteenth_is_the_create_default() -> None:
-    """第十八版可构造，且未指定策略时创建对局使用第十八版。"""
+def test_eighteenth_stays_registered_when_default_moves_on() -> None:
+    """第十八版仍可构造；未指定策略时创建对局改用第十九版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
-    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V18
-    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V17
+    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V19
+    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V18
+    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V17
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V18).version == 18
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V18, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V18
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V18) is MIXED_LOCAL_V18_RULES
-    assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V18
+    assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V19
     assert "mixed-local@18" in UNDER_TEST_IDENTIFIERS
     assert BASELINE_IDENTIFIER == "heuristic@1"
-    assert REFERENCE_VERSION == 7
+    assert REFERENCE_VERSION == 8
     assert EVALUATION_VERSION == 3
     assert PROMPT_SCHEMA_VERSION == 5
 
@@ -496,7 +504,7 @@ def test_review_reference_ignores_the_hand_number() -> None:
         build_review(build_hand_history(engine, hand_number=number, human_seat=0))
         for number in (1, 88)
     ]
-    assert reviews[0]["reference_version"] == 7
+    assert reviews[0]["reference_version"] == 8
     first = reviews[0]["decisions"]
     for review in reviews[1:]:
         assert review["hand_number"] != reviews[0]["hand_number"]

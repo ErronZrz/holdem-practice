@@ -32,6 +32,7 @@ from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V16,
     MIXED_STRATEGY_IDENTIFIER_V17,
     MIXED_STRATEGY_IDENTIFIER_V18,
+    MIXED_STRATEGY_IDENTIFIER_V19,
     MIXED_STRATEGY_IDENTIFIERS,
     MixedSeatPolicy,
     rules_for_identifier,
@@ -193,6 +194,7 @@ def test_seventeenth_version_only_opens_three_switches() -> None:
         enabled = identifier in (
             MIXED_STRATEGY_IDENTIFIER_V17,
             MIXED_STRATEGY_IDENTIFIER_V18,
+            MIXED_STRATEGY_IDENTIFIER_V19,
         )
         assert rules.check_range_protection is enabled
         assert rules.checked_continue is enabled
@@ -200,17 +202,18 @@ def test_seventeenth_version_only_opens_three_switches() -> None:
 
 
 def test_seventeenth_stays_registered_when_default_moves_on() -> None:
-    """第十七版可构造；未指定策略时创建对局改用第十八版。"""
+    """第十七版可构造；未指定策略时创建对局改用第十九版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
-    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V18
-    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V17
-    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V16
+    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V19
+    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V18
+    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V17
+    assert ordered[-4] == MIXED_STRATEGY_IDENTIFIER_V16
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V17).version == 17
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V17, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V17
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V17) is MIXED_LOCAL_V17_RULES
-    assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V18
+    assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V19
     assert "mixed-local@17" in UNDER_TEST_IDENTIFIERS
     assert BASELINE_IDENTIFIER == "heuristic@1"
     assert capability_declaration(MIXED_STRATEGY_IDENTIFIER_V17) == supported_declaration()

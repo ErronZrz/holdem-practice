@@ -60,6 +60,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _large_commit_penalty,
     _non_value_quality,
     _protection_applies,
+    _retains_short_stack_min_raise,
     _score,
     _size_preferences,
     _story_quality,
@@ -70,7 +71,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     build_distribution,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
-    MIXED_STRATEGY_IDENTIFIER_V18,
+    MIXED_STRATEGY_IDENTIFIER_V19,
     MIXED_STRATEGY_RULES,
     MIXED_STYLE_ORDER,
     rules_for_identifier,
@@ -317,6 +318,9 @@ def _explain(
     value_quality, bluff_quality = _close_facing_pair_raise(
         features, rules, style_value, value_quality, bluff_quality
     )
+    short_stack_min_raise = _retains_short_stack_min_raise(
+        features, legal, value_quality, rules
+    )
     preferences = _size_preferences(features, parameters, rules)
     active = _active_candidates(
         features, legal, score, value_quality, bluff_quality, preferences, rules
@@ -370,6 +374,8 @@ def _explain(
         "draw_survival": draw_survival,
         "story_quality": story_quality,
         "pair_raise_applies": pair_raise_applies,
+        "short_stack_min_raise": short_stack_min_raise,
+        "top_pair_board_pair_base": features.top_pair_board_pair_base,
         "trap_budget": trap_budget,
         "trap_hit": trap_hit,
         "aggression_zeroed_by_penalty": aggression_zeroed,
@@ -618,6 +624,7 @@ def _capture(
             "prior_street_aggressor": features.prior_street_aggressor,
             "prior_street_aggression": features.prior_street_aggression,
             "capped_board_two_pair": features.capped_board_two_pair,
+            "top_pair_board_pair_base": features.top_pair_board_pair_base,
             "trap_budget": trap_budget,
             "made_tier": _tier(features.base, street),
         },
@@ -726,6 +733,7 @@ def _print_decision(decision: dict) -> None:
         f"/{features['prior_street_aggression']}  "
         f"设伏预算={features['trap_budget']}  "
         f"盖住口袋对={'是' if features['capped_board_two_pair'] else '否'}  "
+        f"顶对公对分={features['top_pair_board_pair_base']}  "
         f"档位={features['made_tier']}"
     )
     for mode in decision["modes"]:
@@ -738,6 +746,8 @@ def _print_decision(decision: dict) -> None:
             or mode["story_quality"]
             or mode["trap_hit"]
             or mode["pair_raise_applies"]
+            or mode["short_stack_min_raise"]
+            or mode["top_pair_board_pair_base"]
         ):
             extra = (
                 f"  听牌支撑={mode['draw_support']}/{mode['draw_coverage']}"
@@ -745,6 +755,8 @@ def _print_decision(decision: dict) -> None:
                 f"  续枪={mode['story_quality']}"
                 f"  设伏={'中' if mode['trap_hit'] else '未中'}"
                 f"  单对加注收口={'是' if mode['pair_raise_applies'] else '否'}"
+                f"  短码最小加注={'保留' if mode['short_stack_min_raise'] else '否'}"
+                f"  顶对公对分={mode['top_pair_board_pair_base']}"
             )
         print(
             f"    {mode['mode']:9} 评分={mode['score']}  被动={mode['passive_score']}"
@@ -782,7 +794,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--identity",
-        help=f"覆盖历史中的策略身份，例如 {MIXED_STRATEGY_IDENTIFIER_V18}",
+        help=f"覆盖历史中的策略身份，例如 {MIXED_STRATEGY_IDENTIFIER_V19}",
     )
     parser.add_argument("--json", type=Path, help="把完整结果另存为 JSON")
     parser.add_argument("--recent", type=int, default=20, help="无 ID 时列出的手牌条数")

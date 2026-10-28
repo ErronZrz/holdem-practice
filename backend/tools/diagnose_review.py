@@ -75,7 +75,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _with_effective_base,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
-    MIXED_STRATEGY_IDENTIFIER_V18,
+    MIXED_STRATEGY_IDENTIFIER_V19,
     MixedLocalStrategy,
     rules_for_identifier,
 )
@@ -597,6 +597,7 @@ def _score_features(features, style, rules) -> dict:
         "depth": depth,
         "aggression_penalty": aggression_penalty,
         "capped_board_two_pair": features.capped_board_two_pair,
+        "top_pair_board_pair_base": features.top_pair_board_pair_base,
         "pair_raise_applies": _facing_pair_raise_applies(features, rules, style),
     }
 
@@ -781,11 +782,11 @@ def _replay(history: dict, *, hand_id: str, coach_rows: dict[int, dict]) -> dict
     for seat, stack in starting.items():
         engine.players[seat].stack = stack
     engine.start_hand_with(history["button"], hole_cards, board)
-    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V18)
+    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V19)
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V18,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V19,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(
