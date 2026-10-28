@@ -132,18 +132,18 @@ def test_fifteenth_version_only_adds_the_broadway_adjustment() -> None:
 def test_fifteenth_identity_stays_registered_when_default_moves_on() -> None:
     """第十五版仍可构造；未指定策略时创建对局改用下一版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
-    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V19
-    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V18
-    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V17
-    assert ordered[-4] == MIXED_STRATEGY_IDENTIFIER_V16
-    assert ordered[-5] == MIXED_STRATEGY_IDENTIFIER_V15
-    assert ordered[-6] == MIXED_STRATEGY_IDENTIFIER_V14
+    assert ordered[-1] == "mixed-local@20"
+    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V19
+    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V18
+    assert ordered[-4] == MIXED_STRATEGY_IDENTIFIER_V17
+    assert ordered[-5] == MIXED_STRATEGY_IDENTIFIER_V16
+    assert ordered[-6] == MIXED_STRATEGY_IDENTIFIER_V15
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V15).version == 15
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V15, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V15
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V15) is MIXED_LOCAL_V15_RULES
-    assert CreateGameRequest().bot_strategy == "mixed-local@19"
+    assert CreateGameRequest().bot_strategy == "mixed-local@20"
     assert BASELINE_IDENTIFIER == "heuristic@1"
     assert "mixed-local@15" in UNDER_TEST_IDENTIFIERS
     assert capability_declaration(MIXED_STRATEGY_IDENTIFIER_V15) == supported_declaration()

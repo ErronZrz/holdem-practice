@@ -7,7 +7,7 @@
 用法（在 backend 目录下）：
     uv run python tools/ninth_identity_calibration.py --run
     uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@13
-    uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@19
+    uv run python tools/ninth_identity_calibration.py --run --identity mixed-local@20
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ from app.strategy.mixed_strategy import (  # noqa: E402
     MIXED_STRATEGY_IDENTIFIER_V17,
     MIXED_STRATEGY_IDENTIFIER_V18,
     MIXED_STRATEGY_IDENTIFIER_V19,
+    MIXED_STRATEGY_IDENTIFIER_V20,
     rules_for_identifier,
 )
 from app.strategy.registry import (  # noqa: E402
@@ -91,6 +92,7 @@ def _previous_identifier(identifier: str) -> str:
         MIXED_STRATEGY_IDENTIFIER_V17,
         MIXED_STRATEGY_IDENTIFIER_V18,
         MIXED_STRATEGY_IDENTIFIER_V19,
+        MIXED_STRATEGY_IDENTIFIER_V20,
     )
     if identifier not in order[1:]:
         raise ValueError(f"标定身份必须是已登记分布观测的新身份，收到 {identifier}")
@@ -319,7 +321,7 @@ def _replay_sample(identifier: str) -> dict[str, object]:
     return {"hands": len(sample), "mismatches": mismatches}
 
 
-def run(identifier: str = MIXED_STRATEGY_IDENTIFIER_V19) -> dict[str, object]:
+def run(identifier: str = MIXED_STRATEGY_IDENTIFIER_V20) -> dict[str, object]:
     started = time.perf_counter()
     observation = _observe_frozen_nodes(identifier)
     gaps = _style_gaps(identifier)
@@ -343,8 +345,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--run", action="store_true", help="显式允许查询分布并推进对照对局")
     parser.add_argument(
         "--identity",
-        default=MIXED_STRATEGY_IDENTIFIER_V19,
-        help="被测身份，默认第十九版；更早的已登记身份沿用同一排期",
+        default=MIXED_STRATEGY_IDENTIFIER_V20,
+        help="被测身份，默认第二十版；更早的已登记身份沿用同一排期",
     )
     args = parser.parse_args(argv)
     if not args.run:

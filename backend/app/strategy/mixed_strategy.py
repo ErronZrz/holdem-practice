@@ -41,6 +41,7 @@ from .mixed_policy import (
     MIXED_LOCAL_V17_RULES,
     MIXED_LOCAL_V18_RULES,
     MIXED_LOCAL_V19_RULES,
+    MIXED_LOCAL_V20_RULES,
     MIXED_STYLE_ORDER,
     HandMode,
     MixedDistribution,
@@ -88,6 +89,8 @@ MIXED_STRATEGY_IDENTIFIER_V17 = "mixed-local@17"
 MIXED_STRATEGY_IDENTIFIER_V18 = "mixed-local@18"
 # 第十九版身份：短码对手盖不住完整增量时保留合法最小加注，顶对加更低公对按顶对计有效基础分。
 MIXED_STRATEGY_IDENTIFIER_V19 = "mixed-local@19"
+# 第二十版身份：没过门槛不再白拿强牌加分，顶对加公对按可见踢脚计，四张同花面的小同花下调。
+MIXED_STRATEGY_IDENTIFIER_V20 = "mixed-local@20"
 MIXED_STRATEGY_IDENTIFIERS: tuple[str, ...] = (
     MIXED_STRATEGY_IDENTIFIER,
     MIXED_STRATEGY_IDENTIFIER_V2,
@@ -108,6 +111,7 @@ MIXED_STRATEGY_IDENTIFIERS: tuple[str, ...] = (
     MIXED_STRATEGY_IDENTIFIER_V17,
     MIXED_STRATEGY_IDENTIFIER_V18,
     MIXED_STRATEGY_IDENTIFIER_V19,
+    MIXED_STRATEGY_IDENTIFIER_V20,
 )
 # 身份到规则口径的映射；旧身份的含义与分布不随新身份改变。
 MIXED_STRATEGY_RULES: dict[str, MixedPolicyRules] = {
@@ -130,6 +134,7 @@ MIXED_STRATEGY_RULES: dict[str, MixedPolicyRules] = {
     MIXED_STRATEGY_IDENTIFIER_V17: MIXED_LOCAL_V17_RULES,
     MIXED_STRATEGY_IDENTIFIER_V18: MIXED_LOCAL_V18_RULES,
     MIXED_STRATEGY_IDENTIFIER_V19: MIXED_LOCAL_V19_RULES,
+    MIXED_STRATEGY_IDENTIFIER_V20: MIXED_LOCAL_V20_RULES,
 }
 # 查询分布时未显式传入设伏取值，与显式传入「关闭」要能区分开。
 _TRAP_ROLL_OMITTED = object()

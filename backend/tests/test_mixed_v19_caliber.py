@@ -51,6 +51,7 @@ from app.strategy.mixed_policy import (
 from app.strategy.mixed_strategy import (
     MIXED_STRATEGY_IDENTIFIER_V18,
     MIXED_STRATEGY_IDENTIFIER_V19,
+    MIXED_STRATEGY_IDENTIFIER_V20,
     MIXED_STRATEGY_IDENTIFIERS,
     rules_for_identifier,
 )
@@ -190,7 +191,10 @@ def test_nineteenth_version_only_opens_its_switches() -> None:
     )
     for identifier in MIXED_STRATEGY_IDENTIFIERS:
         rules = rules_for_identifier(identifier)
-        enabled = identifier == MIXED_STRATEGY_IDENTIFIER_V19
+        enabled = identifier in {
+            MIXED_STRATEGY_IDENTIFIER_V19,
+            MIXED_STRATEGY_IDENTIFIER_V20,
+        }
         assert rules.short_stack_min_raise is enabled
         assert rules.top_pair_board_pair_caliber is enabled
         fields = DIGEST_RULE_FIELDS.get(identifier)
@@ -200,21 +204,22 @@ def test_nineteenth_version_only_opens_its_switches() -> None:
 
 
 def test_nineteenth_is_the_create_default() -> None:
-    """第十九版可构造，且未指定策略时创建对局与复盘参考都使用第十九版。"""
+    """第十九版仍可构造；新建对局与复盘参考已经切到第二十版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
-    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V19
-    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V18
+    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V20
+    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V19
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V19).version == 19
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V19, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V19
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V19) is MIXED_LOCAL_V19_RULES
-    assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V19
+    assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V20
     assert "mixed-local@19" in UNDER_TEST_IDENTIFIERS
+    assert "mixed-local@20" in UNDER_TEST_IDENTIFIERS
     assert BASELINE_IDENTIFIER == "heuristic@1"
-    assert REFERENCE_VERSION == 8
+    assert REFERENCE_VERSION == 9
     assert EVALUATION_VERSION == 3
-    assert PROMPT_SCHEMA_VERSION == 5
+    assert PROMPT_SCHEMA_VERSION == 6
 
 
 def test_nineteenth_digest_appends_only_its_own_fields() -> None:
@@ -298,7 +303,7 @@ def test_case_hands_bet_the_top_pair_and_keep_the_lower_pair() -> None:
     """两处顶对加更低公对的参考众数变成下注；低对加高公对仍是 520。"""
     turn = build_review(_history(_TURN_PAIR_HAND))
     river = build_review(_history(_RIVER_PAIR_HAND))
-    assert turn["reference_version"] == 8
+    assert turn["reference_version"] == 9
     turn_point = turn["decisions"][2]
     river_point = river["decisions"][3]
     assert turn_point["street"] == "turn"
@@ -419,7 +424,7 @@ def test_review_reference_ignores_the_hand_number() -> None:
         build_review(build_hand_history(engine, hand_number=number, human_seat=0))
         for number in (1, 88)
     ]
-    assert reviews[0]["reference_version"] == 8
+    assert reviews[0]["reference_version"] == 9
     first = reviews[0]["decisions"]
     for review in reviews[1:]:
         assert review["hand_number"] != reviews[0]["hand_number"]

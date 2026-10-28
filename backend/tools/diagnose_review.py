@@ -70,12 +70,13 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _postflop_call_bonus,
     _preflop_call_bonus,
     _score,
+    _skips_unqualified_value_bonus,
     _strong_preflop_continuation,
     _strong_value_hand,
     _with_effective_base,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
-    MIXED_STRATEGY_IDENTIFIER_V19,
+    MIXED_STRATEGY_IDENTIFIER_V20,
     MixedLocalStrategy,
     rules_for_identifier,
 )
@@ -127,6 +128,7 @@ _CODE_ORDER = (
     "e_coach_legacy_amount",
     "e_coach_unknown_amount",
     "e_coach_false_draw",
+    "e_coach_hindsight",
     "e_coach_stale_schema",
 )
 _LABELS = {
@@ -157,6 +159,7 @@ _LABELS = {
     "e_coach_legacy_amount": "E 教练写下的参考金额对上保护前的本街总额",
     "e_coach_unknown_amount": "E 教练写下的参考金额对不上现有分布",
     "e_coach_false_draw": "E 教练写成听牌，但这手没有再发一张就能完成的听牌",
+    "e_coach_hindsight": "E 教练把摊牌底牌或事后结果写成当时的决策依据",
     "e_coach_stale_schema": "E 教练缓存来自更早的提示词版本",
 }
 _DRAW_CLAIM = re.compile(r"(?:带|持有|击中)[^，。；]{0,8}?(?:同花听牌|顺子听牌|卡顺听牌)")
@@ -346,9 +349,27 @@ def classify_point(point: dict) -> list[str]:
                 codes.append("e_coach_unknown_amount")
             if int(point.get("draw") or 0) == 0 and _claims_live_draw(str(coach.get("text") or "")):
                 codes.append("e_coach_false_draw")
+            if _claims_hindsight_basis(str(coach.get("text") or "")):
+                codes.append("e_coach_hindsight")
 
     order = {code: index for index, code in enumerate(_CODE_ORDER)}
     return sorted(set(codes), key=lambda code: order.get(code, len(order)))
+
+
+# 把终局摊牌或对手真实底牌写成「当时已经知道」的依据。事后印证若先写明当时逻辑，不应只靠这些词。
+_HINDSIGHT_BASIS = (
+    re.compile(r"公开(?:摊牌|底牌)"),
+    re.compile(r"摊牌显示"),
+    re.compile(r"实际只有"),
+    re.compile(r"亮出"),
+    re.compile(r"对手只有"),
+    re.compile(r"因为对手(?:实际|摊牌|亮)"),
+)
+
+
+def _claims_hindsight_basis(text: str) -> bool:
+    """正文是否把摊牌底牌或事后结果当成当时应该做某动作的依据。"""
+    return any(pattern.search(text) for pattern in _HINDSIGHT_BASIS)
 
 
 def _claims_live_draw(text: str) -> bool:
@@ -539,7 +560,9 @@ def _value_line_quality(features, style, rules, score: int, value_threshold: int
     gate = _active_gate(features, style, rules)
     threshold_quality = max(0, score - value_threshold + _VALUE_GATE_TOLERANCE + gate)
     quality = max(threshold_quality, _checked_value_floor(features, rules))
-    if _strong_value_hand(features, rules):
+    if _strong_value_hand(features, rules) and not _skips_unqualified_value_bonus(
+        features, rules, threshold_quality
+    ):
         quality += _STRONG_VALUE_BONUS
     return quality
 
@@ -598,6 +621,8 @@ def _score_features(features, style, rules) -> dict:
         "aggression_penalty": aggression_penalty,
         "capped_board_two_pair": features.capped_board_two_pair,
         "top_pair_board_pair_base": features.top_pair_board_pair_base,
+        "top_pair_board_pair_visible_base": features.top_pair_board_pair_visible_base,
+        "weak_board_flush_base": features.weak_board_flush_base,
         "pair_raise_applies": _facing_pair_raise_applies(features, rules, style),
     }
 
@@ -782,11 +807,11 @@ def _replay(history: dict, *, hand_id: str, coach_rows: dict[int, dict]) -> dict
     for seat, stack in starting.items():
         engine.players[seat].stack = stack
     engine.start_hand_with(history["button"], hole_cards, board)
-    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V19)
+    rules = rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V20)
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V19,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V20,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(

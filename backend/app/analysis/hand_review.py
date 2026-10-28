@@ -4,8 +4,9 @@
 公共牌和截至该决策点的公开行动，不读取对手真实底牌。参考动作来自紧手标准模式，且不随手号抽取设伏与过牌保护。
 发布前会收回和这些指标打架的质量：面对下注且跟注期望为负时，份额低于平均则把
 跟注、下注和加注都挪到弃牌；份额不低于平均且已有加注或下注时，跟注并入其中概率最高的一条；
-翻前廉价未加注且负期望很小时保留跟注，其余情况把跟注挪到弃牌。翻后无人下注且份额过低或
-行动线已经偏高时，主动质量挪到过牌；弃牌会被标成放弃正期望时，弃牌质量挪到跟注。
+翻前廉价未加注且负期望很小时保留跟注，其余情况把跟注挪到弃牌。翻后无人下注时，份额低于空气线、行动线达到中等以上且份额低于平均、河牌份额低于平均，
+或翻牌弱顶对份额低于平均，主动质量挪到过牌。翻后面对下注、跟注期望不为负但份额低于平均时，
+加注和下注质量挪到跟注。弃牌会被标成放弃正期望时，弃牌质量挪到跟注。
 翻后面对下注、跟注期望为正且底牌具备可继续牌力时，弃牌质量也挪到跟注。
 众数先按动作类型汇总，再取该类型里概率最高的尺度。跟注的对外金额是当时实际要投入的筹码。
 错误来自份额、跟注期望和牌力门槛；与参考众数不同本身不是错误，
@@ -27,7 +28,7 @@ from app.poker.hand import HandCategory
 from app.strategy.heuristic import draw_outs
 from app.strategy.mixed_context import MixedSummaryTracker, mixed_state
 from app.strategy.mixed_policy import MIXED_DISTRIBUTION_UNITS, HandMode, MixedDistribution
-from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V19, MixedLocalStrategy
+from app.strategy.mixed_strategy import MIXED_STRATEGY_IDENTIFIER_V20, MixedLocalStrategy
 from app.strategy.projection import project_for_actor
 
 # 复盘采样数与固定种子：牌局结束后可以多采样，结果必须可复现。
@@ -45,6 +46,8 @@ _SLOWPLAY_FAIR_SCALE = 1.8
 _AIR_FAIR_SCALE = 0.5
 # 公开行动线达到这一档，说明此前已经出现再加注或翻后较大的主动投入。
 _HIGH_ACTION_LINE = 3
+# 行动线到这一档且份额低于平均时，不再主动造池。比再加注那一档更早收口。
+_LOW_EQUITY_LINE = 2
 # 下注额小于底池的这个比例视为过小。
 _UNDERBET_DEN = 2
 # 强听牌补牌数下限（开放式顺子 / 同花听牌）。
@@ -276,19 +279,52 @@ def _guard_low_equity_lead(
     equity: float,
     opponents: int,
     max_line: int,
+    hole_cards: Sequence[Card] = (),
+    board: Sequence[Card] = (),
 ) -> list[tuple[Action, float]]:
-    """翻后无人下注时，把过低份额或高行动线下的主动质量收成过牌。"""
+    """翻后无人下注时，把过低份额、偏高行动线或河牌落后份额上的主动质量收成过牌。"""
     if not postflop or to_call != 0:
         return distribution
     fair = _fair_share(opponents)
     below_air = equity < _AIR_FAIR_SCALE * fair
     high_line = max_line >= _HIGH_ACTION_LINE and equity < fair
-    if not below_air and not high_line:
+    # 行动线已经到中等，或河牌份额低于平均，主动下注都收成过牌。
+    short_line = max_line >= _LOW_EQUITY_LINE and equity < fair
+    river_short = len(board) >= 5 and equity < fair
+    # 翻牌弱顶对份额低于平均时也不再主动造池；没传底牌的旧调用不走这条。
+    weak_flop = (
+        len(board) == 3
+        and len(hole_cards) >= 2
+        and equity < fair
+        and _weak_kicker_top_pair(hole_cards, board)
+    )
+    if not below_air and not high_line and not short_line and not river_short and not weak_flop:
         return distribution
     return _move_mass(
         distribution,
         frozenset({ActionType.BET, ActionType.RAISE}),
         ActionType.CHECK,
+    )
+
+
+def _guard_low_equity_continue(
+    distribution: list[tuple[Action, float]],
+    *,
+    to_call: int,
+    postflop: bool,
+    call_ev: float | None,
+    equity: float,
+    opponents: int,
+) -> list[tuple[Action, float]]:
+    """翻后面对下注、跟注期望不为负但份额低于平均时，把加注和下注并入跟注。"""
+    if not postflop or to_call <= 0 or call_ev is None or call_ev < 0.0:
+        return distribution
+    if equity >= _fair_share(opponents):
+        return distribution
+    return _move_mass(
+        distribution,
+        frozenset({ActionType.BET, ActionType.RAISE}),
+        ActionType.CALL,
     )
 
 
@@ -393,6 +429,16 @@ def _guard_reference_distribution(
         equity=equity,
         opponents=opponents,
         max_line=max_line,
+        hole_cards=hole_cards,
+        board=board,
+    )
+    guarded = _guard_low_equity_continue(
+        guarded,
+        to_call=to_call,
+        postflop=postflop,
+        call_ev=call_ev,
+        equity=equity,
+        opponents=opponents,
     )
     return _guard_bad_fold(
         guarded,
@@ -787,7 +833,7 @@ def build_review(history: dict) -> dict:
     reference_bot = MixedLocalStrategy(
         seed=_REVIEW_SEED,
         bot_seats=(human_seat,),
-        identifier=MIXED_STRATEGY_IDENTIFIER_V19,
+        identifier=MIXED_STRATEGY_IDENTIFIER_V20,
     )
     tracker = MixedSummaryTracker()
     tracker.begin_hand(

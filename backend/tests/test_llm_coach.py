@@ -576,7 +576,11 @@ def test_prompt_forbids_solver_wording_without_hiding_the_reference() -> None:
     assert "不要把这手写成听牌" in system
     assert "recommended_action" in system
     assert "本身不构成错误" in system
-    assert PROMPT_SCHEMA_VERSION == 5
+    assert "prior_actions" in system
+    assert "subsequent_actions" in system
+    assert "决策当时完全未知" in system
+    assert "未出现在 revealed_hands" not in system
+    assert PROMPT_SCHEMA_VERSION == 6
     body = _request_body(messages)
     assert "As" in body["hand"]["hero_hole_cards"]
     assert body["hand"]["revealed_hands"] == []
@@ -587,6 +591,10 @@ def test_prompt_forbids_solver_wording_without_hiding_the_reference() -> None:
     for field in ("equity", "pot_odds", "call_ev", "one_card_outs"):
         assert field in decision
     assert decision["one_card_outs"] == 0
+    assert "prior_actions" in decision
+    assert "subsequent_actions" in decision
+    assert decision["action"] not in decision["prior_actions"]
+    assert decision["action"] not in decision["subsequent_actions"]
 
 
 def test_solver_claims_are_removed_before_storage(fake_provider: FakeProvider) -> None:
@@ -1089,7 +1097,10 @@ def test_followup_context_keeps_public_facts_and_drops_reasoning() -> None:
     _assert_no_solver_labels(text)
     assert "不要改写" in messages[0]["content"]
     assert "revealed_hands" in messages[0]["content"]
+    assert "决策当时完全未知" in messages[0]["content"]
     facts = _followup_facts(messages)
+    assert "prior_actions" in facts["decision"]
+    assert "subsequent_actions" in facts["decision"]
     assert facts["decision"]["one_card_outs"] == payload["one_card_outs"]
     assert facts["decision"]["equity"] == payload["equity"]
     assert facts["decision"]["pot_odds"] == payload["pot_odds"]

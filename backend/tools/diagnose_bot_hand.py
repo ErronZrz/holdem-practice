@@ -63,6 +63,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     _retains_short_stack_min_raise,
     _score,
     _size_preferences,
+    _skips_unqualified_value_bonus,
     _story_quality,
     _strong_preflop_continuation,
     _strong_value_hand,
@@ -71,7 +72,7 @@ from app.strategy.mixed_policy import (  # noqa: E402
     build_distribution,
 )
 from app.strategy.mixed_strategy import (  # noqa: E402
-    MIXED_STRATEGY_IDENTIFIER_V19,
+    MIXED_STRATEGY_IDENTIFIER_V20,
     MIXED_STRATEGY_RULES,
     MIXED_STYLE_ORDER,
     rules_for_identifier,
@@ -265,7 +266,13 @@ def _explain(
     threshold_quality = max(0, score - value_threshold + _VALUE_GATE_TOLERANCE + gate)
     floor = _checked_value_floor(features, rules)
     strong = _strong_value_hand(features, rules)
-    value_quality = max(threshold_quality, floor) + (_STRONG_VALUE_BONUS if strong else 0)
+    # 面对下注且没过主动门槛时，未到同花不再把强牌加分写进展示用价值质量。
+    bonus_applies = strong and not _skips_unqualified_value_bonus(
+        features, rules, threshold_quality
+    )
+    value_quality = max(threshold_quality, floor) + (
+        _STRONG_VALUE_BONUS if bonus_applies else 0
+    )
     bluff_raw = _non_value_quality(features, rules)
     bluff_quality = max(0, bluff_raw + gate) if bluff_raw > 0 else 0
     aggression_zeroed = bool(commit_penalty or ring_penalty)
@@ -376,6 +383,8 @@ def _explain(
         "pair_raise_applies": pair_raise_applies,
         "short_stack_min_raise": short_stack_min_raise,
         "top_pair_board_pair_base": features.top_pair_board_pair_base,
+        "top_pair_board_pair_visible_base": features.top_pair_board_pair_visible_base,
+        "weak_board_flush_base": features.weak_board_flush_base,
         "trap_budget": trap_budget,
         "trap_hit": trap_hit,
         "aggression_zeroed_by_penalty": aggression_zeroed,
@@ -625,6 +634,8 @@ def _capture(
             "prior_street_aggression": features.prior_street_aggression,
             "capped_board_two_pair": features.capped_board_two_pair,
             "top_pair_board_pair_base": features.top_pair_board_pair_base,
+            "top_pair_board_pair_visible_base": features.top_pair_board_pair_visible_base,
+            "weak_board_flush_base": features.weak_board_flush_base,
             "trap_budget": trap_budget,
             "made_tier": _tier(features.base, street),
         },
@@ -734,6 +745,8 @@ def _print_decision(decision: dict) -> None:
         f"设伏预算={features['trap_budget']}  "
         f"盖住口袋对={'是' if features['capped_board_two_pair'] else '否'}  "
         f"顶对公对分={features['top_pair_board_pair_base']}  "
+        f"可见踢脚分={features['top_pair_board_pair_visible_base']}  "
+        f"四张同花下调={features['weak_board_flush_base']}  "
         f"档位={features['made_tier']}"
     )
     for mode in decision["modes"]:
@@ -748,6 +761,8 @@ def _print_decision(decision: dict) -> None:
             or mode["pair_raise_applies"]
             or mode["short_stack_min_raise"]
             or mode["top_pair_board_pair_base"]
+            or mode["top_pair_board_pair_visible_base"]
+            or mode["weak_board_flush_base"]
         ):
             extra = (
                 f"  听牌支撑={mode['draw_support']}/{mode['draw_coverage']}"
@@ -757,6 +772,8 @@ def _print_decision(decision: dict) -> None:
                 f"  单对加注收口={'是' if mode['pair_raise_applies'] else '否'}"
                 f"  短码最小加注={'保留' if mode['short_stack_min_raise'] else '否'}"
                 f"  顶对公对分={mode['top_pair_board_pair_base']}"
+                f"  可见踢脚分={mode['top_pair_board_pair_visible_base']}"
+                f"  四张同花下调={mode['weak_board_flush_base']}"
             )
         print(
             f"    {mode['mode']:9} 评分={mode['score']}  被动={mode['passive_score']}"
@@ -794,7 +811,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--identity",
-        help=f"覆盖历史中的策略身份，例如 {MIXED_STRATEGY_IDENTIFIER_V19}",
+        help=f"覆盖历史中的策略身份，例如 {MIXED_STRATEGY_IDENTIFIER_V20}",
     )
     parser.add_argument("--json", type=Path, help="把完整结果另存为 JSON")
     parser.add_argument("--recent", type=int, default=20, help="无 ID 时列出的手牌条数")

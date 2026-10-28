@@ -206,14 +206,14 @@ def test_fourteenth_version_only_turns_on_three_switches() -> None:
 def test_fourteenth_identity_stays_registered_when_default_moves_on() -> None:
     """第十四版仍可构造；未指定策略时创建对局改用当前默认版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
-    assert ordered[-6] == MIXED_STRATEGY_IDENTIFIER_V14
-    assert ordered[-7] == MIXED_STRATEGY_IDENTIFIER_V13
+    assert ordered[-7] == MIXED_STRATEGY_IDENTIFIER_V14
+    assert ordered[-8] == MIXED_STRATEGY_IDENTIFIER_V13
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V14).version == 14
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V14, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V14
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V14) is MIXED_LOCAL_V14_RULES
-    assert CreateGameRequest().bot_strategy == "mixed-local@19"
+    assert CreateGameRequest().bot_strategy == "mixed-local@20"
     assert BASELINE_IDENTIFIER == "heuristic@1"
     assert "mixed-local@14" in UNDER_TEST_IDENTIFIERS
     assert capability_declaration(MIXED_STRATEGY_IDENTIFIER_V14) == supported_declaration()

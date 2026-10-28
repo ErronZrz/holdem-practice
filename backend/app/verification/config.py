@@ -41,6 +41,7 @@ UNDER_TEST_IDENTIFIERS = frozenset(
         "mixed-local@17",
         "mixed-local@18",
         "mixed-local@19",
+        "mixed-local@20",
     }
 )
 _CAMPAIGN_ROOT = "74-domain-c"

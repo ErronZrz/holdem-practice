@@ -63,6 +63,9 @@ _ACTIVE_GATE_DRAW_SPAN = 40
 _CHECKED_VALUE_FLOOR = 600
 # 补上的质量停在两对高出该下沿的跨度，已经越过原门槛的更强牌不再被这条抬高。
 _CHECKED_VALUE_SPAN = 160
+# 顶对加更低公对、弱踢脚被公共牌挡住时的可见基础分。转牌托底至少要到这一档才还会下注。
+_PAIRED_BOARD_WEAK_BASE = 610
+_PAIRED_BOARD_TURN_FLOOR = 20
 # 多人底池里，低于两张底牌都配对的这一档时，不再用成牌下限去打薄价值。
 _THIN_VALUE_BASE = 760
 # 被公共牌两对盖住的口袋对：低于成牌托底，高于完全没参与公共牌对子的记分。
@@ -265,6 +268,14 @@ class MixedPolicyRules:
     # 底牌配成牌面最高点数、另一对是更低公对时，有效基础分是否至少按同一张底牌的顶对计。
     # 默认关闭。低对或中对配上更高公对不抬。
     top_pair_board_pair_caliber: bool = False
+    # 面对下注且主动质量没有越过门槛时，未到同花的强成牌是否不再无条件加上强牌加分。
+    # 默认关闭。打开后，没过门槛的两对不再靠这笔加分去反加。
+    qualified_strong_value: bool = False
+    # 顶对加更低公对是否改按手中未配对底牌计踢脚，并收紧河牌与多人底池的托底。
+    # 默认关闭。旧口径仍用「踢脚没进最佳五张就当成不加不减」。
+    visible_pair_kicker: bool = False
+    # 四张同花面上、低于皇后的单张同花是否从坚果同花分下调。默认关闭。
+    weak_four_flush: bool = False
 
 
 # 首版口径：共享牌面封顶后仍按普通跟注处理。
@@ -375,6 +386,15 @@ MIXED_LOCAL_V19_RULES = replace(
     MIXED_LOCAL_V18_RULES,
     short_stack_min_raise=True,
     top_pair_board_pair_caliber=True,
+)
+# 第二十版口径：没过门槛的面对下注不再白拿强牌加分；顶对加公对按可见踢脚计，
+# 并收紧河牌与多人底池的托底；四张同花面上的小同花不再按坚果尺度打。
+# 其余字段与第十九版逐字一致。
+MIXED_LOCAL_V20_RULES = replace(
+    MIXED_LOCAL_V19_RULES,
+    qualified_strong_value=True,
+    visible_pair_kicker=True,
+    weak_four_flush=True,
 )
 
 
@@ -554,8 +574,11 @@ def build_distribution(
     threshold_quality = max(0, score - value_threshold + _VALUE_GATE_TOLERANCE + gate)
     # 托底只抬高没越过原门槛的成牌；已经更高的主动质量保持原值。
     value_quality = max(threshold_quality, _checked_value_floor(features, rules))
-    if _strong_value_hand(features, rules):
+    if _strong_value_hand(features, rules) and not _skips_unqualified_value_bonus(
+        features, rules, threshold_quality
+    ):
         # 强成牌再加一截主动质量，避免只过牌或只打微注。
+        # 面对下注且没过主动门槛时，未到同花的牌不再靠这笔加分去反加。
         value_quality += _STRONG_VALUE_BONUS
     # 分化只调整已有依据的幅度，不给没有公开依据的场合凭空加依据。
     bluff_raw = _non_value_quality(features, rules)
@@ -691,21 +714,50 @@ def _broadway_bonus(features: MixedFeatures, rules: MixedPolicyRules) -> int:
 
 
 def _with_effective_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:
-    """先做既有修正，再按第十九版口径抬顶对加更低公对。"""
+    """先做既有修正，再按口径抬顶对加公对，最后下调四张同花面上的小同花。"""
     adjusted = _with_capped_board_base(_with_broadway_base(features, rules), rules)
-    return _with_top_pair_board_base(adjusted, rules)
+    adjusted = _with_top_pair_board_base(adjusted, rules)
+    return _with_weak_flush_base(adjusted, rules)
 
 
 def _with_top_pair_board_base(
     features: MixedFeatures, rules: MixedPolicyRules
 ) -> MixedFeatures:
-    """开关关闭或没有可抬的顶对分时原样返回，避免改动旧身份的特征对象。"""
-    if not rules.top_pair_board_pair_caliber or features.top_pair_board_pair_base <= 0:
+    """开关关闭或没有可抬的顶对分时原样返回，避免改动旧身份的特征对象。
+
+    可见踢脚开关打开时，用按手中底牌计出的那一分，不再用被公共牌占住踢脚位的旧分。
+    """
+    target = 0
+    if rules.visible_pair_kicker and features.top_pair_board_pair_visible_base > 0:
+        target = features.top_pair_board_pair_visible_base
+    elif rules.top_pair_board_pair_caliber and features.top_pair_board_pair_base > 0:
+        target = features.top_pair_board_pair_base
+    if target <= 0:
         return features
-    lifted = max(features.base, features.top_pair_board_pair_base)
+    lifted = max(features.base, target)
     if lifted == features.base:
         return features
     return replace(features, base=lifted)
+
+
+def _with_weak_flush_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:
+    """四张同花面上的小同花改用下调分。开关关闭或没有下调分时原样返回。"""
+    lowered = features.weak_board_flush_base
+    if not rules.weak_four_flush or lowered <= 0 or lowered >= features.base:
+        return features
+    return replace(features, base=lowered)
+
+
+def _skips_unqualified_value_bonus(
+    features: MixedFeatures, rules: MixedPolicyRules, threshold_quality: int
+) -> bool:
+    """面对下注、评分没过主动门槛、又还没到同花时，不再白拿强牌加分。"""
+    return bool(
+        rules.qualified_strong_value
+        and features.actual_call > 0
+        and threshold_quality == 0
+        and features.base < _NUT_BASE
+    )
 
 
 def _with_capped_board_base(features: MixedFeatures, rules: MixedPolicyRules) -> MixedFeatures:
@@ -909,7 +961,23 @@ def _checked_value_floor(features: MixedFeatures, rules: MixedPolicyRules) -> in
         and features.base < _THIN_VALUE_BASE
     ):
         return 0
-    return min(features.base - _CHECKED_VALUE_FLOOR, _CHECKED_VALUE_SPAN)
+    floor = min(features.base - _CHECKED_VALUE_FLOOR, _CHECKED_VALUE_SPAN)
+    visible = features.top_pair_board_pair_visible_base
+    if not rules.visible_pair_kicker or visible <= 0 or features.base >= _THIN_VALUE_BASE:
+        return floor
+    # 河牌或多人底池里，弱踢脚以及还没到两对高档的顶对加公对不再靠托底下注。
+    if features.street is Street.RIVER and (
+        features.contenders >= _MULTIWAY_CONTENDERS or visible <= _PAIRED_BOARD_WEAK_BASE
+    ):
+        return 0
+    # 转牌及更早的街，弱踢脚被公共牌挡住以后仍留下能打出小注的托底。
+    if (
+        features.street is not Street.RIVER
+        and features.top_pair_board_pair_base > visible
+        and visible <= _PAIRED_BOARD_WEAK_BASE
+    ):
+        return max(floor, _PAIRED_BOARD_TURN_FLOOR)
+    return floor
 
 
 def _strong_value_hand(features: MixedFeatures, rules: MixedPolicyRules) -> bool:

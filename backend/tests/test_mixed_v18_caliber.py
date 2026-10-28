@@ -189,12 +189,14 @@ def test_eighteenth_version_only_opens_its_switch() -> None:
         enabled = identifier in (
             MIXED_STRATEGY_IDENTIFIER_V18,
             MIXED_STRATEGY_IDENTIFIER_V19,
+            "mixed-local@20",
         )
         assert rules_for_identifier(identifier).postflop_pair_caliber is enabled
         fields = DIGEST_RULE_FIELDS.get(identifier)
         if identifier not in (
             MIXED_STRATEGY_IDENTIFIER_V18,
             MIXED_STRATEGY_IDENTIFIER_V19,
+            "mixed-local@20",
         ):
             assert fields is None or "postflop_pair_caliber" not in fields
 
@@ -202,20 +204,20 @@ def test_eighteenth_version_only_opens_its_switch() -> None:
 def test_eighteenth_stays_registered_when_default_moves_on() -> None:
     """第十八版仍可构造；未指定策略时创建对局改用第十九版。"""
     ordered = MIXED_STRATEGY_IDENTIFIERS
-    assert ordered[-1] == MIXED_STRATEGY_IDENTIFIER_V19
-    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V18
-    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V17
+    assert ordered[-1] == "mixed-local@20"
+    assert ordered[-2] == MIXED_STRATEGY_IDENTIFIER_V19
+    assert ordered[-3] == MIXED_STRATEGY_IDENTIFIER_V18
     assert spec_for(MIXED_STRATEGY_IDENTIFIER_V18).version == 18
     assert create_strategy(MIXED_STRATEGY_IDENTIFIER_V18, 5).identifier == (
         MIXED_STRATEGY_IDENTIFIER_V18
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V18) is MIXED_LOCAL_V18_RULES
-    assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V19
+    assert CreateGameRequest().bot_strategy == "mixed-local@20"
     assert "mixed-local@18" in UNDER_TEST_IDENTIFIERS
     assert BASELINE_IDENTIFIER == "heuristic@1"
-    assert REFERENCE_VERSION == 8
+    assert REFERENCE_VERSION == 9
     assert EVALUATION_VERSION == 3
-    assert PROMPT_SCHEMA_VERSION == 5
+    assert PROMPT_SCHEMA_VERSION == 6
 
 
 def test_eighteenth_digest_appends_only_its_own_field() -> None:
@@ -504,7 +506,7 @@ def test_review_reference_ignores_the_hand_number() -> None:
         build_review(build_hand_history(engine, hand_number=number, human_seat=0))
         for number in (1, 88)
     ]
-    assert reviews[0]["reference_version"] == 8
+    assert reviews[0]["reference_version"] == 9
     first = reviews[0]["decisions"]
     for review in reviews[1:]:
         assert review["hand_number"] != reviews[0]["hand_number"]

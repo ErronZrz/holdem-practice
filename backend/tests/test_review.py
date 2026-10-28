@@ -755,6 +755,62 @@ def test_low_equity_lead_moves_aggression_onto_check() -> None:
     assert len([item for item in high_line if item[0].type == ActionType.CHECK]) == 1
 
 
+def test_river_and_moderate_line_low_equity_leads_check() -> None:
+    baseline = [
+        (Action(ActionType.BET, 40), 0.6),
+        (Action(ActionType.CHECK), 0.4),
+    ]
+    river = _guard_low_equity_lead(
+        baseline,
+        to_call=0,
+        postflop=True,
+        equity=0.45,
+        opponents=1,
+        max_line=0,
+        board=[card("Ah"), card("Kd"), card("2c"), card("7s"), card("9h")],
+    )
+    assert _mode_action(river).type == ActionType.CHECK
+    moderate = _guard_low_equity_lead(
+        baseline,
+        to_call=0,
+        postflop=True,
+        equity=0.45,
+        opponents=1,
+        max_line=2,
+    )
+    assert _mode_action(moderate).type == ActionType.CHECK
+    weak = _guard_low_equity_lead(
+        baseline,
+        to_call=0,
+        postflop=True,
+        equity=0.49,
+        opponents=1,
+        max_line=1,
+        hole_cards=[card("Qd"), card("3d")],
+        board=[card("Jc"), card("Qs"), card("Th")],
+    )
+    assert _mode_action(weak).type == ActionType.CHECK
+
+
+def test_low_equity_facing_bet_moves_raise_into_call() -> None:
+    baseline = [
+        (Action(ActionType.RAISE, 1500), 0.83),
+        (Action(ActionType.CALL), 0.17),
+    ]
+    guarded = _guard_reference_distribution(
+        baseline,
+        to_call=750,
+        call_ev=180.0,
+        equity=0.44,
+        opponents=1,
+        postflop=True,
+        max_line=5,
+        bad_fold=False,
+    )
+    assert _mode_action(guarded).type == ActionType.CALL
+    assert _prob(guarded, ActionType.RAISE) == 0.0
+
+
 def test_thin_value_and_preflop_leads_stay() -> None:
     baseline = [
         (Action(ActionType.BET, 40), 0.6),

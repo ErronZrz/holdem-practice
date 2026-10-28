@@ -21,7 +21,7 @@ from app.storage import repository
 from app.storage.models import CoachExplanationModel, CoachMessageModel
 
 # 提示词结构变化时递增，已缓存的解读随之失效。
-PROMPT_SCHEMA_VERSION = 5
+PROMPT_SCHEMA_VERSION = 6
 _REASONING_SUMMARY_LIMIT = 500
 _EMPTY = "教练解读暂时不可用，请稍后再试"
 
@@ -56,6 +56,8 @@ _DECISION_FIELDS = (
     "bot_action",
     "bot_distribution",
     "mistakes",
+    "prior_actions",
+    "subsequent_actions",
 )
 
 _SYSTEM_PROMPT = """\
@@ -77,7 +79,13 @@ _SYSTEM_PROMPT = """\
   参考只供对照，与参考不同本身不构成错误。
 
 只能依据给出的事实，不要改写玩家动作、胜率、赔率、跟注期望或已标出的问题。
-未出现在 revealed_hands 里的对手底牌是未知的，不要猜测具体牌面。
+
+决策时点的因果边界：
+- 判断该决策点应采取什么动作（recommended_action），以及当时的风险和决策依据，
+  只能使用该决策发生前已经知道的信息：prior_actions、该决策点自己的 board、英雄底牌和当时的指标。
+- subsequent_actions、在该决策之后才发出的公共牌，以及终局摊牌 revealed_hands，
+  在决策当时完全未知。严禁把它们当作当时应该做某动作、或当时不用担心某类风险的依据。
+- 这些事后信息只能在先讲清当时的决策逻辑之后，作为复盘印证简短提及。不要猜测未摊牌的具体牌面。
 
 只输出一个 JSON 对象，不要加 Markdown 代码块，也不要附加说明。格式如下：
 {"explanations":[{"action_index":0,"recommended_action":"fold","explanation":"两三句中文"}]}
@@ -99,7 +107,13 @@ _FOLLOWUP_SYSTEM = """\
 - 参考动作来自紧手标准模式（mixed-tight-normal），只供对照。与参考不同本身不构成错误。
 
 只能依据给出的事实和已有解读，不要改写玩家动作、胜率、赔率、跟注期望、参考动作或已标出的问题。
-未出现在 revealed_hands 里的对手底牌是未知的，不要猜测具体牌面。
+
+决策时点的因果边界：
+- 回答「当时该不该做某个动作」或「当时需不需要担心对手有某类牌」，
+  只能依据 prior_actions、该决策点自己的 board、英雄底牌和当时的指标。
+- subsequent_actions、后续才发出的公共牌，以及终局摊牌 revealed_hands，
+  在决策当时完全未知。严禁把它们当成当时应该做某动作、或当时不用担心某风险的依据。
+- 事后信息只能在先讲清当时的决策逻辑之后，作为复盘印证简短提及。不要猜测未摊牌的具体牌面。
 直接用自然语言回答，不要输出 JSON，也不要加 Markdown 代码块。
 """
 
@@ -312,6 +326,7 @@ def build_decision_payload(history: dict, review: dict, action_index: int) -> di
     """摘出这一个决策点可以公开的事实。未摊牌的对手底牌不进入结果。"""
     decision = review["decisions"][action_index]
     human_seat = int(review["human_seat"])
+    prior_actions, subsequent_actions = _split_public_actions(history, human_seat, action_index)
     return {
         "action_index": action_index,
         "seat": human_seat,
@@ -335,6 +350,8 @@ def build_decision_payload(history: dict, review: dict, action_index: int) -> di
         "bot_distribution": [_probability(item) for item in decision["bot_distribution"]],
         "mistakes": [_mistake(item) for item in decision["mistakes"]],
         "public_actions": _public_actions(history),
+        "prior_actions": prior_actions,
+        "subsequent_actions": subsequent_actions,
         "revealed_hands": _revealed_opponents(history, human_seat),
         "reference_strategy": review["reference_strategy"],
         "reference_version": review["reference_version"],
@@ -783,20 +800,56 @@ def _revealed_opponents(history: dict, human_seat: int) -> list[dict]:
     return revealed
 
 
+def _public_action(record: dict) -> dict:
+    return {
+        "street": record.get("street"),
+        "seat": record.get("seat"),
+        "action": record.get("action"),
+        "amount": record.get("amount"),
+    }
+
+
 def _public_actions(history: dict) -> list[dict]:
     actions = []
     for record in history.get("actions") or []:
         if not isinstance(record, dict):
             continue
-        actions.append(
-            {
-                "street": record.get("street"),
-                "seat": record.get("seat"),
-                "action": record.get("action"),
-                "amount": record.get("amount"),
-            }
-        )
+        actions.append(_public_action(record))
     return actions
+
+
+def _split_public_actions(
+    history: dict, human_seat: int, action_index: int
+) -> tuple[list[dict], list[dict]]:
+    """把公开动作切成该决策之前已知的，和该决策动作之后才发生的。
+
+    盲注不计入真人决策序号。正在点评的这一下本身不放进两边，它已经写在 action 里。
+    """
+    prior: list[dict] = []
+    subsequent: list[dict] = []
+    seen = 0
+    placed = False
+    for record in history.get("actions") or []:
+        if not isinstance(record, dict):
+            continue
+        item = _public_action(record)
+        voluntary = record.get("action") not in ("small_blind", "big_blind")
+        is_decision = (
+            not placed
+            and voluntary
+            and record.get("seat") == human_seat
+            and seen == action_index
+        )
+        if is_decision:
+            placed = True
+            continue
+        if not placed and voluntary and record.get("seat") == human_seat:
+            seen += 1
+        if placed:
+            subsequent.append(item)
+        else:
+            prior.append(item)
+    return prior, subsequent
 
 
 def _choice(choice: dict) -> dict:

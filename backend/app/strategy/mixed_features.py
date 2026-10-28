@@ -100,6 +100,12 @@ class MixedFeatures:
     # 底牌配成牌面最高点数、另一对是更低公对时，按同一张底牌的顶对规则折算的基础分。
     # 手工构造不填时为 0，有效基础分不会因此被抬高。
     top_pair_board_pair_base: int = 0
+    # 同一牌型按手中未配对底牌计踢脚。公共牌占住踢脚位时，旧分可能把弱踢脚当成 0。
+    # 手工构造不填时为 0，只有显式打开的口径才会改用这一分。
+    top_pair_board_pair_visible_base: int = 0
+    # 公共牌已有四张同花、英雄只用一张偏低的同花牌凑成同花时的下调分。
+    # 为 0 表示不下调。手工构造不填时保持原来的同花基础分。
+    weak_board_flush_base: int = 0
 
     @property
     def spr_denominator(self) -> int:
@@ -168,11 +174,17 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         shared_locked = False
         capped_board_two_pair = False
         top_pair_board_pair_base = 0
+        top_pair_board_pair_visible_base = 0
+        weak_board_flush_base = 0
     else:
         hero_rank = evaluate_fast([*holes, *board])
         base = _postflop_base(hero_rank, holes, board)
         capped_board_two_pair = _capped_board_two_pair(hero_rank, holes, board)
         top_pair_board_pair_base = _top_pair_board_pair_base(hero_rank, holes, board)
+        top_pair_board_pair_visible_base = _visible_top_pair_board_pair_base(
+            hero_rank, holes, board
+        )
+        weak_board_flush_base = _weak_board_flush_base(hero_rank, holes, board)
         board_rank = evaluate_fast(board) if len(board) == 5 else None
         if board_rank is not None and hero_rank == board_rank:
             # 与公共五张完全同型：保守封顶，不据此判定可弃或该跟。
@@ -218,6 +230,8 @@ def features_for(verified: VerifiedMixedInput, legal: LegalActions) -> MixedFeat
         prior_street_checked_through=prior_checked_through,
         capped_board_two_pair=capped_board_two_pair,
         top_pair_board_pair_base=top_pair_board_pair_base,
+        top_pair_board_pair_visible_base=top_pair_board_pair_visible_base,
+        weak_board_flush_base=weak_board_flush_base,
     )
 
 
@@ -353,31 +367,43 @@ def _kicker_increment(
     return 0
 
 
-def _top_pair_board_pair_base(
-    rank: HandRank, holes: Sequence[Card], board: Sequence[Card]
-) -> int:
-    """一公对加一张底牌配成牌面最高点数时，按单顶对规则折算的基础分。
+def _hole_kicker_increment(holes: Sequence[Card], board_ranks: set[int]) -> int:
+    """按手中未配对、且没在公共牌上出现的那张底牌计踢脚，不管它有没有进入最佳五张。"""
+    hole_counts = Counter(card.rank.value for card in holes)
+    for card in holes:
+        rank_value = card.rank.value
+        if hole_counts[rank_value] != 1 or rank_value in board_ranks:
+            continue
+        if rank_value >= Rank.JACK.value:
+            return 40
+        if rank_value >= Rank.EIGHT.value:
+            return 0
+        return -40
+    return 0
 
-    只覆盖共用基础分里记成 520 的那一支：公共牌自带两对、口袋对参与、
-    或两张底牌各自配对时返回 0。低对或中对配上更高的公对也返回 0。
-    这里不改共用基础分本身。
+
+def _top_pair_board_pair_match(
+    rank: HandRank, holes: Sequence[Card], board: Sequence[Card]
+) -> bool:
+    """是否「一张底牌配成牌面最高点数，另一对是更低的公对」。
+
+    公共牌自带两对、口袋对参与、两张底牌各自配对，或低对配上更高公对时为假。
     """
     if rank.category is not HandCategory.TWO_PAIR or not board:
-        return 0
+        return False
     hole_counts = Counter(card.rank.value for card in holes)
     board_counts = Counter(card.rank.value for card in board)
-    board_ranks = set(board_counts)
     high, low = rank.tiebreak[0], rank.tiebreak[1]
     used = (high, low)
     if all(board_counts.get(rank_value, 0) >= 2 for rank_value in used):
-        return 0
+        return False
     if any(hole_counts.get(rank_value, 0) == 2 for rank_value in used):
-        return 0
+        return False
     if all(
         hole_counts.get(rank_value, 0) == 1 and board_counts.get(rank_value, 0) == 1
         for rank_value in used
     ):
-        return 0
+        return False
     hole_pair = next(
         (
             rank_value
@@ -391,10 +417,56 @@ def _top_pair_board_pair_base(
         None,
     )
     if hole_pair is None or board_pair is None or board_pair >= hole_pair:
+        return False
+    return hole_pair == max(board_counts)
+
+
+def _top_pair_board_pair_base(
+    rank: HandRank, holes: Sequence[Card], board: Sequence[Card]
+) -> int:
+    """一公对加一张底牌配成牌面最高点数时，按单顶对规则折算的基础分。
+
+    踢脚只认已经进入最佳五张的底牌。公共牌占住踢脚位时，这里仍按不加不减计。
+    只覆盖共用基础分里记成 520 的那一支，不改共用基础分本身。
+    """
+    if not _top_pair_board_pair_match(rank, holes, board):
         return 0
-    if hole_pair != max(board_ranks):
-        return 0
+    board_ranks = {card.rank.value for card in board}
     return 650 + _kicker_increment(rank.tiebreak[2:], holes, board_ranks)
+
+
+def _visible_top_pair_board_pair_base(
+    rank: HandRank, holes: Sequence[Card], board: Sequence[Card]
+) -> int:
+    """同一牌型按手中那张未配对底牌计踢脚，避免公共牌把弱踢脚记成不加不减。"""
+    if not _top_pair_board_pair_match(rank, holes, board):
+        return 0
+    board_ranks = {card.rank.value for card in board}
+    return 650 + _hole_kicker_increment(holes, board_ranks)
+
+
+# 四张同花面上，低于皇后的单张同花不再按坚果同花计。
+_WEAK_BOARD_FLUSH_BASE = 640
+_BOARD_FLUSH_HIGH_CARD = Rank.QUEEN.value
+
+
+def _weak_board_flush_base(
+    rank: HandRank, holes: Sequence[Card], board: Sequence[Card]
+) -> int:
+    """公共牌已有四张同花，且英雄该花色的最高牌低于皇后时，给出下调后的基础分。
+
+    皇后、国王和尖子仍返回 0，调用方保持原来的同花分。不是同花、或公共牌还没到四张时也返回 0。
+    """
+    if rank.category is not HandCategory.FLUSH or len(board) < 4:
+        return 0
+    suit_counts = Counter(card.suit for card in board)
+    suit, count = max(suit_counts.items(), key=lambda item: item[1])
+    if count < 4:
+        return 0
+    hole_ranks = [card.rank.value for card in holes if card.suit == suit]
+    if not hole_ranks or max(hole_ranks) >= _BOARD_FLUSH_HIGH_CARD:
+        return 0
+    return _WEAK_BOARD_FLUSH_BASE
 
 
 # ------------------------------------------------------------------ 共享牌面锁定

@@ -429,6 +429,32 @@ def test_empty_stored_action_falls_back_to_keywords() -> None:
     assert reading["recommended_action"] is None
 
 
+def test_showdown_used_as_the_decision_basis_is_hindsight() -> None:
+    text = "这里该下注，因为公开摊牌显示对手实际只有一对。"
+    reading = diagnose.coach_reading(
+        text,
+        mode="bet",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=PROMPT_SCHEMA_VERSION,
+        recommended_action="bet",
+        cache_key=_CURRENT_CACHE_KEY,
+    )
+    codes = diagnose.classify_point(_point(mode="bet", coach=reading, draw=0))
+    assert "e_coach_hindsight" in codes
+    clean = diagnose.coach_reading(
+        "河牌面上同花已经很多，当时不能假设对手没有更大的同花。",
+        mode="check",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=PROMPT_SCHEMA_VERSION,
+        recommended_action="check",
+        cache_key=_CURRENT_CACHE_KEY,
+    )
+    clean_codes = diagnose.classify_point(_point(mode="check", coach=clean, draw=0))
+    assert "e_coach_hindsight" not in clean_codes
+
+
 def test_old_reference_cache_key_is_stale() -> None:
     # 缓存键里的参考版本对不上当前口径时，只记过期，不再拿旧建议和现参考唱反调。
     reading = diagnose.coach_reading(

@@ -166,7 +166,7 @@ def test_twelfth_identity_stays_selectable_when_default_is_fourteenth() -> None:
         MIXED_STRATEGY_IDENTIFIER_V12
     )
     assert rules_for_identifier(MIXED_STRATEGY_IDENTIFIER_V12) is MIXED_LOCAL_V12_RULES
-    assert CreateGameRequest().bot_strategy == "mixed-local@19"
+    assert CreateGameRequest().bot_strategy == "mixed-local@20"
     selected = CreateGameRequest(bot_strategy=MIXED_STRATEGY_IDENTIFIER_V12)
     assert selected.bot_strategy == MIXED_STRATEGY_IDENTIFIER_V12
 
@@ -343,6 +343,7 @@ def test_under_test_whitelist_accepts_the_twelfth_identity() -> None:
             "mixed-local@17",
             "mixed-local@18",
             "mixed-local@19",
+            "mixed-local@20",
         }
     ) == UNDER_TEST_IDENTIFIERS
     accepted = require_locked_under_test_mapping(
