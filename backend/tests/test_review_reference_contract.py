@@ -226,7 +226,7 @@ def test_review_thresholds_are_frozen() -> None:
 
 
 def test_reference_versions_track_the_action_line_upgrade() -> None:
-    assert REFERENCE_VERSION == 9
+    assert REFERENCE_VERSION == 10
     assert EVALUATION_VERSION == 3
     assert CACHE_KEY_VERSION == 1
     identity = reference_identity()
@@ -235,3 +235,7 @@ def test_reference_versions_track_the_action_line_upgrade() -> None:
     scope = reference_declaration()["reference_scope"]
     assert "参考动作为紧手标准模式，且不随手号抽取设伏与过牌保护。" in scope
     assert "翻后面对下注、跟注期望为正且底牌具备可继续牌力时，弃牌质量挪到跟注。" in scope
+    assert (
+        "翻前单挑、待跟超过一个大盲、份额不低于公平份额、跟注期望大于一个大盲，"
+        "且两张底牌为同花 A、两张均为百老汇的同花牌或口袋对时，弃牌质量挪到跟注。"
+    ) in scope

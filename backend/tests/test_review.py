@@ -8,6 +8,7 @@ from app.analysis.hand_review import (
     _dominated_pair,
     _fair_share,
     _folding_gives_up_value,
+    _guard_bad_fold,
     _guard_low_equity_lead,
     _guard_negative_call,
     _guard_reference_distribution,
@@ -844,6 +845,94 @@ def test_thin_value_and_preflop_leads_stay() -> None:
         max_line=5,
     )
     assert facing == baseline
+
+
+def _fold_heavy() -> list[tuple[Action, float]]:
+    return [
+        (Action(ActionType.FOLD), 0.7),
+        (Action(ActionType.CALL), 0.3),
+    ]
+
+
+def _preflop_fold_guard(
+    hole: list[str],
+    *,
+    to_call: int = 80,
+    call_ev: float = 33.4,
+    equity: float = 0.5155,
+    opponents: int = 1,
+    big_blind: int = 20,
+    postflop: bool = False,
+) -> list[tuple[Action, float]]:
+    """走发布前保护入口，确认新参数确实传到弃牌收口。"""
+    return _guard_reference_distribution(
+        _fold_heavy(),
+        to_call=to_call,
+        call_ev=call_ev,
+        equity=equity,
+        opponents=opponents,
+        postflop=postflop,
+        max_line=0,
+        bad_fold=False,
+        big_blind=big_blind,
+        hole_cards=[card(label) for label in hole],
+        board=(),
+        pot=120,
+    )
+
+
+def test_preflop_heads_up_narrow_fold_guard() -> None:
+    """翻前单挑窄保护只挪同花 A、同花双百老汇和口袋对，探针保证金不变。"""
+    suited_ace = _preflop_fold_guard(["Ah", "3h"])
+    assert _prob(suited_ace, ActionType.FOLD) == 0
+    assert _prob(suited_ace, ActionType.CALL) == pytest.approx(1.0)
+    broadway = _preflop_fold_guard(["Qh", "Jh"], call_ev=31.8, equity=0.52)
+    assert _prob(broadway, ActionType.CALL) == pytest.approx(1.0)
+    pocket = _preflop_fold_guard(["7c", "7d"], call_ev=40.0, equity=0.5)
+    assert _prob(pocket, ActionType.CALL) == pytest.approx(1.0)
+    # 同一组数字直接打在弃牌收口上，结果与发布入口一致。
+    direct = _guard_bad_fold(
+        _fold_heavy(),
+        to_call=80,
+        bad_fold=False,
+        postflop=False,
+        call_ev=33.4,
+        hole_cards=[card("Ah"), card("3h")],
+        big_blind=20,
+        opponents=1,
+        equity=0.5155,
+    )
+    assert _prob(direct, ActionType.CALL) == pytest.approx(1.0)
+    # 期望高于一个大盲，但仍低于弃牌探针线，所以不会被标成放弃正期望。
+    assert (
+        _folding_gives_up_value(
+            equity=0.5155,
+            call_ev=33.4,
+            pot_odds=0.4,
+            to_call=80,
+            actual_call=80,
+            pot=200,
+            contested=300,
+            can_raise=True,
+            opponents=1,
+            hole_cards=[card("Ah"), card("3h")],
+            board=[],
+            big_blind=20,
+        )
+        is False
+    )
+    kept = [
+        _preflop_fold_guard(["Ah", "3h"], opponents=3, equity=0.6),
+        _preflop_fold_guard(["Ah", "9d"]),
+        _preflop_fold_guard(["Kh", "9h"]),
+        _preflop_fold_guard(["9h", "8h"]),
+        _preflop_fold_guard(["Ah", "3h"], call_ev=20.0),
+        _preflop_fold_guard(["Ah", "3h"], to_call=20),
+        _preflop_fold_guard(["Ah", "3h"], to_call=10, call_ev=4.0),
+        _preflop_fold_guard(["Ah", "3h"], equity=0.49),
+    ]
+    for distribution in kept:
+        assert distribution == _fold_heavy()
 
 
 def test_bad_fold_probe_moves_fold_mass_onto_call() -> None:

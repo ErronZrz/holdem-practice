@@ -698,6 +698,6 @@ def test_contract_ignores_hidden_cards_board_and_seed() -> None:
 def test_production_reference_identity_is_action_line_weighted() -> None:
     identity = reference_identity.reference_identity()
     assert identity["reference_strategy"] == "mixed-tight-normal"
-    assert identity["reference_version"] == 9
+    assert identity["reference_version"] == 10
     assert identity["evaluation_version"] == 3
     assert identity["reference_coverage"] == "action-line-weighted"

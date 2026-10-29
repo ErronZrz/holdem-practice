@@ -166,6 +166,30 @@ def test_check_mode_can_still_leave_a_low_equity_bet() -> None:
     assert "c_low_equity_lead" not in codes
 
 
+def test_board_texture_draw_wording_is_not_a_held_draw() -> None:
+    """听牌词紧挨「面」时说的是公共牌；无补牌却写成持有听牌仍然记假听牌。"""
+    texture = diagnose.coach_reading(
+        "5-6-A 这种带顺子听牌面，过牌控池更稳。",
+        mode="check",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=PROMPT_SCHEMA_VERSION,
+        cache_key=_CURRENT_CACHE_KEY,
+        recommended_action="check",
+    )
+    assert "e_coach_false_draw" not in diagnose.classify_point(_point(draw=0, coach=texture))
+    held = diagnose.coach_reading(
+        "这手没有补牌，却写成持有顺子听牌。",
+        mode="check",
+        published_amounts=set(),
+        raw_amounts=set(),
+        schema=PROMPT_SCHEMA_VERSION,
+        cache_key=_CURRENT_CACHE_KEY,
+        recommended_action="check",
+    )
+    assert "e_coach_false_draw" in diagnose.classify_point(_point(draw=0, coach=held))
+
+
 def test_flush_draw_claim_needs_a_one_card_draw() -> None:
     text = "翻牌上击中顶对并带同花听牌，参考更偏向小注。"
     reading = diagnose.coach_reading(

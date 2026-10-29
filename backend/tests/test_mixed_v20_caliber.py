@@ -113,9 +113,9 @@ def test_twentieth_is_the_create_default() -> None:
     assert CreateGameRequest().bot_strategy == MIXED_STRATEGY_IDENTIFIER_V20
     assert "mixed-local@20" in UNDER_TEST_IDENTIFIERS
     assert BASELINE_IDENTIFIER == "heuristic@1"
-    assert REFERENCE_VERSION == 9
+    assert REFERENCE_VERSION == 10
     assert EVALUATION_VERSION == 3
-    assert PROMPT_SCHEMA_VERSION == 6
+    assert PROMPT_SCHEMA_VERSION == 7
 
 
 def test_twentieth_digest_appends_only_its_own_fields() -> None:
@@ -156,7 +156,7 @@ def test_case_hands_follow_the_new_reference_modes() -> None:
     }
     turn = build_review(_history(_TURN_PAIR_HAND))
     jack = build_review(_history(_JACK_RIVER_HAND))
-    assert turn["reference_version"] == 9
+    assert turn["reference_version"] == 10
     assert turn["decisions"][2]["bot_action"]["action"] == "bet"
     assert turn["decisions"][3]["bot_action"]["action"] == "check"
     assert jack["decisions"][3]["bot_action"]["action"] == "bet"

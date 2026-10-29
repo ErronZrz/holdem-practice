@@ -8,6 +8,8 @@
 或翻牌弱顶对份额低于平均，主动质量挪到过牌。翻后面对下注、跟注期望不为负但份额低于平均时，
 加注和下注质量挪到跟注。弃牌会被标成放弃正期望时，弃牌质量挪到跟注。
 翻后面对下注、跟注期望为正且底牌具备可继续牌力时，弃牌质量也挪到跟注。
+翻前单挑、待跟超过一个大盲、份额不低于公平份额、跟注期望大于一个大盲，
+且两张底牌为同花 A、两张均为百老汇的同花牌或口袋对时，弃牌质量也挪到跟注。
 众数先按动作类型汇总，再取该类型里概率最高的尺度。跟注的对外金额是当时实际要投入的筹码。
 错误来自份额、跟注期望和牌力门槛；与参考众数不同本身不是错误，
 参考动作只用来否决与参考自己方向相反的标记。
@@ -21,7 +23,7 @@ from collections.abc import Sequence
 from app.analysis.action_line_equity import ActionLineTracker, estimate_decision
 from app.analysis.reference_identity import reference_declaration
 from app.poker.actions import Action, ActionType
-from app.poker.cards import Card, card_from_str
+from app.poker.cards import Card, Rank, card_from_str
 from app.poker.engine import PokerEngine
 from app.poker.evaluator import evaluate
 from app.poker.hand import HandCategory
@@ -328,6 +330,20 @@ def _guard_low_equity_continue(
     )
 
 
+def _heads_up_preflop_continue_cards(hole_cards: Sequence[Card]) -> bool:
+    """翻前单挑窄保护认的两张底牌：同花 A、两张都是百老汇的同花，或口袋对。"""
+    if len(hole_cards) != 2:
+        return False
+    left, right = hole_cards
+    if left.rank == right.rank:
+        return True
+    if left.suit != right.suit:
+        return False
+    if left.rank == Rank.ACE or right.rank == Rank.ACE:
+        return True
+    return left.rank >= Rank.TEN and right.rank >= Rank.TEN
+
+
 def _guard_bad_fold(
     distribution: list[tuple[Action, float]],
     *,
@@ -338,11 +354,15 @@ def _guard_bad_fold(
     hole_cards: Sequence[Card] = (),
     board: Sequence[Card] = (),
     pot: int = 0,
+    big_blind: int = 0,
+    opponents: int = 0,
+    equity: float = 0.0,
 ) -> list[tuple[Action, float]]:
     """面对下注时，把不该留下的弃牌质量挪到跟注。
 
     探针已经判成放弃正期望时照旧挪走。翻后跟注期望为正、且底牌具备可继续牌力时，
-    即使还没跨过那条探针线，也把弃牌并入跟注。
+    即使还没跨过那条探针线，也把弃牌并入跟注。翻前只收单挑、待跟超过一个大盲、
+    份额不低于公平份额、跟注期望大于一个大盲，且底牌是同花 A、两张均为百老汇的同花牌或口袋对。
     """
     # 探针已成立时不必再看牌力。没有两张底牌时也不把空序列送进成牌判断。
     playable_continue = False
@@ -353,7 +373,17 @@ def _guard_bad_fold(
         and len(hole_cards) >= 2
     ):
         playable_continue = _has_playable_strength(hole_cards, board, to_call, pot)
-    if to_call <= 0 or not (bad_fold or playable_continue):
+    # 多人底池和单挑杂色牌不进这条。弃牌探针的保证金也不在这里放宽。
+    heads_up_preflop = (
+        not bad_fold
+        and not postflop
+        and to_call > big_blind
+        and opponents == 1
+        and equity >= _fair_share(opponents)
+        and (call_ev or 0.0) > float(big_blind)
+        and _heads_up_preflop_continue_cards(hole_cards)
+    )
+    if to_call <= 0 or not (bad_fold or playable_continue or heads_up_preflop):
         return distribution
     return _move_mass(distribution, frozenset({ActionType.FOLD}), ActionType.CALL)
 
@@ -449,6 +479,9 @@ def _guard_reference_distribution(
         hole_cards=hole_cards,
         board=board,
         pot=pot,
+        big_blind=big_blind,
+        opponents=opponents,
+        equity=equity,
     )
 
 

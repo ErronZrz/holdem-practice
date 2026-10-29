@@ -373,10 +373,15 @@ def _claims_hindsight_basis(text: str) -> bool:
 
 
 def _claims_live_draw(text: str) -> bool:
-    """正文是否把这手说成再发一张就能完成的听牌。后门或明确否定不算。"""
+    """正文是否把这手说成再发一张就能完成的听牌。
+
+    后门、明确否定，以及听牌词紧挨「面」的公共牌描述，都不算英雄持有听牌。
+    """
     for match in _DRAW_CLAIM.finditer(text):
         prefix = text[max(0, match.start() - 6) : match.start()]
         if "后门" in prefix or any(token in prefix for token in ("没", "无", "不是", "并非")):
+            continue
+        if text.startswith("面", match.end()):
             continue
         return True
     return False

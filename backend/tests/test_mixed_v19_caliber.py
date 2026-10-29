@@ -217,9 +217,9 @@ def test_nineteenth_is_the_create_default() -> None:
     assert "mixed-local@19" in UNDER_TEST_IDENTIFIERS
     assert "mixed-local@20" in UNDER_TEST_IDENTIFIERS
     assert BASELINE_IDENTIFIER == "heuristic@1"
-    assert REFERENCE_VERSION == 9
+    assert REFERENCE_VERSION == 10
     assert EVALUATION_VERSION == 3
-    assert PROMPT_SCHEMA_VERSION == 6
+    assert PROMPT_SCHEMA_VERSION == 7
 
 
 def test_nineteenth_digest_appends_only_its_own_fields() -> None:
@@ -303,7 +303,7 @@ def test_case_hands_bet_the_top_pair_and_keep_the_lower_pair() -> None:
     """两处顶对加更低公对的参考众数变成下注；低对加高公对仍是 520。"""
     turn = build_review(_history(_TURN_PAIR_HAND))
     river = build_review(_history(_RIVER_PAIR_HAND))
-    assert turn["reference_version"] == 9
+    assert turn["reference_version"] == 10
     turn_point = turn["decisions"][2]
     river_point = river["decisions"][3]
     assert turn_point["street"] == "turn"
@@ -424,7 +424,7 @@ def test_review_reference_ignores_the_hand_number() -> None:
         build_review(build_hand_history(engine, hand_number=number, human_seat=0))
         for number in (1, 88)
     ]
-    assert reviews[0]["reference_version"] == 9
+    assert reviews[0]["reference_version"] == 10
     first = reviews[0]["decisions"]
     for review in reviews[1:]:
         assert review["hand_number"] != reviews[0]["hand_number"]

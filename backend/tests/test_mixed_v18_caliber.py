@@ -215,9 +215,9 @@ def test_eighteenth_stays_registered_when_default_moves_on() -> None:
     assert CreateGameRequest().bot_strategy == "mixed-local@20"
     assert "mixed-local@18" in UNDER_TEST_IDENTIFIERS
     assert BASELINE_IDENTIFIER == "heuristic@1"
-    assert REFERENCE_VERSION == 9
+    assert REFERENCE_VERSION == 10
     assert EVALUATION_VERSION == 3
-    assert PROMPT_SCHEMA_VERSION == 6
+    assert PROMPT_SCHEMA_VERSION == 7
 
 
 def test_eighteenth_digest_appends_only_its_own_field() -> None:
@@ -506,7 +506,7 @@ def test_review_reference_ignores_the_hand_number() -> None:
         build_review(build_hand_history(engine, hand_number=number, human_seat=0))
         for number in (1, 88)
     ]
-    assert reviews[0]["reference_version"] == 9
+    assert reviews[0]["reference_version"] == 10
     first = reviews[0]["decisions"]
     for review in reviews[1:]:
         assert review["hand_number"] != reviews[0]["hand_number"]

@@ -574,13 +574,26 @@ def test_prompt_forbids_solver_wording_without_hiding_the_reference() -> None:
     assert "call_ev < 0" in system
     assert "one_card_outs" in system
     assert "不要把这手写成听牌" in system
+    assert "加注挤压" in system
+    assert "反向隐含赔率" in system
+    assert "弱同花 A" in system
+    assert "杂色高张" in system
+    assert "call_ev > 0" in system
+    assert "equity > pot_odds" in system
+    assert "130" in system
+    assert "90" in system
+    assert "弱踢脚顶对" in system
+    assert "强价值线" in system
+    assert "过牌控池" in system
+    assert "牌面特征" in system
+    assert "不要把英雄写成听牌" in system
     assert "recommended_action" in system
     assert "本身不构成错误" in system
     assert "prior_actions" in system
     assert "subsequent_actions" in system
     assert "决策当时完全未知" in system
     assert "未出现在 revealed_hands" not in system
-    assert PROMPT_SCHEMA_VERSION == 6
+    assert PROMPT_SCHEMA_VERSION == 7
     body = _request_body(messages)
     assert "As" in body["hand"]["hero_hole_cards"]
     assert body["hand"]["revealed_hands"] == []
@@ -1096,6 +1109,13 @@ def test_followup_context_keeps_public_facts_and_drops_reasoning() -> None:
     text = messages[0]["content"] + messages[1]["content"]
     _assert_no_solver_labels(text)
     assert "不要改写" in messages[0]["content"]
+    followup_system = messages[0]["content"]
+    assert "加注挤压" in followup_system
+    assert "反向隐含赔率" in followup_system
+    assert "130" in followup_system
+    assert "弱踢脚顶对" in followup_system
+    assert "牌面特征" in followup_system
+    assert "本身不构成错误" in followup_system
     assert "revealed_hands" in messages[0]["content"]
     assert "决策当时完全未知" in messages[0]["content"]
     facts = _followup_facts(messages)
